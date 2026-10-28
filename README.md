@@ -49,7 +49,17 @@ This is a development MVP and is not ready for real school operations. It binds 
 
 Do not enter real pupil or guardian data or rely on this app for actual child handover. Before a pilot, complete security and privacy review, configure secure hosting, verify guardian identity/relationships, set retention and backup policies, and rehearse offline and emergency procedures.
 
-## Initial success measures
+## Goals and success measures
+
+### Product goals
+
+- **Quick and clear event recording:** Record arrival and departure events quickly, with a clear result for staff.
+- **Guardian notifications:** Notify the correct guardians through their chosen, available channels.
+- **Collector verification:** Verify that a collector is approved before a pupil is released.
+- **Traceable audit history:** Preserve a traceable record of scans, edits, exceptions, and notification delivery.
+- **Safe offline operation:** Continue operating safely when a card is missing or connectivity is temporarily unavailable.
+
+### Initial success measures
 
 - At least 98% of valid online scans are recorded successfully within 3 seconds (excluding notification-provider delay).
 - At least 99% of accepted events are associated with the correct pupil in pilot audits.
@@ -58,6 +68,86 @@ Do not enter real pupil or guardian data or rely on this app for actual child ha
 - Staff can complete the documented missing-card and offline procedures during a school drill.
 
 Targets should be confirmed against pilot conditions and provider capabilities before being treated as service commitments.
+
+## Guardian onboarding
+
+- School creates a pupil record and invites each guardian using a verified contact method.
+- Guardian proves control of the contact channel and accepts the school's privacy notice and applicable consent/acknowledgment flow.
+- Guardian sees only linked pupil(s), can set notification preferences, and can request corrections or contact the school.
+- The school—not the guardian app—approves changes to legal guardian status and pickup permissions.
+
+## Departure and pickup workflow
+
+1. Staff scans the pupil's card, or searches by name if the card is unavailable.
+2. The app displays the pupil and active approved pickup contacts.
+3. Staff selects the person collecting the pupil and follows the school's configured identity check (for example, matching a photo or checking an approved ID document).
+4. Staff confirms release. The system records the collector selected, verification method, staff member, device, location/campus, and timestamp.
+5. Guardians receive a departure alert including the collector's display name when the school has configured that disclosure.
+6. If the collector is not approved, staff sees a clear block/escalation instruction. A school administrator can authorize an exception only with a reason and a preserved audit entry.
+
+## Attendance events
+
+- **Event types:** arrival, departure, manual arrival, manual departure, correction, and authorized exception.
+- **Timestamps:** Store event timestamp in UTC and render in the campus timezone; retain server receipt time and device capture time where offline capture is supported.
+- **Event attributes:** Record staff actor, device, campus/gate, pupil, event type, source (scan/search/offline), collector and verification method for departures, and correction reason where relevant.
+- **Non-destructive corrections:** Preserve the original event when corrected; corrections create a linked event and are not destructive edits.
+- **Operating safeguards:** Allow configurable operating sessions and prevent accidental arrival/departure mode errors with confirmation prompts.
+
+## Offline or delayed sync
+
+- If the device loses connectivity, the app may queue a signed event locally only if the device is managed and encrypted.
+- The event must display Pending sync and must not claim that parents have been notified.
+- Queue records are encrypted at rest, bound to the staff account/device, expire under a defined policy, and sync idempotently to prevent duplicates.
+- Staff follows the school's paper/voice fallback procedure if the app cannot safely record an event. On reconnection, staff reconciles the manual log with an audit reason.
+- Offline mode must not permit stale pickup permissions to be treated as current without an explicit school policy and visible warning.
+
+## Dashboards and reports
+
+- **Live views:** expected pupils, arrived, departed, not yet arrived, still on site, and exceptions.
+- **Search and filter:** Search/filter by campus, class, date/session, pupil, event type, and status, based on role.
+- **Exports:** Export attendance reports with role checks and audit logging.
+- **Status indicators:** Show notification outcome and manual/offline indicators.
+- **Daily reconciliation:** Provide daily reconciliation covering pupil event timeline, missing arrival/departure patterns, duplicate scan attempts, and unresolved exceptions.
+
+## System and non-functional requirements
+
+- **Availability:** Define a pilot service objective; target 99.5% monthly availability after the pilot, excluding planned maintenance and third-party provider outages, with clear degraded-mode procedures.
+- **Performance:** Online scan lookup and event confirmation should complete within 3 seconds at the 95th percentile under expected school load.
+- **Security:** Encrypt traffic in transit and sensitive data at rest; use managed secrets, least privilege, short-lived sessions, secure backups, dependency updates, and security logging that excludes unnecessary pupil data.
+- **Privacy:** Minimize data, limit access by role/campus, support retention and deletion policies, and document every data recipient and processor.
+- **Accessibility:** Support readable contrast, large tap targets, screen readers for guardian-facing views, and plain-language error messages.
+- **Reliability:** Idempotent event writes, durable queues, backup/restore procedures, monitored notification-provider integrations, and reconciliation tools.
+- **Compatibility:** Define minimum supported Android/iOS versions after selecting the implementation stack and validating school devices.
+- **Localization:** Store timestamps in UTC, display local campus time, and plan for language, date, and phone-number formats required by launch locations.
+
+## Data model (initial)
+
+- **School:** name, policy settings, timezone, notification configuration
+- **Campus:** school, name, address/reference, timezone override, gates
+- **Pupil:** school ID, name, photo reference, class, campus, status
+- **Guardian:** name, verified contacts, account status, preferences
+- **PupilGuardian:** pupil, guardian, relationship, status, authority metadata
+- **PickupContact:** pupil, name, relationship, verification data/reference, effective dates, status
+- **Card:** pupil, random token hash/reference, issue/revoke timestamps, status
+- **StaffUser:** identity, role, assigned campus, status, authentication metadata
+- **Device:** managed device identifier, assigned staff/campus, last seen, status
+- **AttendanceEvent:** pupil, type, timestamps, actor, device, campus, source, collector, verification method, correction link, reason
+- **Notification:** event, guardian, channel, provider reference, status, timestamps, failure category
+- **AuditEntry:** actor, action, object, timestamp, reason, before/after references as appropriate
+
+## MVP scope and exclusions
+
+### Include in MVP
+
+- One school or a small pilot group, one or more campuses
+- Staff sign-in and role permissions
+- Pupil, guardian, class, and pickup-contact management
+- PVC card QR generation, revocation, and scan flow
+- Arrival/departure events and manual-card exception flow
+- Push notifications plus one SMS provider, if available in the launch market
+- Guardian pupil timeline and channel preferences
+- Live dashboard, daily report, audit history, and basic exception handling
+- Privacy notice, support process, backups, monitoring, and staff training materials
 
 ## Files
 
