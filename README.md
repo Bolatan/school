@@ -49,6 +49,16 @@ This is a development MVP and is not ready for real school operations. It binds 
 
 Do not enter real pupil or guardian data or rely on this app for actual child handover. Before a pilot, complete security and privacy review, configure secure hosting, verify guardian identity/relationships, set retention and backup policies, and rehearse offline and emergency procedures.
 
+## Initial success measures
+
+- At least 98% of valid online scans are recorded successfully within 3 seconds (excluding notification-provider delay).
+- At least 99% of accepted events are associated with the correct pupil in pilot audits.
+- At least 95% of eligible notification attempts are accepted by the selected provider; delivery rates are reported separately by channel.
+- 100% of pickup authorization changes and event corrections have an actor, timestamp, and reason.
+- Staff can complete the documented missing-card and offline procedures during a school drill.
+
+Targets should be confirmed against pilot conditions and provider capabilities before being treated as service commitments.
+
 ## Files
 
 - `server.py` — API and static file server
