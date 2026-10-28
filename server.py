@@ -79,7 +79,8 @@ def init_db():
           id TEXT PRIMARY KEY, pupil_id TEXT NOT NULL REFERENCES pupils(id), type TEXT NOT NULL,
           event_time TEXT NOT NULL, event_date TEXT NOT NULL, created_ms INTEGER NOT NULL,
           staff TEXT NOT NULL, source TEXT NOT NULL, collector TEXT, verification TEXT,
-          alert TEXT NOT NULL DEFAULT 'Demo only'
+          alert TEXT NOT NULL DEFAULT 'Demo only', reason TEXT NOT NULL DEFAULT '',
+          manual_entry INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS audit_log (
           id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -93,6 +94,12 @@ def init_db():
         CREATE INDEX IF NOT EXISTS event_date_idx ON events(event_date, created_ms);
         CREATE INDEX IF NOT EXISTS collector_pupil_idx ON collectors(pupil_id, active);
         """)
+        event_cols = [col[1] for col in c.execute("PRAGMA table_info(events)").fetchall()]
+        if "reason" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
+        if "manual_entry" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN manual_entry INTEGER NOT NULL DEFAULT 0")
+
         if not c.execute("SELECT 1 FROM users LIMIT 1").fetchone():
             salt, digest = password_hash(DEMO_PASSWORD)
             c.execute("INSERT INTO users(email,name,role,salt,password_hash) VALUES(?,?,?,?,?)",
@@ -132,7 +139,7 @@ def pupil_json(c, row):
 
 def state_json(c):
     pupils = [pupil_json(c,r) for r in c.execute("SELECT * FROM pupils WHERE active=1 ORDER BY name")]
-    events = [dict(id=r["id"],pupilId=r["pupil_id"],type=r["type"],time=r["event_time"],date=r["event_date"],createdAt=r["created_ms"],staff=r["staff"],source=r["source"],collector=r["collector"],verification=r["verification"],alert=r["alert"]) for r in c.execute("SELECT * FROM events ORDER BY created_ms DESC LIMIT 150")]
+    events = [dict(id=r["id"],pupilId=r["pupil_id"],type=r["type"],time=r["event_time"],date=r["event_date"],createdAt=r["created_ms"],staff=r["staff"],source=r["source"],collector=r["collector"],verification=r["verification"],alert=r["alert"],reason=r["reason"] if "reason" in r.keys() else "",manualEntry=bool(r["manual_entry"]) if "manual_entry" in r.keys() else False) for r in c.execute("SELECT * FROM events ORDER BY created_ms DESC LIMIT 150")]
     requests = [dict(id=r["id"],pupilId=r["pupil_id"],name=r["name"],relation=r["relation"],requestedBy=r["requested_by"],time=r["request_time"],note=r["note"]) for r in c.execute("SELECT * FROM pickup_requests WHERE status='pending' ORDER BY rowid")]
     return {"pupils":pupils,"events":events,"requests":requests,"school":{"name":"Northfield Academy","campus":"Primary campus","totalPupils":248},"notifications":"demo"}
 
@@ -372,6 +379,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def create_event(self,user,body):
         pid=str(body.get("pupilId",""))[:30].strip(); typ=str(body.get("type","")); source=str(body.get("source","Card scan"))[:50]
+        reason=str(body.get("reason",""))[:50].strip()
+        manual_entry=1 if (body.get("manualEntry") or reason in ("card_missing","card_unreadable") or source=="Manual entry" or source=="Manual ID lookup") else 0
+        if manual_entry and source not in ("Manual entry", "Manual ID lookup"):
+            source = "Manual entry"
+        if reason and reason not in ("card_missing", "card_unreadable", "other"):
+            raise ValueError("Invalid manual entry reason.")
         if typ not in ("arrival","departure"): raise ValueError("Choose arrival or departure.")
         with db() as c:
             p=c.execute("SELECT * FROM pupils WHERE id=? AND active=1",(pid,)).fetchone()
@@ -387,8 +400,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not cr: raise ValueError("That collector is not approved for this pupil.")
                 collector=cr["name"]; verification=str(body.get("verification","Photo matched"))[:60]
             n=now_local(); eid=secrets.token_urlsafe(12)
-            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(eid,pid,typ,n.strftime("%I:%M %p").lstrip("0"),n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,"Demo only"))
-            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"record_{typ}","event",eid,"",n.isoformat()))
+            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert,reason,manual_entry) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(eid,pid,typ,n.strftime("%I:%M %p").lstrip("0"),n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,"Demo only",reason,manual_entry))
+            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"record_{typ}","event",eid,f"source={source}; reason={reason}",n.isoformat()))
             return self.send_json(201,{"ok":True,"eventId":eid,"alertStatus":"demo_only","state":state_json(c)})
 
     def create_pupil(self,user,body):
