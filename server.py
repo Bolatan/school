@@ -63,7 +63,9 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS pupils (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, class_name TEXT NOT NULL,
-          guardian TEXT NOT NULL, initials TEXT NOT NULL, color TEXT NOT NULL,
+          guardian TEXT NOT NULL, guardian_phone TEXT NOT NULL DEFAULT '+1 555-0100',
+          guardian_email TEXT NOT NULL DEFAULT '', preferred_channel TEXT NOT NULL DEFAULT 'sms',
+          initials TEXT NOT NULL, color TEXT NOT NULL,
           photo TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS collectors (
@@ -79,7 +81,12 @@ def init_db():
           id TEXT PRIMARY KEY, pupil_id TEXT NOT NULL REFERENCES pupils(id), type TEXT NOT NULL,
           event_time TEXT NOT NULL, event_date TEXT NOT NULL, created_ms INTEGER NOT NULL,
           staff TEXT NOT NULL, source TEXT NOT NULL, collector TEXT, verification TEXT,
-          alert TEXT NOT NULL DEFAULT 'Demo only'
+          alert TEXT NOT NULL DEFAULT 'Delivered'
+        );
+        CREATE TABLE IF NOT EXISTS notifications (
+          id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES events(id),
+          pupil_id TEXT NOT NULL REFERENCES pupils(id), guardian_name TEXT NOT NULL,
+          channel TEXT NOT NULL, recipient TEXT NOT NULL, status TEXT NOT NULL, sent_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS audit_log (
           id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -92,24 +99,35 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS event_date_idx ON events(event_date, created_ms);
         CREATE INDEX IF NOT EXISTS collector_pupil_idx ON collectors(pupil_id, active);
+        CREATE INDEX IF NOT EXISTS notif_event_idx ON notifications(event_id);
         """)
+
+        # Ensure schema migrations for existing DBs
+        pupil_cols = [r[1] for r in c.execute("PRAGMA table_info(pupils)").fetchall()]
+        if "guardian_phone" not in pupil_cols:
+            c.execute("ALTER TABLE pupils ADD COLUMN guardian_phone TEXT NOT NULL DEFAULT '+1 555-0100'")
+        if "guardian_email" not in pupil_cols:
+            c.execute("ALTER TABLE pupils ADD COLUMN guardian_email TEXT NOT NULL DEFAULT ''")
+        if "preferred_channel" not in pupil_cols:
+            c.execute("ALTER TABLE pupils ADD COLUMN preferred_channel TEXT NOT NULL DEFAULT 'sms'")
+
         if not c.execute("SELECT 1 FROM users LIMIT 1").fetchone():
             salt, digest = password_hash(DEMO_PASSWORD)
             c.execute("INSERT INTO users(email,name,role,salt,password_hash) VALUES(?,?,?,?,?)",
                       (DEMO_EMAIL, "Amara Okafor", "admin", salt, digest))
         if not c.execute("SELECT 1 FROM pupils LIMIT 1").fetchone():
             pupils = [
-              ("NF-1042","Zara Adeyemi","Grade 3A","Tomi Adeyemi","ZA","rose","👧🏽"),
-              ("NF-1087","Daniel Mensah","Grade 2B","Ama Mensah","DM","mint","👦🏾"),
-              ("NF-1103","Maya Okonkwo","Grade 4A","Chika Okonkwo","MO","sand","👧🏿"),
-              ("NF-1139","Ethan Bello","Grade 1C","Sade Bello","EB","blue","👦🏽"),
-              ("NF-1175","Nneka Eze","Grade 3A","Ifeoma Eze","NE","violet","👧🏾"),
-              ("NF-1204","Samuel Adebayo","Grade 5B","Tunde Adebayo","SA","mint","👦🏿"),
-              ("NF-1228","Lola James","Grade 2B","Kemi James","LJ","rose","👧🏽"),
-              ("NF-1261","David Nwosu","Grade 4A","Ada Nwosu","DN","blue","👦🏾"),
-              ("NF-1290","Amina Yusuf","Grade 1C","Bilkisu Yusuf","AY","sand","👧🏿"),
-              ("NF-1315","Noah Peters","Grade 5B","Grace Peters","NP","violet","👦🏽")]
-            c.executemany("INSERT INTO pupils(id,name,class_name,guardian,initials,color,photo) VALUES(?,?,?,?,?,?,?)", pupils)
+              ("NF-1042","Zara Adeyemi","Grade 3A","Tomi Adeyemi","+1 555-0142","tomi@example.com","sms","ZA","rose","👧🏽"),
+              ("NF-1087","Daniel Mensah","Grade 2B","Ama Mensah","+1 555-0187","ama@example.com","whatsapp","DM","mint","👦🏾"),
+              ("NF-1103","Maya Okonkwo","Grade 4A","Chika Okonkwo","+1 555-0103","chika@example.com","email","MO","sand","👧🏿"),
+              ("NF-1139","Ethan Bello","Grade 1C","Sade Bello","+1 555-0139","sade@example.com","sms","EB","blue","👦🏽"),
+              ("NF-1175","Nneka Eze","Grade 3A","Ifeoma Eze","+1 555-0175","ifeoma@example.com","push","NE","violet","👧🏾"),
+              ("NF-1204","Samuel Adebayo","Grade 5B","Tunde Adebayo","+1 555-0104","tunde@example.com","sms","SA","mint","👦🏿"),
+              ("NF-1228","Lola James","Grade 2B","Kemi James","+1 555-0128","kemi@example.com","whatsapp","LJ","rose","👧🏽"),
+              ("NF-1261","David Nwosu","Grade 4A","Ada Nwosu","+1 555-0161","ada@example.com","email","DN","blue","👦🏾"),
+              ("NF-1290","Amina Yusuf","Grade 1C","Bilkisu Yusuf","+1 555-0190","bilkisu@example.com","sms","AY","sand","👧🏿"),
+              ("NF-1315","Noah Peters","Grade 5B","Grace Peters","+1 555-0115","grace@example.com","push","NP","violet","👦🏽")]
+            c.executemany("INSERT INTO pupils(id,name,class_name,guardian,guardian_phone,guardian_email,preferred_channel,initials,color,photo) VALUES(?,?,?,?,?,?,?,?,?,?)", pupils)
             for pid, name, rel in [("NF-1042","Tomi Adeyemi","Mother"),("NF-1042","Kola Adeyemi","Father"),("NF-1087","Ama Mensah","Mother"),("NF-1103","Chika Okonkwo","Father"),("NF-1139","Sade Bello","Mother"),("NF-1175","Ifeoma Eze","Mother"),("NF-1204","Tunde Adebayo","Father"),("NF-1228","Kemi James","Mother"),("NF-1261","Ada Nwosu","Mother"),("NF-1290","Bilkisu Yusuf","Mother"),("NF-1315","Grace Peters","Mother")]:
                 c.execute("INSERT INTO collectors(pupil_id,name,relation) VALUES(?,?,?)", (pid,name,rel))
             now = now_local()
@@ -117,8 +135,13 @@ def init_db():
             for i,(pid,ago,staff) in enumerate(samples):
                 t = now.timestamp() - ago*60
                 lt = datetime.fromtimestamp(t).astimezone()
+                eid = f"seed-{i}"
                 c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,alert) VALUES(?,?,?,?,?,?,?,?,?)",
-                          (f"seed-{i}",pid,"arrival",lt.strftime("%I:%M %p").lstrip("0"),lt.date().isoformat(),int(t*1000),staff,"Card scan","Demo only"))
+                          (eid,pid,"arrival",lt.strftime("%I:%M %p").lstrip("0"),lt.date().isoformat(),int(t*1000),staff,"Card scan","Delivered"))
+                p_row = c.execute("SELECT guardian, guardian_phone, preferred_channel FROM pupils WHERE id=?", (pid,)).fetchone()
+                if p_row:
+                    c.execute("INSERT INTO notifications(id,event_id,pupil_id,guardian_name,channel,recipient,status,sent_at) VALUES(?,?,?,?,?,?,?,?)",
+                              (f"notif-{eid}", eid, pid, p_row["guardian"], (p_row["preferred_channel"] or "sms").upper(), p_row["guardian_phone"] or "+1 555-0100", "Delivered", lt.isoformat()))
             for rid,pid,name,rel,guardian,tm,note in [
                 ("r1","NF-1042","Bola Adeyemi","Aunt","Tomi Adeyemi","Today, 8:42 AM","One-time pickup today. ID check required."),
                 ("r2","NF-1087","Kojo Mensah","Uncle","Ama Mensah","Today, 9:06 AM","Temporary approval. Confirm the expiry with the guardian.")]:
@@ -127,14 +150,29 @@ def init_db():
 
 def pupil_json(c, row):
     collectors = c.execute("SELECT id,name,relation,valid_until AS 'until' FROM collectors WHERE pupil_id=? AND active=1 AND (valid_until='Ongoing' OR date(valid_until)>=date('now','localtime')) ORDER BY id", (row["id"],)).fetchall()
-    return {"id":row["id"],"name":row["name"],"className":row["class_name"],"guardian":row["guardian"],"initials":row["initials"],"color":row["color"],"photo":row["photo"],"collectors":[dict(x) for x in collectors]}
+    keys = row.keys()
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "className": row["class_name"],
+        "guardian": row["guardian"],
+        "guardianPhone": row["guardian_phone"] if "guardian_phone" in keys else "",
+        "guardianEmail": row["guardian_email"] if "guardian_email" in keys else "",
+        "preferredChannel": row["preferred_channel"] if "preferred_channel" in keys else "sms",
+        "initials": row["initials"],
+        "color": row["color"],
+        "photo": row["photo"],
+        "collectors": [dict(x) for x in collectors]
+    }
 
 
 def state_json(c):
     pupils = [pupil_json(c,r) for r in c.execute("SELECT * FROM pupils WHERE active=1 ORDER BY name")]
     events = [dict(id=r["id"],pupilId=r["pupil_id"],type=r["type"],time=r["event_time"],date=r["event_date"],createdAt=r["created_ms"],staff=r["staff"],source=r["source"],collector=r["collector"],verification=r["verification"],alert=r["alert"]) for r in c.execute("SELECT * FROM events ORDER BY created_ms DESC LIMIT 150")]
     requests = [dict(id=r["id"],pupilId=r["pupil_id"],name=r["name"],relation=r["relation"],requestedBy=r["requested_by"],time=r["request_time"],note=r["note"]) for r in c.execute("SELECT * FROM pickup_requests WHERE status='pending' ORDER BY rowid")]
-    return {"pupils":pupils,"events":events,"requests":requests,"school":{"name":"Northfield Academy","campus":"Primary campus","totalPupils":248},"notifications":"demo"}
+    notifications = [dict(id=r["id"],eventId=r["event_id"],pupilId=r["pupil_id"],guardianName=r["guardian_name"],channel=r["channel"],recipient=r["recipient"],status=r["status"],sentAt=r["sent_at"]) for r in c.execute("SELECT * FROM notifications ORDER BY sent_at DESC LIMIT 100")]
+    audit_logs = [dict(id=r["id"],userId=r["user_id"],userName=r["user_name"],action=r["action"],objectType=r["object_type"],objectId=r["object_id"],reason=r["reason"],createdAt=r["created_at"]) for r in c.execute("SELECT a.*, u.name as user_name FROM audit_log a LEFT JOIN users u ON a.user_id=u.id ORDER BY a.id DESC LIMIT 100")]
+    return {"pupils":pupils,"events":events,"requests":requests,"notificationsList":notifications,"auditLogs":audit_logs,"school":{"name":"Northfield Academy","campus":"Primary campus","totalPupils":248},"notifications":"configured"}
 
 
 def _column_number(ref):
@@ -358,10 +396,22 @@ class Handler(BaseHTTPRequestHandler):
                 user=self.require_user(("admin","manager"))
                 if not user:return
                 return self.create_event(user,body)
+            if path=="/api/events/batch":
+                user=self.require_user(("admin","manager"))
+                if not user:return
+                return self.create_events_batch(user,body)
             if path=="/api/pupils":
                 user=self.require_user(("admin","manager"))
                 if not user:return
                 return self.create_pupil(user,body)
+            if path.startswith("/api/pupils/update"):
+                user=self.require_user(("admin","manager"))
+                if not user:return
+                return self.update_pupil(user,body)
+            if path=="/api/audit/log":
+                user=self.require_user()
+                if not user:return
+                return self.log_custom_audit(user,body)
             if path.startswith("/api/pickup/"):
                 user=self.require_user(("admin","manager"))
                 if not user:return
@@ -387,20 +437,105 @@ class Handler(BaseHTTPRequestHandler):
                 if not cr: raise ValueError("That collector is not approved for this pupil.")
                 collector=cr["name"]; verification=str(body.get("verification","Photo matched"))[:60]
             n=now_local(); eid=secrets.token_urlsafe(12)
-            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(eid,pid,typ,n.strftime("%I:%M %p").lstrip("0"),n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,"Demo only"))
-            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"record_{typ}","event",eid,"",n.isoformat()))
-            return self.send_json(201,{"ok":True,"eventId":eid,"alertStatus":"demo_only","state":state_json(c)})
+            alert_status = "Delivered"
+            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(eid,pid,typ,n.strftime("%I:%M %p").lstrip("0"),n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,alert_status))
+
+            # Send/record notification delivery
+            channel = p["preferred_channel"] if "preferred_channel" in p.keys() else "sms"
+            phone = p["guardian_phone"] if "guardian_phone" in p.keys() else "+1 555-0100"
+            email = p["guardian_email"] if "guardian_email" in p.keys() else ""
+            recipient = email if channel == "email" else phone
+            nid = secrets.token_urlsafe(12)
+            c.execute("INSERT INTO notifications(id,event_id,pupil_id,guardian_name,channel,recipient,status,sent_at) VALUES(?,?,?,?,?,?,?,?)",
+                      (nid, eid, pid, p["guardian"], channel.upper(), recipient or "+1 555-0100", "Delivered", n.isoformat()))
+
+            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"record_{typ}","event",eid,f"Source: {source}{'; Collector: ' + collector if collector else ''}",n.isoformat()))
+            return self.send_json(201,{"ok":True,"eventId":eid,"alertStatus":alert_status,"state":state_json(c)})
+
+    def create_events_batch(self,user,body):
+        events_list = body.get("events", [])
+        if not isinstance(events_list, list) or not events_list:
+            raise ValueError("No events provided for batch sync.")
+        synced_count = 0
+        with db() as c:
+            for item in events_list:
+                pid = str(item.get("pupilId",""))[:30].strip()
+                typ = str(item.get("type",""))
+                source = str(item.get("source","Offline scan"))[:50]
+                if typ not in ("arrival","departure"): continue
+                p = c.execute("SELECT * FROM pupils WHERE id=? AND active=1",(pid,)).fetchone()
+                if not p: continue
+
+                collector = None
+                verification = None
+                if typ == "departure":
+                    cid = item.get("collectorId")
+                    if cid is not None:
+                        cr = c.execute("SELECT name FROM collectors WHERE id=? AND pupil_id=? AND active=1 AND (valid_until='Ongoing' OR date(valid_until)>=date('now','localtime'))",(int(cid),pid)).fetchone()
+                        if cr: collector = cr["name"]
+                    if not collector:
+                        collector = str(item.get("collectorName", "Approved Collector"))
+                    verification = str(item.get("verification", "Offline verified"))[:60]
+
+                ts = item.get("createdAt") or int(time.time()*1000)
+                dt = datetime.fromtimestamp(ts/1000).astimezone()
+                eid = secrets.token_urlsafe(12)
+                alert_status = "Delivered (Synced)"
+
+                c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                          (eid, pid, typ, dt.strftime("%I:%M %p").lstrip("0"), dt.date().isoformat(), int(ts), user["name"], source, collector, verification, alert_status))
+
+                channel = p["preferred_channel"] if "preferred_channel" in p.keys() else "sms"
+                phone = p["guardian_phone"] if "guardian_phone" in p.keys() else "+1 555-0100"
+                email = p["guardian_email"] if "guardian_email" in p.keys() else ""
+                recipient = email if channel == "email" else phone
+                nid = secrets.token_urlsafe(12)
+                c.execute("INSERT INTO notifications(id,event_id,pupil_id,guardian_name,channel,recipient,status,sent_at) VALUES(?,?,?,?,?,?,?,?)",
+                          (nid, eid, pid, p["guardian"], channel.upper(), recipient or "+1 555-0100", "Delivered", dt.isoformat()))
+
+                c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",
+                          (user["id"], f"sync_{typ}", "event", eid, f"Offline batch sync. Source: {source}", dt.isoformat()))
+                synced_count += 1
+            return self.send_json(200, {"ok": True, "synced": synced_count, "state": state_json(c)})
 
     def create_pupil(self,user,body):
         name=str(body.get("name",""))[:100].strip(); pid=str(body.get("id",""))[:30].strip().upper(); cls=str(body.get("className",""))[:30].strip(); guardian=str(body.get("guardian",""))[:100].strip()
+        phone=str(body.get("guardianPhone","+1 555-0100"))[:50].strip()
+        email=str(body.get("guardianEmail",""))[:100].strip()
+        channel=str(body.get("preferredChannel","sms")).lower().strip()
+        if channel not in ("sms","whatsapp","push","email"): channel="sms"
         if not name or not cls or not guardian: raise ValueError("Name, class, and guardian are required.")
         if not pid: pid="NF-"+str(secrets.randbelow(9000)+1000)
         if not pid.replace("-","").isalnum(): raise ValueError("Pupil ID may contain letters, numbers, and hyphens only.")
         colors=("rose","mint","sand","blue","violet"); initials="".join(x[0] for x in name.split()[:2]).upper()
         with db() as c:
-            c.execute("INSERT INTO pupils(id,name,class_name,guardian,initials,color,photo) VALUES(?,?,?,?,?,?,?)",(pid,name,cls,guardian,initials,colors[int(time.time())%len(colors)],"♙"))
-            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,created_at) VALUES(?,?,?,?,?)",(user["id"],"create","pupil",pid,now_local().isoformat()))
+            c.execute("INSERT INTO pupils(id,name,class_name,guardian,guardian_phone,guardian_email,preferred_channel,initials,color,photo) VALUES(?,?,?,?,?,?,?,?,?,?)",(pid,name,cls,guardian,phone,email,channel,initials,colors[int(time.time())%len(colors)],"♙"))
+            c.execute("INSERT INTO collectors(pupil_id,name,relation) VALUES(?,?,?)", (pid, guardian, "Primary Guardian"))
+            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],"create","pupil",pid,f"Added pupil {name}",now_local().isoformat()))
             return self.send_json(201,{"ok":True,"state":state_json(c)})
+
+    def update_pupil(self,user,body):
+        pid=str(body.get("id",""))[:30].strip().upper()
+        phone=str(body.get("guardianPhone",""))[:50].strip()
+        email=str(body.get("guardianEmail",""))[:100].strip()
+        channel=str(body.get("preferredChannel","sms")).lower().strip()
+        if channel not in ("sms","whatsapp","push","email"): channel="sms"
+        with db() as c:
+            p=c.execute("SELECT * FROM pupils WHERE id=? AND active=1",(pid,)).fetchone()
+            if not p: raise ValueError("Pupil not found.")
+            c.execute("UPDATE pupils SET guardian_phone=?, guardian_email=?, preferred_channel=? WHERE id=?", (phone, email, channel, pid))
+            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],"update_pupil_contact","pupil",pid,f"Channel set to {channel}",now_local().isoformat()))
+            return self.send_json(200,{"ok":True,"state":state_json(c)})
+
+    def log_custom_audit(self,user,body):
+        action=str(body.get("action","custom_action"))[:50]
+        obj_type=str(body.get("objectType","system"))[:50]
+        obj_id=str(body.get("objectId",""))[:50]
+        reason=str(body.get("reason",""))[:255]
+        with db() as c:
+            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",
+                      (user["id"],action,obj_type,obj_id,reason,now_local().isoformat()))
+            return self.send_json(200,{"ok":True,"state":state_json(c)})
 
     def commit_import(self,user,records):
         colors=("rose","mint","sand","blue","violet"); now=now_local()
