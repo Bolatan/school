@@ -196,5 +196,58 @@ class ServerTestCase(unittest.TestCase):
         })
         self.assertEqual(status, 200)
 
+    def test_manual_entry_reasons_and_departure_collector(self):
+        session_token = self.login()
+        # Create pupil
+        status, data, _ = self.make_request("/api/pupils", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "name": "Manual Pupil",
+            "id": "NF-7777",
+            "className": "Grade 2B",
+            "guardian": "Manual Guardian"
+        })
+        self.assertEqual(status, 201)
+
+        # Record manual arrival due to card_missing
+        status, data, _ = self.make_request("/api/events", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-7777",
+            "type": "arrival",
+            "source": "Manual entry",
+            "reason": "card_missing"
+        })
+        self.assertEqual(status, 201)
+        event = next(e for e in data["state"]["events"] if e["id"] == data["eventId"])
+        self.assertTrue(event["manualEntry"])
+        self.assertEqual(event["reason"], "card_missing")
+
+        # Attempt departure without collector (should fail)
+        status, data, _ = self.make_request("/api/events", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-7777",
+            "type": "departure",
+            "source": "Manual entry",
+            "reason": "card_unreadable"
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("Select an approved collector", data["error"])
+
+        # Add approved collector
+        with server.db() as c:
+            c.execute("INSERT INTO collectors(pupil_id, name, relation) VALUES(?,?,?)", ("NF-7777", "Manual Guardian", "Mother"))
+            cid = c.execute("SELECT id FROM collectors WHERE pupil_id='NF-7777'").fetchone()["id"]
+
+        # Record manual departure with approved collector
+        status, data, _ = self.make_request("/api/events", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-7777",
+            "type": "departure",
+            "source": "Manual entry",
+            "reason": "card_unreadable",
+            "collectorId": cid,
+            "verification": "Photo matched"
+        })
+        self.assertEqual(status, 201)
+        event = next(e for e in data["state"]["events"] if e["id"] == data["eventId"])
+        self.assertTrue(event["manualEntry"])
+        self.assertEqual(event["reason"], "card_unreadable")
+        self.assertEqual(event["collector"], "Manual Guardian")
+
 if __name__ == "__main__":
     unittest.main()
