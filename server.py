@@ -457,6 +457,7 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError: raise ValueError("Choose a valid pickup approval expiry date.")
                 if expiry < now_local().date(): raise ValueError("Pickup approval expiry cannot be in the past.")
                 if not exists:c.execute("INSERT INTO collectors(pupil_id,name,relation,valid_until) VALUES(?,?,?,?)",(r["pupil_id"],r["name"],r["relation"],expiry.isoformat()))
+                else:c.execute("UPDATE collectors SET valid_until=? WHERE pupil_id=? AND lower(name)=lower(?) AND active=1",(expiry.isoformat(),r["pupil_id"],r["name"]))
             c.execute("UPDATE pickup_requests SET status=? WHERE id=?",(action+"d" if action=="approve" else "declined",rid))
             c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"pickup_{action}","pickup_request",rid,"School admin review",now_local().isoformat()))
             return self.send_json(200,{"ok":True,"state":state_json(c)})
