@@ -21,6 +21,17 @@ From **Pupils**, choose **Upload roster** and select a `.csv` or `.xlsx` file. T
 
 Use one pupil per row. IDs must be unique, and every field is required. Upload first displays a preview. The import is all-or-nothing: any invalid or duplicate row blocks the commit. Maximum file size is 8 MB and maximum roster size is 5,000 pupils. Existing pupil IDs are rejected. XLSX files must contain a sheet named `Pupils` and are parsed with Python's built-in ZIP/XML libraries.
 
+## Users and roles
+
+| Role | Main responsibilities | Access boundaries |
+|---|---|---|
+| Parent/guardian | View linked pupils, receive event alerts, manage own contact preferences, request record correction | Only linked pupils; cannot edit school attendance or pickup approvals directly |
+| Authorized collector | May collect a pupil when approved by a guardian/school | No general app account required in MVP; identity checked by staff against school policy |
+| Gate/attendance staff | Scan cards, record events, verify collector, resolve basic exceptions | Assigned campus and operational actions only |
+| Teacher | View relevant class attendance and report exceptions | Class-level access as configured; no unnecessary contact details |
+| School administrator | Manage pupils, guardians, pickup permissions, staff, devices, reports | Campus scope; sensitive changes are audited |
+| Platform support | Diagnose service issues | Time-limited, logged, least-privilege access; no routine browsing of pupil records |
+
 ## Staff accounts and roles
 
 Only an **Admin** can open **User management**, create accounts, change roles, or disable/enable accounts. An administrator sets a temporary initial password of at least 12 characters and shares it privately. Password reset is not implemented in this MVP.
