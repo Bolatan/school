@@ -160,6 +160,120 @@ Targets should be confirmed against pilot conditions and provider capabilities b
 - Live dashboard, daily report, audit history, and basic exception handling
 - Privacy notice, support process, backups, monitoring, and staff training materials
 
+## Production deployment guidance (Vercel, Next.js, Express.js, MongoDB)
+
+To transition Gatewise from a local Python/SQLite MVP into a production cloud deployment, deploy the application on **Vercel** using **Next.js**, **Node.js**, **Express.js**, and **MongoDB**.
+
+### Architecture overview
+
+- **Frontend & App Framework:** **Next.js** for modern UI rendering, asset optimization, and client-side routing.
+- **Backend API Layer:** **Express.js** running on **Node.js** serverless functions via Vercel (or Next.js Route Handlers / custom server middleware).
+- **Database Layer:** **MongoDB Atlas** for multi-region cloud data storage, replacing local SQLite (`gatewise.sqlite3`).
+
+### Prerequisites
+
+1. **Vercel Account:** Linked to your Git repository (GitHub, GitLab, or Bitbucket).
+2. **MongoDB Atlas Cluster:** Provisioned database instance with network access and user credentials.
+3. **Node.js:** Node.js v18 LTS or v20 LTS installed locally for development and build processes.
+
+### SQLite to MongoDB data migration
+
+When transitioning from the local SQLite schema to MongoDB collections:
+- **`pupils`**: Convert to a `Pupil` collection (`_id`, `pupil_id`, `name`, `class_name`, `guardian_name`, `created_at`).
+- **`staff_users`**: Convert to a `User` collection (`_id`, `email`, `password_hash`, `salt`, `role`, `status`, `created_at`).
+- **`attendance_events`**: Convert to an `AttendanceEvent` collection (`_id`, `pupil_id`, `event_type`, `collector_name`, `verification_method`, `actor_id`, `timestamp`).
+- **`sessions`**: Use stateless JWT tokens or a MongoDB-backed session store (e.g., `connect-mongo`).
+- **`audit_entries`**: Convert to an `AuditEntry` collection for tracking security and administrative actions.
+
+### Vercel deployment configuration
+
+#### 1. Directory & project setup
+
+In a Next.js + Express setup on Vercel, organize serverless API routes under `api/` or integrate Express within Next.js API routes / custom server entry points.
+
+Example `vercel.json` configuration for Express routing:
+
+```json
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api/index.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "package.json",
+      "use": "@vercel/next"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/index.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/$1"
+    }
+  ]
+}
+```
+
+#### 2. Environment variables
+
+Configure the following environment variables in Vercel project settings (**Settings > Environment Variables**):
+
+| Variable Name | Description | Example |
+| --- | --- | --- |
+| `MONGODB_URI` | MongoDB Atlas connection string | `mongodb+srv://<user>:<password>@cluster0.mongodb.net/gatewise?retryWrites=true&w=majority` |
+| `NODE_ENV` | Deployment environment | `production` |
+| `JWT_SECRET` | Secret key for signing authorization tokens | `<random-64-char-hex-string>` |
+| `SESSION_SECRET` | Secret key for session cookie encryption | `<random-64-char-hex-string>` |
+
+#### 3. Database connection pooling in Serverless
+
+Because Vercel executes Node.js/Express as serverless functions, reuse the cached MongoDB client across lambda invocations to avoid exhausting database connection limits:
+
+```javascript
+// lib/mongodb.js
+import mongoose from 'mongoose';
+
+let cached = global.mongoose || { conn: null, promise: null };
+
+export async function connectToDatabase() {
+  if (cached.conn) return cached.conn;
+
+  if (!cached.promise) {
+    cached.promise = mongoose.connect(process.env.MONGODB_URI, {
+      bufferCommands: false,
+    }).then((mongoose) => mongoose);
+  }
+
+  cached.conn = await cached.promise;
+  return cached.conn;
+}
+```
+
+### Deployment steps
+
+1. **Push Repository:** Commit code and push to your connected Git provider repository.
+2. **Import Project into Vercel:**
+   - Go to [Vercel Dashboard](https://vercel.com/dashboard) -> **Add New** -> **Project**.
+   - Select your Git repository.
+3. **Configure Build Settings:**
+   - **Framework Preset:** Next.js
+   - **Build Command:** `npm run build` or `next build`
+   - **Output Directory:** `.next`
+4. **Set Environment Variables:** Add `MONGODB_URI`, `JWT_SECRET`, and `NODE_ENV`.
+5. **Deploy:** Click **Deploy**. Vercel will build and assign production URLs with automatically managed SSL certificates.
+
+### Production operational checklists
+
+- [ ] **Database Network Access:** Configure MongoDB Atlas IP Access List (allow Vercel connection origins or IP ranges).
+- [ ] **HTTPS & Security Headers:** Ensure HTTPS enforcement (enabled by default on Vercel) and set standard security headers (`Helmet.js` for Express).
+- [ ] **Session Management:** Revoke stale sessions using JWT expiry or MongoDB session invalidation.
+- [ ] **Audit Logging:** Retain event logs and administrative operations in MongoDB with structured indexing on `timestamp` and `pupil_id`.
+
 ## Files
 
 - `server.py` — API and static file server
