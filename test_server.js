@@ -262,3 +262,12 @@ test('API 404 handling and static templates', async () => {
   assert.equal(templateRes.status, 200);
   assert.ok(templateRes.text.includes('pupil_id,pupil_name,class_name,guardian_name'));
 });
+
+test('Serverless handler (api/index.js)', async () => {
+  const handler = require('./api/index');
+  const serverlessRequest = supertest(handler);
+
+  const res = await serverlessRequest.get('/api/me');
+  assert.equal(res.status, 200);
+  assert.equal(res.body.user, null);
+});
