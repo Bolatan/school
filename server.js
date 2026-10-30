@@ -43,6 +43,57 @@ app.use((req, res, next) => {
   next();
 });
 
+// Ensure DB connection for serverless or standalone invocation
+let dbInitPromise = null;
+
+async function initDb() {
+  if (mongoose.connection.readyState === 1) {
+    return;
+  }
+  if (!dbInitPromise) {
+    dbInitPromise = (async () => {
+      if (mongoose.connection.readyState !== 1) {
+        const net = require('net');
+        const isMongoUp = await new Promise((resolve) => {
+          try {
+            const url = new URL(MONGODB_URI);
+            const port = Number(url.port) || 27017;
+            const host = url.hostname || '127.0.0.1';
+            const socket = new net.Socket();
+            socket.setTimeout(1000);
+            socket.on('connect', () => { socket.destroy(); resolve(true); });
+            socket.on('timeout', () => { socket.destroy(); resolve(false); });
+            socket.on('error', () => { resolve(false); });
+            socket.connect(port, host);
+          } catch {
+            resolve(false);
+          }
+        });
+
+        if (isMongoUp) {
+          await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 2000 });
+        } else {
+          console.log('Local MongoDB not running. Launching in-memory Mongo server...');
+          const { MongoMemoryServer } = require('mongodb-memory-server');
+          const mongod = await MongoMemoryServer.create();
+          await mongoose.connect(mongod.getUri());
+        }
+        await seedInitialData();
+      }
+    })();
+  }
+  await dbInitPromise;
+}
+
+app.use(async (req, res, next) => {
+  try {
+    await initDb();
+    next();
+  } catch (err) {
+    res.status(500).json({ error: 'Database connection failed: ' + err.message });
+  }
+});
+
 // Middleware for authentication
 async function getSessionUser(req) {
   const token = req.cookies.gw_session;
@@ -787,19 +838,12 @@ app.post('/api/export/activity', requireAuth(), async (req, res) => {
   }
 });
 
+
 // Serve static files
 app.use(express.static(path.join(__dirname)));
 
 async function startServer() {
-  try {
-    await mongoose.connect(MONGODB_URI, { serverSelectionTimeoutMS: 2000 });
-  } catch (e) {
-    console.log('Local MongoDB not running. Launching in-memory Mongo server...');
-    const { MongoMemoryServer } = require('mongodb-memory-server');
-    const mongod = await MongoMemoryServer.create();
-    await mongoose.connect(mongod.getUri());
-  }
-  await seedInitialData();
+  await initDb();
   return app.listen(PORT, HOST, () => {
     console.log(`Gatewise (Node/Express/MongoDB) is available at http://${HOST}:${PORT}`);
     console.log(`Demo staff sign-in: ${DEMO_EMAIL} / ${DEMO_PASSWORD}`);
@@ -813,4 +857,9 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, startServer, seedInitialData };
+app.app = app;
+app.default = app;
+app.startServer = startServer;
+app.seedInitialData = seedInitialData;
+
+module.exports = app;
