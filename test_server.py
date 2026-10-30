@@ -249,5 +249,37 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(event["reason"], "card_unreadable")
         self.assertEqual(event["collector"], "Manual Guardian")
 
+    def test_trailing_slash_and_static_template_and_activity_export(self):
+        session_token = self.login()
+        # Test GET /api/state/ with trailing slash
+        status, data, _ = self.make_request("/api/state/", cookies_dict={"gw_session": session_token})
+        self.assertEqual(status, 200)
+        self.assertIn("pupils", data)
+
+        # Test POST /api/login/ with trailing slash
+        status, data, _ = self.make_request("/api/login/", method="POST", data={
+            "email": server.DEMO_EMAIL,
+            "password": server.DEMO_PASSWORD
+        })
+        self.assertEqual(status, 200)
+
+        # Test static template file serving
+        url = self.base_url + "/pupil-import-template.csv"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req) as resp:
+            self.assertEqual(resp.status, 200)
+            content = resp.read().decode("utf-8")
+            self.assertIn("pupil_id,pupil_name,class_name,guardian_name", content)
+
+        # Test POST /api/export/activity
+        status, data, _ = self.make_request("/api/export/activity", method="POST", cookies_dict={"gw_session": session_token}, data={})
+        self.assertEqual(status, 200)
+        self.assertTrue(data.get("ok"))
+
+        # Test unknown /api/ route returns JSON 404
+        status, data, _ = self.make_request("/api/unknown_endpoint", cookies_dict={"gw_session": session_token})
+        self.assertEqual(status, 404)
+        self.assertEqual(data.get("error"), "Endpoint not found.")
+
 if __name__ == "__main__":
     unittest.main()

@@ -787,6 +787,10 @@ app.post('/api/export/activity', requireAuth(), async (req, res) => {
   }
 });
 
+app.all('/api/*', (req, res) => {
+  res.status(404).json({ error: 'Endpoint not found.' });
+});
+
 // Serve static files
 app.use(express.static(path.join(__dirname)));
 
