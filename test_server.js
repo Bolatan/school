@@ -248,3 +248,17 @@ test('User management and Audit logging', async () => {
   const auditCount = await AuditEntry.countDocuments({ action: 'export_csv' });
   assert.ok(auditCount >= 1);
 });
+
+test('API 404 handling and static templates', async () => {
+  const cookie = await login();
+
+  const notFoundRes = await request
+    .get('/api/nonexistent')
+    .set('Cookie', cookie);
+  assert.equal(notFoundRes.status, 404);
+  assert.equal(notFoundRes.body.error, 'Endpoint not found.');
+
+  const templateRes = await request.get('/pupil-import-template.csv');
+  assert.equal(templateRes.status, 200);
+  assert.ok(templateRes.text.includes('pupil_id,pupil_name,class_name,guardian_name'));
+});

@@ -259,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
         resolved = (ROOT / path).resolve()
         if ROOT.resolve() not in resolved.parents and resolved != ROOT.resolve(): return self.send_error(404)
         if not resolved.is_file(): return self.send_error(404)
-        types={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".svg":"image/svg+xml"}
+        types={".html":"text/html; charset=utf-8",".css":"text/css; charset=utf-8",".js":"text/javascript; charset=utf-8",".svg":"image/svg+xml",".csv":"text/csv; charset=utf-8",".xlsx":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
         raw=resolved.read_bytes(); self.send_response(200); self.send_header("Content-Type",types.get(resolved.suffix,"application/octet-stream")); self.send_header("Content-Length",str(len(raw))); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("Referrer-Policy","same-origin"); self.send_header("Content-Security-Policy","default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; script-src 'self'; connect-src 'self'; media-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"); self.end_headers(); self.wfile.write(raw)
 
     def read_json(self):
@@ -289,8 +289,17 @@ class Handler(BaseHTTPRequestHandler):
         if user["role"] not in roles: self.send_json(403,{"error":"You do not have permission to do that."}); return None
         return user
 
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", self.headers.get("Origin") or "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Credentials", "true")
+        self.end_headers()
+
     def do_GET(self):
         path=unquote(urlparse(self.path).path)
+        if path!="/" and path.endswith("/"): path=path.rstrip("/")
         if path=="/api/me":
             user=self.session_user(); return self.send_json(200,{"user":{k:user[k] for k in ("id","email","name","role")} if user else None})
         if path=="/api/state":
@@ -299,12 +308,18 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/users":
             if not self.require_user(("admin",)):return
             with db() as c:return self.send_json(200,{"users":users_json(c)})
+        if path.startswith("/api/"):
+            return self.send_json(404,{"error":"Endpoint not found."})
         if path=="/" or path=="/index.html": return self.send_file("index.html")
-        if path in ("/app.js","/styles.css"): return self.send_file(path[1:])
+        file_path = path.lstrip("/")
+        resolved = (ROOT / file_path).resolve()
+        if ROOT.resolve() in resolved.parents and resolved.is_file():
+            return self.send_file(file_path)
         return self.send_error(404)
 
     def do_POST(self):
         path=unquote(urlparse(self.path).path)
+        if path!="/" and path.endswith("/"): path=path.rstrip("/")
         if not self.origin_ok(): return self.send_json(403,{"error":"Cross-origin request rejected."})
         try: body=self.read_json()
         except Exception as exc: return self.send_json(400,{"error":str(exc) or "Invalid JSON."})
@@ -358,6 +373,12 @@ class Handler(BaseHTTPRequestHandler):
             if not user:return
             try:return self.update_user(user,path.rsplit("/",1)[-1],body)
             except ValueError as exc:return self.send_json(400,{"error":str(exc)})
+        if path=="/api/export/activity":
+            user=self.require_user()
+            if not user:return
+            with db() as c:
+                c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],"export_csv","activity_log",now_local().date().isoformat(),"User exported activity CSV",now_local().isoformat()))
+            return self.send_json(200,{"ok":True})
         user=self.require_user()
         if not user:return
         try:
@@ -373,7 +394,7 @@ class Handler(BaseHTTPRequestHandler):
                 user=self.require_user(("admin","manager"))
                 if not user:return
                 return self.resolve_pickup(user,path.rsplit("/",1)[-1],body)
-            return self.send_json(404,{"error":"Not found."})
+            return self.send_json(404,{"error":"Endpoint not found."})
         except ValueError as exc:return self.send_json(400,{"error":str(exc)})
         except sqlite3.IntegrityError:return self.send_json(409,{"error":"That record already exists or is no longer available."})
 
