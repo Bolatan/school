@@ -23,7 +23,7 @@ const {
 const app = express();
 const PORT = process.env.PORT || 8080;
 const HOST = process.env.GATEWISE_HOST || '127.0.0.1';
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/gatewise';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://bolatan_db_user:D77w1DF4Ecpl4YOv@cluster0.hrlxnk2.mongodb.net/gatewise?retryWrites=true&w=majority';
 const SESSION_SECONDS = 8 * 60 * 60;
 
 const IMPORT_STAGES = new Map();
