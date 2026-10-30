@@ -1,2 +1,8 @@
 __pycache__/
 *.pyc
+node_modules/
+.env
+app-data/*.sqlite3
+dist/
+.next/
+*.log
