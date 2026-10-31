@@ -279,3 +279,90 @@ test('Serverless handler (api/index.js)', async () => {
   assert.equal(loginRes.status, 200);
   assert.equal(loginRes.body.user.email, DEMO_EMAIL);
 });
+
+test('Manual entry: missing card or unreadable QR, photo verification, and departure collector check', async () => {
+  const cookie = await login();
+
+  // Create test pupil
+  const createPupilRes = await request
+    .post('/api/pupils')
+    .set('Cookie', cookie)
+    .send({
+      name: 'Manual Pupil Node',
+      id: 'NF-6666',
+      className: 'Grade 3B',
+      guardian: 'Sarah Node'
+    });
+  assert.equal(createPupilRes.status, 201);
+
+  // 1. Record manual arrival with reason 'card_missing'
+  const arrRes = await request
+    .post('/api/events')
+    .set('Cookie', cookie)
+    .send({
+      pupilId: 'NF-6666',
+      type: 'arrival',
+      source: 'Manual entry',
+      reason: 'card_missing'
+    });
+  assert.equal(arrRes.status, 201);
+  const arrEvent = arrRes.body.state.events.find(e => e.id === arrRes.body.eventId);
+  assert.equal(arrEvent.manualEntry, true);
+  assert.equal(arrEvent.reason, 'card_missing');
+  assert.equal(arrEvent.source, 'Manual entry');
+
+  // 2. Reject departure without collector verification
+  const depFailRes = await request
+    .post('/api/events')
+    .set('Cookie', cookie)
+    .send({
+      pupilId: 'NF-6666',
+      type: 'departure',
+      source: 'Manual entry',
+      reason: 'card_unreadable'
+    });
+  assert.equal(depFailRes.status, 400);
+  assert.ok(depFailRes.body.error.includes('Select an approved collector'));
+
+  // 3. Reject invalid manual entry reason
+  const invalidReasonRes = await request
+    .post('/api/events')
+    .set('Cookie', cookie)
+    .send({
+      pupilId: 'NF-6666',
+      type: 'departure',
+      source: 'Manual entry',
+      reason: 'photographed_qr_code'
+    });
+  assert.equal(invalidReasonRes.status, 400);
+  assert.equal(invalidReasonRes.body.error, 'Invalid manual entry reason.');
+
+  // 4. Add approved collector and verify departure with reason 'card_unreadable'
+  const pupilDoc = await Pupil.findOne({ id: 'NF-6666' });
+  pupilDoc.collectors.push({
+    id: 1,
+    name: 'Sarah Node',
+    relation: 'Mother',
+    until: 'Ongoing',
+    active: true
+  });
+  await pupilDoc.save();
+
+  const depRes = await request
+    .post('/api/events')
+    .set('Cookie', cookie)
+    .send({
+      pupilId: 'NF-6666',
+      type: 'departure',
+      source: 'Manual entry',
+      reason: 'card_unreadable',
+      collectorId: 1,
+      verification: 'Photo matched'
+    });
+  assert.equal(depRes.status, 201);
+  const depEvent = depRes.body.state.events.find(e => e.id === depRes.body.eventId);
+  assert.equal(depEvent.manualEntry, true);
+  assert.equal(depEvent.reason, 'card_unreadable');
+  assert.equal(depEvent.collector, 'Sarah Node');
+  assert.equal(depEvent.verification, 'Photo matched');
+});

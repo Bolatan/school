@@ -455,6 +455,9 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
       source = 'Manual entry';
     }
 
+    if (reason && (source === 'Manual entry' || source === 'Manual ID lookup') && (typ === 'arrival' || typ === 'departure') && !['card_missing', 'card_unreadable', 'other'].includes(reason)) {
+      return res.status(400).json({ error: 'Invalid manual entry reason.' });
+    }
     if (!['arrival', 'departure', 'manual_arrival', 'manual_departure', 'correction', 'authorized_exception'].includes(typ)) {
       return res.status(400).json({ error: 'Choose arrival or departure.' });
     }
