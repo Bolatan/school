@@ -158,7 +158,13 @@ async function getStateJson() {
     alert: e.alert,
     reason: e.reason || '',
     manualEntry: Boolean(e.manualEntry),
-    correctionLink: e.correctionLink || null
+    correctionLink: e.correctionLink || null,
+    clientEventId: e.clientEventId || null,
+    offlineQueued: Boolean(e.offlineQueued),
+    deviceCapturedAt: e.deviceCapturedAt || null,
+    serverReceivedAt: e.serverReceivedAt || null,
+    syncStatus: e.syncStatus || 'synced',
+    reconciliationAuditReason: e.reconciliationAuditReason || ''
   }));
 
   const requestDocs = await PickupRequest.find({ status: 'pending' }).sort({ createdAt: 1 });
@@ -185,6 +191,7 @@ async function getStateJson() {
       sessions: ["Morning Arrival (07:30 - 08:30)", "Standard Day", "Afternoon Dismissal (14:30 - 15:30)"],
       devices: ["Primary Gate Terminal", "East Gate Handheld", "Bus Loop Scanner", "Admin Front Desk"],
       discloseCollectorName: schoolSettingsMap.discloseCollectorName !== undefined ? Boolean(schoolSettingsMap.discloseCollectorName) : true,
+      allowOfflineStalePickupPolicy: schoolSettingsMap.allowOfflineStalePickupPolicy !== undefined ? Boolean(schoolSettingsMap.allowOfflineStalePickupPolicy) : false,
       totalPupils: 248
     },
     notificationsStatus: "active"
@@ -442,156 +449,289 @@ app.post('/api/pupils', requireAuth(['admin', 'manager']), async (req, res) => {
   }
 });
 
-app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
-  try {
-    const pid = String(req.body.pupilId || '').trim().toUpperCase().slice(0, 30);
-    const typ = String(req.body.type || '');
-    let source = String(req.body.source || 'Card scan').slice(0, 50);
-    const reason = String(req.body.reason || '').trim().slice(0, 200);
-    const correctionLink = req.body.correctionLink ? String(req.body.correctionLink) : null;
+async function processEventRecord(user, eventData) {
+  const pid = String(eventData.pupilId || '').trim().toUpperCase().slice(0, 30);
+  const typ = String(eventData.type || '');
+  let source = String(eventData.source || 'Card scan').slice(0, 50);
+  const reason = String(eventData.reason || '').trim().slice(0, 200);
+  const correctionLink = eventData.correctionLink ? String(eventData.correctionLink) : null;
+  const clientEventId = eventData.clientEventId ? String(eventData.clientEventId).trim() : null;
+  const isOfflineSync = Boolean(eventData.offlineQueued);
+  const isReconciled = Boolean(eventData.manualFallbackReconciled);
+  const reconciliationAuditReason = eventData.reconciliationAuditReason ? String(eventData.reconciliationAuditReason).trim() : '';
 
-    let manualEntry = Boolean(
-      req.body.manualEntry ||
-      reason === 'card_missing' ||
-      reason === 'card_unreadable' ||
-      source === 'Manual entry' ||
-      source === 'Manual ID lookup' ||
-      typ === 'authorized_exception' ||
-      typ === 'correction'
+  // 1. Idempotent deduplication check
+  if (clientEventId) {
+    const existingClientEvent = await AttendanceEvent.findOne({ clientEventId });
+    if (existingClientEvent) {
+      return {
+        isDuplicate: true,
+        eventId: existingClientEvent.id,
+        event: existingClientEvent,
+        message: 'Event was already synced idempotently.'
+      };
+    }
+  }
+
+  // 2. Offline queue validation: device must be managed and encrypted
+  if (isOfflineSync) {
+    const deviceManaged = eventData.deviceManaged !== false && eventData.deviceManaged !== 'false';
+    const deviceEncrypted = eventData.deviceEncrypted !== false && eventData.deviceEncrypted !== 'false';
+    if (!deviceManaged || !deviceEncrypted) {
+      throw new Error('Offline sync rejected: The device must be managed and encrypted to queue events locally.');
+    }
+
+    // Expiration check: queue records expire under a defined policy (e.g. 24 hours / 86400000 ms)
+    const MAX_QUEUE_AGE_MS = 24 * 60 * 60 * 1000;
+    const deviceCapturedAt = Number(eventData.deviceCapturedAt) || Date.now();
+    if (Date.now() - deviceCapturedAt > MAX_QUEUE_AGE_MS) {
+      throw new Error('Offline queued event has expired under the defined queue retention policy (exceeds 24 hours).');
+    }
+
+    // Staff binding validation
+    if (eventData.staffEmail && eventData.staffEmail.toLowerCase() !== user.email.toLowerCase()) {
+      throw new Error('Offline queued event signature does not match the active staff account.');
+    }
+  }
+
+  // 3. Fallback reconciliation validation
+  if (isReconciled && !reconciliationAuditReason) {
+    throw new Error('Manual paper/voice fallback reconciliation requires an explicit audit reason.');
+  }
+
+  let manualEntry = Boolean(
+    eventData.manualEntry ||
+    reason === 'card_missing' ||
+    reason === 'card_unreadable' ||
+    source === 'Manual entry' ||
+    source === 'Manual ID lookup' ||
+    source === 'Paper/voice manual fallback' ||
+    isReconciled ||
+    typ === 'authorized_exception' ||
+    typ === 'correction'
+  );
+
+  if (manualEntry && source !== 'Manual entry' && source !== 'Manual ID lookup' && source !== 'Authorized exception' && source !== 'Non-destructive correction' && source !== 'Paper/voice manual fallback') {
+    source = isReconciled ? 'Paper/voice manual fallback' : 'Manual entry';
+  }
+
+  if (!['arrival', 'departure', 'manual_arrival', 'manual_departure', 'correction', 'authorized_exception'].includes(typ)) {
+    throw new Error('Choose arrival or departure.');
+  }
+
+  const pupil = await Pupil.findOne({ id: pid, active: true });
+  if (!pupil) {
+    throw new Error('Pupil ID not found.');
+  }
+
+  const todayStr = formatDate(nowLocal());
+  const prevEvent = await AttendanceEvent.findOne({ pupilId: pid, date: todayStr }).sort({ createdAt: -1 });
+
+  if (typ === 'arrival' && prevEvent && (prevEvent.type === 'arrival' || prevEvent.type === 'manual_arrival')) {
+    throw new Error(`${pupil.name} already has an arrival recorded today.`);
+  }
+  if ((typ === 'departure' || typ === 'authorized_exception') && (!prevEvent || (prevEvent.type !== 'arrival' && prevEvent.type !== 'manual_arrival'))) {
+    throw new Error(`Record and verify ${pupil.name}'s arrival before departure.`);
+  }
+
+  let collector = null;
+  let verification = null;
+  const device = String(eventData.device || 'Primary Gate Terminal').slice(0, 80);
+  const campus = String(eventData.campus || 'Primary campus').slice(0, 50);
+  const gate = String(eventData.gate || 'Main gate').slice(0, 50);
+
+  if (typ === 'departure') {
+    // If departure occurred offline, check school offline stale pickup policy
+    if (isOfflineSync) {
+      const settingDoc = await SchoolSetting.findOne({ key: 'allowOfflineStalePickupPolicy' });
+      const allowOfflineStale = settingDoc ? Boolean(settingDoc.val) : false;
+      const clientAcknowledgedPolicy = Boolean(eventData.allowOfflineStalePickupPolicy);
+      if (!allowOfflineStale && !clientAcknowledgedPolicy) {
+        throw new Error('Offline mode must not permit stale pickup permissions to be treated as current without an explicit school policy and visible warning.');
+      }
+    }
+
+    const collectorId = eventData.collectorId;
+    const collectorNameInput = eventData.collectorName ? String(eventData.collectorName).trim() : null;
+
+    const activeCollectors = (pupil.collectors || []).filter(
+      c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0))
     );
 
-    if (manualEntry && source !== 'Manual entry' && source !== 'Manual ID lookup' && source !== 'Authorized exception' && source !== 'Non-destructive correction') {
-      source = 'Manual entry';
+    let cr = null;
+    if (collectorId !== undefined && collectorId !== null) {
+      cr = activeCollectors.find(c => c.id === Number(collectorId));
+    } else if (collectorNameInput) {
+      cr = activeCollectors.find(c => c.name.toLowerCase() === collectorNameInput.toLowerCase());
     }
 
-    if (!['arrival', 'departure', 'manual_arrival', 'manual_departure', 'correction', 'authorized_exception'].includes(typ)) {
-      return res.status(400).json({ error: 'Choose arrival or departure.' });
+    if (!cr) {
+      throw new Error('That collector is not approved for this pupil. Escalation instruction: Release is blocked. An unapproved collector requires a school administrator exception authorization.');
     }
-
-    const pupil = await Pupil.findOne({ id: pid, active: true });
-    if (!pupil) {
-      return res.status(400).json({ error: 'Pupil ID not found.' });
+    collector = cr.name;
+    verification = String(eventData.verification || 'Photo matched').slice(0, 60);
+  } else if (typ === 'authorized_exception') {
+    if (user.role !== 'admin') {
+      const err = new Error('Only a school administrator can authorize an unapproved collector exception.');
+      err.status = 403;
+      throw err;
     }
-
-    const todayStr = formatDate(nowLocal());
-    const prevEvent = await AttendanceEvent.findOne({ pupilId: pid, date: todayStr }).sort({ createdAt: -1 });
-
-    if (typ === 'arrival' && prevEvent && (prevEvent.type === 'arrival' || prevEvent.type === 'manual_arrival')) {
-      return res.status(400).json({ error: `${pupil.name} already has an arrival recorded today.` });
+    if (!reason) {
+      throw new Error('An administrator exception requires a preserved reason.');
     }
-    if ((typ === 'departure' || typ === 'authorized_exception') && (!prevEvent || (prevEvent.type !== 'arrival' && prevEvent.type !== 'manual_arrival'))) {
-      return res.status(400).json({ error: `Record and verify ${pupil.name}'s arrival before departure.` });
+    collector = eventData.collectorName ? String(eventData.collectorName).trim().slice(0, 100) : '';
+    if (!collector) {
+      throw new Error('Collector name is required for authorized exceptions.');
     }
+    verification = String(eventData.verification || 'Admin Exception: ID checked').slice(0, 60);
+  }
 
-    let collector = null;
-    let verification = null;
-    const device = String(req.body.device || 'Primary Gate Terminal').slice(0, 80);
-    const campus = String(req.body.campus || 'Primary campus').slice(0, 50);
-    const gate = String(req.body.gate || 'Main gate').slice(0, 50);
+  const now = nowLocal();
+  const eid = clientEventId || crypto.randomBytes(9).toString('base64url');
+  const serverReceivedAt = Date.now();
+  const deviceCapturedAt = eventData.deviceCapturedAt ? Number(eventData.deviceCapturedAt) : serverReceivedAt;
+  const eventTime = eventData.time ? String(eventData.time) : formatTime(now);
+  const eventDate = eventData.date ? String(eventData.date) : formatDate(now);
 
-    if (typ === 'departure') {
-      const collectorId = req.body.collectorId;
-      if (collectorId === undefined || collectorId === null) {
-        return res.status(400).json({ error: 'Select an approved collector.' });
-      }
+  // Retrieve school disclosure configuration
+  const settingDoc = await SchoolSetting.findOne({ key: 'discloseCollectorName' });
+  const discloseCollectorName = settingDoc ? Boolean(settingDoc.val) : true;
 
-      const activeCollectors = (pupil.collectors || []).filter(
-        c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0))
-      );
-      const cr = activeCollectors.find(c => c.id === Number(collectorId));
-      if (!cr) {
-        return res.status(400).json({ error: 'That collector is not approved for this pupil. Escalation instruction: Release is blocked. An unapproved collector requires a school administrator exception authorization.' });
-      }
-      collector = cr.name;
-      verification = String(req.body.verification || 'Photo matched').slice(0, 60);
-    } else if (typ === 'authorized_exception') {
-      if (req.user.role !== 'admin') {
-        return res.status(403).json({ error: 'Only a school administrator can authorize an unapproved collector exception.' });
-      }
-      if (!reason) {
-        return res.status(400).json({ error: 'An administrator exception requires a preserved reason.' });
-      }
-      collector = req.body.collectorName ? String(req.body.collectorName).trim().slice(0, 100) : '';
-      if (!collector) {
-        return res.status(400).json({ error: 'Collector name is required for authorized exceptions.' });
-      }
-      verification = String(req.body.verification || 'Admin Exception: ID checked').slice(0, 60);
-    }
+  // Format guardian notification alert details
+  const channel = (pupil.preferredChannel || 'sms').toLowerCase();
+  const recipient = channel === 'email' ? (pupil.guardianEmail || `${pupil.guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`) : (pupil.guardianPhone || '+1 555-0100');
+  const isArrival = typ === 'arrival' || typ === 'manual_arrival';
+  const collectorDisplay = discloseCollectorName ? (collector || 'authorized contact') : 'an authorized contact';
+  const alertMsg = isArrival
+    ? `Gatewise Alert: ${pupil.name} has arrived safely at ${campus} (${gate}) at ${eventTime}.`
+    : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collectorDisplay} at ${eventTime}.`;
 
-    const now = nowLocal();
-    const eid = crypto.randomBytes(9).toString('base64url');
+  const nid = crypto.randomBytes(9).toString('base64url');
+  await Notification.create({
+    id: nid,
+    eventId: eid,
+    pupilId: pid,
+    guardianName: pupil.guardian,
+    channel: channel.toUpperCase(),
+    recipient,
+    message: alertMsg,
+    status: 'Sent',
+    sentAt: formatTime(now)
+  });
 
-    // Retrieve school disclosure configuration
-    const settingDoc = await SchoolSetting.findOne({ key: 'discloseCollectorName' });
-    const discloseCollectorName = settingDoc ? Boolean(settingDoc.val) : true;
+  const syncStatus = isReconciled ? 'reconciled_fallback' : (isOfflineSync ? 'synced' : 'synced');
 
-    // Format guardian notification alert details
-    const channel = (pupil.preferredChannel || 'sms').toLowerCase();
-    const recipient = channel === 'email' ? (pupil.guardianEmail || `${pupil.guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`) : (pupil.guardianPhone || '+1 555-0100');
-    const isArrival = typ === 'arrival' || typ === 'manual_arrival';
-    const collectorDisplay = discloseCollectorName ? (collector || 'authorized contact') : 'an authorized contact';
-    const alertMsg = isArrival
-      ? `Gatewise Alert: ${pupil.name} has arrived safely at ${campus} (${gate}) at ${formatTime(now)}.`
-      : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collectorDisplay} at ${formatTime(now)}.`;
+  const createdEvent = await AttendanceEvent.create({
+    id: eid,
+    pupilId: pid,
+    type: typ,
+    time: eventTime,
+    date: eventDate,
+    createdAt: deviceCapturedAt,
+    staff: user.name,
+    source: isReconciled ? 'Paper/voice manual fallback' : (isOfflineSync ? 'Offline synced queue' : source),
+    collector,
+    verification,
+    device,
+    campus,
+    gate,
+    alert: 'Sent',
+    reason,
+    manualEntry,
+    correctionLink,
+    clientEventId,
+    offlineQueued: isOfflineSync,
+    deviceCapturedAt,
+    serverReceivedAt,
+    syncStatus,
+    reconciliationAuditReason
+  });
 
-    const nid = crypto.randomBytes(9).toString('base64url');
-    await Notification.create({
+  const actionName = isReconciled ? 'reconcile_manual_fallback' : (isOfflineSync ? 'sync_offline_event' : `record_${typ}`);
+  await AuditEntry.create({
+    userId: user._id,
+    action: actionName,
+    objectType: 'event',
+    objectId: eid,
+    reason: `campus=${campus}; gate=${gate}; device=${device}; source=${createdEvent.source}; client_id=${clientEventId || 'none'}; collector=${collector || 'none'}; verification=${verification || 'none'}; reason=${reason}; offline_queued=${isOfflineSync}; reconciliation_audit_reason=${reconciliationAuditReason}; alert_channel=${channel.toUpperCase()}`,
+    createdAt: now
+  });
+
+  return {
+    isDuplicate: false,
+    eventId: eid,
+    notification: {
       id: nid,
-      eventId: eid,
-      pupilId: pid,
-      guardianName: pupil.guardian,
+      guardian: pupil.guardian,
       channel: channel.toUpperCase(),
       recipient,
-      message: alertMsg,
-      status: 'Sent',
-      sentAt: formatTime(now)
-    });
+      message: alertMsg
+    }
+  };
+}
 
-    await AttendanceEvent.create({
-      id: eid,
-      pupilId: pid,
-      type: typ,
-      time: formatTime(now),
-      date: formatDate(now),
-      createdAt: now.getTime(),
-      staff: req.user.name,
-      source,
-      collector,
-      verification,
-      device,
-      campus,
-      gate,
-      alert: 'Sent',
-      reason,
-      manualEntry,
-      correctionLink
-    });
-
-    await AuditEntry.create({
-      userId: req.user._id,
-      action: `record_${typ}`,
-      objectType: 'event',
-      objectId: eid,
-      reason: `campus=${campus}; gate=${gate}; device=${device}; source=${source}; collector=${collector || 'none'}; verification=${verification || 'none'}; reason=${reason}; alert_channel=${channel.toUpperCase()}`,
-      createdAt: now
-    });
-
+app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const result = await processEventRecord(req.user, req.body);
     const state = await getStateJson();
-    res.status(201).json({
+    res.status(result.isDuplicate ? 200 : 201).json({
       ok: true,
-      eventId: eid,
-      alertStatus: 'sent',
-      notification: {
-        id: nid,
-        guardian: pupil.guardian,
-        channel: channel.toUpperCase(),
-        recipient,
-        message: alertMsg
-      },
+      eventId: result.eventId,
+      isDuplicate: result.isDuplicate,
+      alertStatus: result.isDuplicate ? 'already_synced' : 'sent',
+      notification: result.notification || null,
       state
     });
   } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
+  }
+});
+
+app.post('/api/events/sync', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const eventsToSync = Array.isArray(req.body.events) ? req.body.events : [req.body];
+    const results = [];
+
+    for (const evt of eventsToSync) {
+      try {
+        const itemResult = await processEventRecord(req.user, { ...evt, offlineQueued: true });
+        results.push({ clientEventId: evt.clientEventId, ok: true, eventId: itemResult.eventId, isDuplicate: itemResult.isDuplicate });
+      } catch (e) {
+        results.push({ clientEventId: evt.clientEventId, ok: false, error: e.message });
+      }
+    }
+
+    const state = await getStateJson();
+    res.json({ ok: true, results, state });
+  } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/events/reconcile', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const reason = String(req.body.reconciliationAuditReason || req.body.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ error: 'Manual paper/voice fallback reconciliation requires an explicit audit reason.' });
+    }
+
+    const result = await processEventRecord(req.user, {
+      ...req.body,
+      manualFallbackReconciled: true,
+      reconciliationAuditReason: reason,
+      source: 'Paper/voice manual fallback'
+    });
+
+    const state = await getStateJson();
+    res.status(result.isDuplicate ? 200 : 201).json({
+      ok: true,
+      eventId: result.eventId,
+      isDuplicate: result.isDuplicate,
+      notification: result.notification || null,
+      state
+    });
+  } catch (err) {
+    res.status(err.status || 400).json({ error: err.message });
   }
 });
 
@@ -863,7 +1003,7 @@ app.post('/api/import/commit', requireAuth(['admin', 'manager']), async (req, re
 
 app.post('/api/settings', requireAuth(['admin']), async (req, res) => {
   try {
-    const { discloseCollectorName } = req.body;
+    const { discloseCollectorName, allowOfflineStalePickupPolicy } = req.body;
     if (discloseCollectorName !== undefined) {
       await SchoolSetting.findOneAndUpdate(
         { key: 'discloseCollectorName' },
@@ -876,6 +1016,21 @@ app.post('/api/settings', requireAuth(['admin']), async (req, res) => {
         objectType: 'school_setting',
         objectId: 'discloseCollectorName',
         reason: `discloseCollectorName set to ${Boolean(discloseCollectorName)}`,
+        createdAt: new Date()
+      });
+    }
+    if (allowOfflineStalePickupPolicy !== undefined) {
+      await SchoolSetting.findOneAndUpdate(
+        { key: 'allowOfflineStalePickupPolicy' },
+        { key: 'allowOfflineStalePickupPolicy', val: Boolean(allowOfflineStalePickupPolicy) },
+        { upsert: true, new: true }
+      );
+      await AuditEntry.create({
+        userId: req.user._id,
+        action: 'update_school_settings',
+        objectType: 'school_setting',
+        objectId: 'allowOfflineStalePickupPolicy',
+        reason: `allowOfflineStalePickupPolicy set to ${Boolean(allowOfflineStalePickupPolicy)}`,
         createdAt: new Date()
       });
     }
