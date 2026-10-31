@@ -87,7 +87,18 @@ Targets should be confirmed against pilot conditions and provider capabilities b
 - Guardian sees only linked pupil(s), can set notification preferences, and can request corrections or contact the school.
 - The school—not the guardian app—approves changes to legal guardian status and pickup permissions.
 
-## Departure and pickup workflow
+## 4. Core workflows
+
+### 4.1 Arrival
+
+1. Staff signs into the school app on an approved device.
+2. Staff selects the campus and arrival mode (or the app defaults to the assigned gate and current session).
+3. Staff scans the QR code on the pupil's card.
+4. The app displays the pupil's name, photograph, class, and a clear arrival action. Staff visually confirms the pupil against the photo.
+5. Staff confirms arrival. The service records the event and shows success or a specific recoverable error.
+6. The system sends an arrival alert to each eligible guardian using that guardian's configured channels.
+
+### 4.2 Departure and pickup workflow
 
 1. Staff scans the pupil's card, or searches by name if the card is unavailable.
 2. The app displays the pupil and active approved pickup contacts.

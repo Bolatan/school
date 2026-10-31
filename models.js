@@ -22,11 +22,26 @@ const pupilSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   className: { type: String, required: true, trim: true },
   guardian: { type: String, required: true, trim: true },
+  guardianPhone: { type: String, default: '+1 555-0100' },
+  guardianEmail: { type: String, default: '' },
+  preferredChannel: { type: String, enum: ['sms', 'whatsapp', 'push', 'email'], default: 'sms' },
   initials: { type: String, required: true },
   color: { type: String, required: true },
   photo: { type: String, default: '♙' },
   active: { type: Boolean, default: true },
   collectors: [collectorSchema]
+}, { timestamps: true });
+
+const notificationSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  eventId: { type: String, required: true },
+  pupilId: { type: String, required: true },
+  guardianName: { type: String, required: true },
+  channel: { type: String, required: true },
+  recipient: { type: String, required: true },
+  message: { type: String, default: '' },
+  status: { type: String, default: 'Sent' },
+  sentAt: { type: String, required: true }
 }, { timestamps: true });
 
 const pickupRequestSchema = new mongoose.Schema({
@@ -77,6 +92,7 @@ const User = mongoose.model('User', userSchema);
 const Pupil = mongoose.model('Pupil', pupilSchema);
 const PickupRequest = mongoose.model('PickupRequest', pickupRequestSchema);
 const AttendanceEvent = mongoose.model('AttendanceEvent', attendanceEventSchema);
+const Notification = mongoose.model('Notification', notificationSchema);
 const AuditEntry = mongoose.model('AuditEntry', auditEntrySchema);
 const Session = mongoose.model('Session', sessionSchema);
 
@@ -85,6 +101,7 @@ module.exports = {
   Pupil,
   PickupRequest,
   AttendanceEvent,
+  Notification,
   AuditEntry,
   Session
 };

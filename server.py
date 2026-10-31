@@ -63,8 +63,16 @@ def init_db():
         );
         CREATE TABLE IF NOT EXISTS pupils (
           id TEXT PRIMARY KEY, name TEXT NOT NULL, class_name TEXT NOT NULL,
-          guardian TEXT NOT NULL, initials TEXT NOT NULL, color TEXT NOT NULL,
+          guardian TEXT NOT NULL, guardian_phone TEXT NOT NULL DEFAULT '+1 555-0100',
+          guardian_email TEXT NOT NULL DEFAULT '', preferred_channel TEXT NOT NULL DEFAULT 'sms',
+          initials TEXT NOT NULL, color TEXT NOT NULL,
           photo TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS notifications (
+          id TEXT PRIMARY KEY, event_id TEXT NOT NULL, pupil_id TEXT NOT NULL,
+          guardian_name TEXT NOT NULL, channel TEXT NOT NULL, recipient TEXT NOT NULL,
+          message TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'Sent',
+          sent_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS collectors (
           id INTEGER PRIMARY KEY AUTOINCREMENT, pupil_id TEXT NOT NULL REFERENCES pupils(id),
@@ -99,6 +107,13 @@ def init_db():
             c.execute("ALTER TABLE events ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
         if "manual_entry" not in event_cols:
             c.execute("ALTER TABLE events ADD COLUMN manual_entry INTEGER NOT NULL DEFAULT 0")
+        pupil_cols = [col[1] for col in c.execute("PRAGMA table_info(pupils)").fetchall()]
+        if "guardian_phone" not in pupil_cols:
+            c.execute("ALTER TABLE pupils ADD COLUMN guardian_phone TEXT NOT NULL DEFAULT '+1 555-0100'")
+        if "guardian_email" not in pupil_cols:
+            c.execute("ALTER TABLE pupils ADD COLUMN guardian_email TEXT NOT NULL DEFAULT ''")
+        if "preferred_channel" not in pupil_cols:
+            c.execute("ALTER TABLE pupils ADD COLUMN preferred_channel TEXT NOT NULL DEFAULT 'sms'")
 
         if not c.execute("SELECT 1 FROM users LIMIT 1").fetchone():
             salt, digest = password_hash(DEMO_PASSWORD)
@@ -134,14 +149,34 @@ def init_db():
 
 def pupil_json(c, row):
     collectors = c.execute("SELECT id,name,relation,valid_until AS 'until' FROM collectors WHERE pupil_id=? AND active=1 AND (valid_until='Ongoing' OR date(valid_until)>=date('now','localtime')) ORDER BY id", (row["id"],)).fetchall()
-    return {"id":row["id"],"name":row["name"],"className":row["class_name"],"guardian":row["guardian"],"initials":row["initials"],"color":row["color"],"photo":row["photo"],"collectors":[dict(x) for x in collectors]}
+    phone = row["guardian_phone"] if "guardian_phone" in row.keys() else "+1 555-0100"
+    email = row["guardian_email"] if "guardian_email" in row.keys() else ""
+    channel = row["preferred_channel"] if "preferred_channel" in row.keys() else "sms"
+    return {"id":row["id"],"name":row["name"],"className":row["class_name"],"guardian":row["guardian"],"guardianPhone":phone,"guardianEmail":email,"preferredChannel":channel,"initials":row["initials"],"color":row["color"],"photo":row["photo"],"collectors":[dict(x) for x in collectors]}
 
 
 def state_json(c):
     pupils = [pupil_json(c,r) for r in c.execute("SELECT * FROM pupils WHERE active=1 ORDER BY name")]
     events = [dict(id=r["id"],pupilId=r["pupil_id"],type=r["type"],time=r["event_time"],date=r["event_date"],createdAt=r["created_ms"],staff=r["staff"],source=r["source"],collector=r["collector"],verification=r["verification"],alert=r["alert"],reason=r["reason"] if "reason" in r.keys() else "",manualEntry=bool(r["manual_entry"]) if "manual_entry" in r.keys() else False) for r in c.execute("SELECT * FROM events ORDER BY created_ms DESC LIMIT 150")]
     requests = [dict(id=r["id"],pupilId=r["pupil_id"],name=r["name"],relation=r["relation"],requestedBy=r["requested_by"],time=r["request_time"],note=r["note"]) for r in c.execute("SELECT * FROM pickup_requests WHERE status='pending' ORDER BY rowid")]
-    return {"pupils":pupils,"events":events,"requests":requests,"school":{"name":"Northfield Academy","campus":"Primary campus","totalPupils":248},"notifications":"demo"}
+    notifs = []
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'").fetchone():
+        notifs = [dict(id=r["id"],eventId=r["event_id"],pupilId=r["pupil_id"],guardianName=r["guardian_name"],channel=r["channel"],recipient=r["recipient"],message=r["message"],status=r["status"],sentAt=r["sent_at"]) for r in c.execute("SELECT * FROM notifications ORDER BY rowid DESC LIMIT 100")]
+    return {
+        "pupils": pupils,
+        "events": events,
+        "requests": requests,
+        "notifications": notifs,
+        "school": {
+            "name": "Northfield Academy",
+            "campus": "Primary campus",
+            "campuses": ["Primary campus", "Secondary campus", "North gate annex"],
+            "gates": ["Main gate", "East pedestrian gate", "Bus drop-off gate"],
+            "sessions": ["Morning Arrival (07:30 - 08:30)", "Standard Day", "Afternoon Dismissal (14:30 - 15:30)"],
+            "totalPupils": 248
+        },
+        "notificationsStatus": "active"
+    }
 
 
 def _column_number(ref):
@@ -421,9 +456,23 @@ class Handler(BaseHTTPRequestHandler):
                 if not cr: raise ValueError("That collector is not approved for this pupil.")
                 collector=cr["name"]; verification=str(body.get("verification","Photo matched"))[:60]
             n=now_local(); eid=secrets.token_urlsafe(12)
-            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert,reason,manual_entry) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(eid,pid,typ,n.strftime("%I:%M %p").lstrip("0"),n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,"Demo only",reason,manual_entry))
-            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"record_{typ}","event",eid,f"source={source}; reason={reason}",n.isoformat()))
-            return self.send_json(201,{"ok":True,"eventId":eid,"alertStatus":"demo_only","state":state_json(c)})
+            campus = str(body.get("campus", "Primary campus"))[:50]
+            gate = str(body.get("gate", "Main gate"))[:50]
+            pref_ch = p["preferred_channel"] if "preferred_channel" in p.keys() else "sms"
+            phone = p["guardian_phone"] if "guardian_phone" in p.keys() else "+1 555-0100"
+            email = p["guardian_email"] if "guardian_email" in p.keys() else ""
+            recipient = email if pref_ch == "email" else phone
+            time_str = n.strftime("%I:%M %p").lstrip("0")
+            alert_msg = f"Gatewise Alert: {p['name']} has arrived safely at {campus} ({gate}) at {time_str}." if typ == "arrival" else f"Gatewise Alert: {p['name']} departed from {campus} with {collector or 'authorized contact'} at {time_str}."
+
+            nid = secrets.token_urlsafe(12)
+            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'").fetchone():
+                c.execute("INSERT INTO notifications(id,event_id,pupil_id,guardian_name,channel,recipient,message,status,sent_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                          (nid, eid, pid, p["guardian"], pref_ch.upper(), recipient, alert_msg, "Sent", time_str))
+
+            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert,reason,manual_entry) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(eid,pid,typ,time_str,n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,"Sent",reason,manual_entry))
+            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"record_{typ}","event",eid,f"campus={campus}; gate={gate}; source={source}; reason={reason}; alert_channel={pref_ch.upper()}",n.isoformat()))
+            return self.send_json(201,{"ok":True,"eventId":eid,"alertStatus":"sent","notification":{"id":nid,"guardian":p["guardian"],"channel":pref_ch.upper(),"recipient":recipient,"message":alert_msg},"state":state_json(c)})
 
     def create_pupil(self,user,body):
         name=str(body.get("name",""))[:100].strip(); pid=str(body.get("id",""))[:30].strip().upper(); cls=str(body.get("className",""))[:30].strip(); guardian=str(body.get("guardian",""))[:100].strip()

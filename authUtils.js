@@ -86,12 +86,30 @@ async function seedInitialData() {
       "NF-1315": [{ id: 1, name: "Grace Peters", relation: "Mother", until: "Ongoing", active: true }]
     };
 
-    for (const [id, name, className, guardian, initials, color, photo] of seedPupils) {
+    const guardianPhones = {
+      "NF-1042": "+1 555-0142",
+      "NF-1087": "+1 555-0187",
+      "NF-1103": "+1 555-0103",
+      "NF-1139": "+1 555-0139",
+      "NF-1175": "+1 555-0175",
+      "NF-1204": "+1 555-0104",
+      "NF-1228": "+1 555-0128",
+      "NF-1261": "+1 555-0161",
+      "NF-1290": "+1 555-0190",
+      "NF-1315": "+1 555-0115"
+    };
+    const channels = ["sms", "whatsapp", "push", "email"];
+
+    for (let idx = 0; idx < seedPupils.length; idx++) {
+      const [id, name, className, guardian, initials, color, photo] = seedPupils[idx];
       await Pupil.create({
         id,
         name,
         className,
         guardian,
+        guardianPhone: guardianPhones[id] || "+1 555-0100",
+        guardianEmail: `${guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`,
+        preferredChannel: channels[idx % channels.length],
         initials,
         color,
         photo,
