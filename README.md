@@ -1,17 +1,24 @@
 # Gatewise local MVP
 
-Gatewise is a locally runnable school arrival and dismissal demo with a Python standard-library server, SQLite database, staff sign-in, roster import, and role-based staff accounts. No package installation is required; Windows needs Python 3.
+Gatewise is a school arrival and dismissal application powered by **Node.js**, **Express**, and **MongoDB**, featuring staff sign-in, roster import, card scanning, and role-based staff accounts.
 
-## Start the app on Windows
+## Start the app
 
-1. Extract the ZIP to a writable folder.
-2. Run `Start-Gatewise.ps1` (or from PowerShell: `powershell -ExecutionPolicy Bypass -File .\Start-Gatewise.ps1`).
+1. Install dependencies:
+   ```bash
+   npm install
+   ```
+2. Start the server:
+   ```bash
+   npm start
+   ```
+   Or on Windows PowerShell, run `Start-Gatewise.ps1` (or `powershell -ExecutionPolicy Bypass -File .\Start-Gatewise.ps1`).
 3. Open `http://127.0.0.1:8080` if it does not open automatically.
 4. Sign in with the demo administrator:
    - Email: `admin@northfield.school`
    - Password: `GatewiseDemo!26`
 
-The first start creates `app-data/gatewise.sqlite3`. This ZIP includes a demo database with fictional sample data and a demo admin account. The database persists. To reset the demo, stop the server and remove the database file; it will be recreated at next start. Keep a backup before replacing or editing a database.
+The server connects to MongoDB (using `MONGODB_URI` from the environment or falling back automatically to an embedded in-memory MongoDB instance for local demo runs). Initial sample data and the demo admin account are seeded automatically.
 
 ## Uploading pupils
 
@@ -47,7 +54,7 @@ These permissions are enforced by the server as well as reflected in the interfa
 ## Included features
 
 - Staff login with salted PBKDF2 password hashes and server-side sessions
-- SQLite records for pupils, guardians/collectors, pickup requests, attendance, sessions, and admin audit history
+- MongoDB records for pupils, guardians/collectors, pickup requests, attendance, sessions, and admin audit history
 - Card scanning where supported, plus manual pupil ID lookup
 - Arrival/departure events with approved pickup collector selection
 - Activity history and CSV export
@@ -276,8 +283,10 @@ export async function connectToDatabase() {
 
 ## Files
 
-- `server.py` — API and static file server
-- `app-data/gatewise.sqlite3` — included demo database; generated if absent
-- `Start-Gatewise.ps1` — starts the server and opens the browser
+- `server.js` — Node.js & Express API and static file server
+- `models.js` — Mongoose schemas and models for MongoDB
+- `authUtils.js` — Authentication, hashing, and initial data seeding utilities
+- `api/index.js` — Serverless entrypoint for Vercel deployment
+- `Start-Gatewise.ps1` — starts the Node.js server and opens the browser
 - `index.html`, `styles.css`, `app.js` — web interface
 - `pupil-import-template.csv` and `pupil-import-template.xlsx` — roster templates
