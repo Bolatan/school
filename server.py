@@ -87,8 +87,14 @@ def init_db():
           id TEXT PRIMARY KEY, pupil_id TEXT NOT NULL REFERENCES pupils(id), type TEXT NOT NULL,
           event_time TEXT NOT NULL, event_date TEXT NOT NULL, created_ms INTEGER NOT NULL,
           staff TEXT NOT NULL, source TEXT NOT NULL, collector TEXT, verification TEXT,
+          device TEXT NOT NULL DEFAULT 'Primary Gate Terminal',
+          campus TEXT NOT NULL DEFAULT 'Primary campus',
+          gate TEXT NOT NULL DEFAULT 'Main gate',
           alert TEXT NOT NULL DEFAULT 'Demo only', reason TEXT NOT NULL DEFAULT '',
           manual_entry INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS school_settings (
+          key TEXT PRIMARY KEY, val TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS audit_log (
           id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL REFERENCES users(id),
@@ -107,6 +113,12 @@ def init_db():
             c.execute("ALTER TABLE events ADD COLUMN reason TEXT NOT NULL DEFAULT ''")
         if "manual_entry" not in event_cols:
             c.execute("ALTER TABLE events ADD COLUMN manual_entry INTEGER NOT NULL DEFAULT 0")
+        if "device" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN device TEXT NOT NULL DEFAULT 'Primary Gate Terminal'")
+        if "campus" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN campus TEXT NOT NULL DEFAULT 'Primary campus'")
+        if "gate" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN gate TEXT NOT NULL DEFAULT 'Main gate'")
         pupil_cols = [col[1] for col in c.execute("PRAGMA table_info(pupils)").fetchall()]
         if "guardian_phone" not in pupil_cols:
             c.execute("ALTER TABLE pupils ADD COLUMN guardian_phone TEXT NOT NULL DEFAULT '+1 555-0100'")
@@ -157,11 +169,35 @@ def pupil_json(c, row):
 
 def state_json(c):
     pupils = [pupil_json(c,r) for r in c.execute("SELECT * FROM pupils WHERE active=1 ORDER BY name")]
-    events = [dict(id=r["id"],pupilId=r["pupil_id"],type=r["type"],time=r["event_time"],date=r["event_date"],createdAt=r["created_ms"],staff=r["staff"],source=r["source"],collector=r["collector"],verification=r["verification"],alert=r["alert"],reason=r["reason"] if "reason" in r.keys() else "",manualEntry=bool(r["manual_entry"]) if "manual_entry" in r.keys() else False) for r in c.execute("SELECT * FROM events ORDER BY created_ms DESC LIMIT 150")]
+    events = [dict(
+        id=r["id"],
+        pupilId=r["pupil_id"],
+        type=r["type"],
+        time=r["event_time"],
+        date=r["event_date"],
+        createdAt=r["created_ms"],
+        staff=r["staff"],
+        source=r["source"],
+        collector=r["collector"],
+        verification=r["verification"],
+        device=r["device"] if "device" in r.keys() else "Primary Gate Terminal",
+        campus=r["campus"] if "campus" in r.keys() else "Primary campus",
+        gate=r["gate"] if "gate" in r.keys() else "Main gate",
+        alert=r["alert"],
+        reason=r["reason"] if "reason" in r.keys() else "",
+        manualEntry=bool(r["manual_entry"]) if "manual_entry" in r.keys() else False
+    ) for r in c.execute("SELECT * FROM events ORDER BY created_ms DESC LIMIT 150")]
     requests = [dict(id=r["id"],pupilId=r["pupil_id"],name=r["name"],relation=r["relation"],requestedBy=r["requested_by"],time=r["request_time"],note=r["note"]) for r in c.execute("SELECT * FROM pickup_requests WHERE status='pending' ORDER BY rowid")]
     notifs = []
     if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'").fetchone():
         notifs = [dict(id=r["id"],eventId=r["event_id"],pupilId=r["pupil_id"],guardianName=r["guardian_name"],channel=r["channel"],recipient=r["recipient"],message=r["message"],status=r["status"],sentAt=r["sent_at"]) for r in c.execute("SELECT * FROM notifications ORDER BY rowid DESC LIMIT 100")]
+
+    disclose = True
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='school_settings'").fetchone():
+        row = c.execute("SELECT val FROM school_settings WHERE key='discloseCollectorName'").fetchone()
+        if row:
+            disclose = row["val"] in ("1", "true", "True")
+
     return {
         "pupils": pupils,
         "events": events,
@@ -173,6 +209,8 @@ def state_json(c):
             "campuses": ["Primary campus", "Secondary campus", "North gate annex"],
             "gates": ["Main gate", "East pedestrian gate", "Bus drop-off gate"],
             "sessions": ["Morning Arrival (07:30 - 08:30)", "Standard Day", "Afternoon Dismissal (14:30 - 15:30)"],
+            "devices": ["Primary Gate Terminal", "East Gate Handheld", "Bus Loop Scanner", "Admin Front Desk"],
+            "discloseCollectorName": disclose,
             "totalPupils": 248
         },
         "notificationsStatus": "active"
@@ -408,6 +446,19 @@ class Handler(BaseHTTPRequestHandler):
             if not user:return
             try:return self.update_user(user,path.rsplit("/",1)[-1],body)
             except ValueError as exc:return self.send_json(400,{"error":str(exc)})
+        if path=="/api/settings":
+            user=self.require_user(("admin",))
+            if not user:return
+            disclose=body.get("discloseCollectorName")
+            if disclose is not None:
+                val = "1" if bool(disclose) else "0"
+                with db() as c:
+                    c.execute("INSERT INTO school_settings(key,val) VALUES('discloseCollectorName',?) ON CONFLICT(key) DO UPDATE SET val=excluded.val", (val,))
+                    c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],"update_school_settings","school_setting","discloseCollectorName",f"discloseCollectorName set to {bool(disclose)}",now_local().isoformat()))
+                    st=state_json(c)
+                return self.send_json(200,{"ok":True,"school":st["school"]})
+            with db() as c: st=state_json(c)
+            return self.send_json(200,{"ok":True,"school":st["school"]})
         if path=="/api/export/activity":
             user=self.require_user()
             if not user:return
@@ -435,43 +486,65 @@ class Handler(BaseHTTPRequestHandler):
 
     def create_event(self,user,body):
         pid=str(body.get("pupilId",""))[:30].strip(); typ=str(body.get("type","")); source=str(body.get("source","Card scan"))[:50]
-        reason=str(body.get("reason",""))[:50].strip()
-        manual_entry=1 if (body.get("manualEntry") or reason in ("card_missing","card_unreadable") or source=="Manual entry" or source=="Manual ID lookup") else 0
-        if manual_entry and source not in ("Manual entry", "Manual ID lookup"):
+        reason=str(body.get("reason",""))[:200].strip()
+        manual_entry=1 if (body.get("manualEntry") or reason in ("card_missing","card_unreadable") or source=="Manual entry" or source=="Manual ID lookup" or typ in ("authorized_exception","correction")) else 0
+        if manual_entry and source not in ("Manual entry", "Manual ID lookup", "Authorized exception", "Non-destructive correction"):
             source = "Manual entry"
-        if reason and reason not in ("card_missing", "card_unreadable", "other"):
+        if reason and reason not in ("card_missing", "card_unreadable", "other") and not (typ in ("authorized_exception", "correction") or len(reason) > 0):
             raise ValueError("Invalid manual entry reason.")
-        if typ not in ("arrival","departure"): raise ValueError("Choose arrival or departure.")
+        if typ not in ("arrival","departure","authorized_exception","correction"): raise ValueError("Choose arrival or departure.")
         with db() as c:
             p=c.execute("SELECT * FROM pupils WHERE id=? AND active=1",(pid,)).fetchone()
             if not p: raise ValueError("Pupil ID not found.")
             prev=c.execute("SELECT type FROM events WHERE pupil_id=? AND event_date=? ORDER BY created_ms DESC LIMIT 1",(pid,now_local().date().isoformat())).fetchone()
             if typ=="arrival" and prev and prev["type"]=="arrival": raise ValueError(f"{p['name']} already has an arrival recorded today.")
-            if typ=="departure" and (not prev or prev["type"]!="arrival"): raise ValueError(f"Record and verify {p['name']}'s arrival before departure.")
+            if (typ=="departure" or typ=="authorized_exception") and (not prev or prev["type"]!="arrival"): raise ValueError(f"Record and verify {p['name']}'s arrival before departure.")
             collector=None; verification=None
+            device = str(body.get("device", "Primary Gate Terminal"))[:80]
+            campus = str(body.get("campus", "Primary campus"))[:50]
+            gate = str(body.get("gate", "Main gate"))[:50]
+
             if typ=="departure":
                 cid=body.get("collectorId")
                 if cid is None: raise ValueError("Select an approved collector.")
                 cr=c.execute("SELECT name FROM collectors WHERE id=? AND pupil_id=? AND active=1 AND (valid_until='Ongoing' OR date(valid_until)>=date('now','localtime'))",(int(cid),pid)).fetchone()
-                if not cr: raise ValueError("That collector is not approved for this pupil.")
+                if not cr: raise ValueError("That collector is not approved for this pupil. Escalation instruction: Release is blocked. An unapproved collector requires a school administrator exception authorization.")
                 collector=cr["name"]; verification=str(body.get("verification","Photo matched"))[:60]
+            elif typ=="authorized_exception":
+                if user["role"] != "admin":
+                    self.send_json(403, {"error": "Only a school administrator can authorize an unapproved collector exception."})
+                    return
+                if not reason:
+                    raise ValueError("An administrator exception requires a preserved reason.")
+                collector = str(body.get("collectorName", "")).strip()[:100]
+                if not collector:
+                    raise ValueError("Collector name is required for authorized exceptions.")
+                verification = str(body.get("verification", "Admin Exception: ID checked"))[:60]
+
             n=now_local(); eid=secrets.token_urlsafe(12)
-            campus = str(body.get("campus", "Primary campus"))[:50]
-            gate = str(body.get("gate", "Main gate"))[:50]
+
+            disclose = True
+            row = c.execute("SELECT val FROM school_settings WHERE key='discloseCollectorName'").fetchone()
+            if row:
+                disclose = row["val"] in ("1", "true", "True")
+
             pref_ch = p["preferred_channel"] if "preferred_channel" in p.keys() else "sms"
             phone = p["guardian_phone"] if "guardian_phone" in p.keys() else "+1 555-0100"
             email = p["guardian_email"] if "guardian_email" in p.keys() else ""
             recipient = email if pref_ch == "email" else phone
             time_str = n.strftime("%I:%M %p").lstrip("0")
-            alert_msg = f"Gatewise Alert: {p['name']} has arrived safely at {campus} ({gate}) at {time_str}." if typ == "arrival" else f"Gatewise Alert: {p['name']} departed from {campus} with {collector or 'authorized contact'} at {time_str}."
+            collector_display = (collector or "authorized contact") if disclose else "an authorized contact"
+            alert_msg = f"Gatewise Alert: {p['name']} has arrived safely at {campus} ({gate}) at {time_str}." if typ == "arrival" else f"Gatewise Alert: {p['name']} departed from {campus} with {collector_display} at {time_str}."
 
             nid = secrets.token_urlsafe(12)
             if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'").fetchone():
                 c.execute("INSERT INTO notifications(id,event_id,pupil_id,guardian_name,channel,recipient,message,status,sent_at) VALUES(?,?,?,?,?,?,?,?,?)",
                           (nid, eid, pid, p["guardian"], pref_ch.upper(), recipient, alert_msg, "Sent", time_str))
 
-            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,alert,reason,manual_entry) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(eid,pid,typ,time_str,n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,"Sent",reason,manual_entry))
-            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],f"record_{typ}","event",eid,f"campus={campus}; gate={gate}; source={source}; reason={reason}; alert_channel={pref_ch.upper()}",n.isoformat()))
+            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,device,campus,gate,alert,reason,manual_entry) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                      (eid,pid,typ,time_str,n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,device,campus,gate,"Sent",reason,manual_entry))
+            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",
+                      (user["id"],f"record_{typ}","event",eid,f"campus={campus}; gate={gate}; device={device}; source={source}; collector={collector or 'none'}; verification={verification or 'none'}; reason={reason}; alert_channel={pref_ch.upper()}",n.isoformat()))
             return self.send_json(201,{"ok":True,"eventId":eid,"alertStatus":"sent","notification":{"id":nid,"guardian":p["guardian"],"channel":pref_ch.upper(),"recipient":recipient,"message":alert_msg},"state":state_json(c)})
 
     def create_pupil(self,user,body):
