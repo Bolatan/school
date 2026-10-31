@@ -32,7 +32,11 @@ const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
 const MAX_IMPORT_ROWS = 5000;
 
 app.use(cors({ origin: true, credentials: true }));
-app.use(express.json({ limit: '12mb' }));
+// In serverless runtimes (e.g. Vercel), req.body may already be parsed
+app.use((req, res, next) => {
+  if (req.body !== undefined) return next();
+  express.json({ limit: '12mb' })(req, res, next);
+});
 app.use(cookieParser());
 
 // Security headers
@@ -82,7 +86,10 @@ function originOk(req) {
   if (!origin) return true;
   try {
     const url = new URL(origin);
-    return (url.hostname === '127.0.0.1' || url.hostname === 'localhost');
+    if (url.hostname === '127.0.0.1' || url.hostname === 'localhost') return true;
+    if (url.hostname.endsWith('.vercel.app')) return true;
+    if (req.headers.host && (url.host === req.headers.host || url.hostname === req.headers.host)) return true;
+    return false;
   } catch {
     return false;
   }
