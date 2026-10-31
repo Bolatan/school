@@ -279,3 +279,199 @@ test('Serverless handler (api/index.js)', async () => {
   assert.equal(loginRes.status, 200);
   assert.equal(loginRes.body.user.email, DEMO_EMAIL);
 });
+
+test('Departure & Pickup: Full 6-step workflow in MongoDB', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Create a pupil with approved collectors
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Amari Davis',
+      id: 'NF-6001',
+      className: 'Grade 3A',
+      guardian: 'Kendra Davis'
+    });
+
+  // Verify pupil lookup by ID
+  const pupilDoc = await Pupil.findOne({ id: 'NF-6001' });
+  assert.ok(pupilDoc);
+  pupilDoc.collectors.push(
+    { id: 1, name: 'Kendra Davis', relation: 'Mother', until: 'Ongoing', active: true },
+    { id: 2, name: 'Marcus Davis', relation: 'Father', until: 'Ongoing', active: true }
+  );
+  await pupilDoc.save();
+
+  // Arrival must be recorded before departure
+  const arrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-6001',
+      type: 'arrival',
+      source: 'Card scan',
+      campus: 'Primary campus',
+      gate: 'Main gate',
+      device: 'Primary Gate Terminal'
+    });
+  assert.equal(arrRes.status, 201);
+
+  // 2. Fetch state and check active approved pickup contacts are present
+  const stateRes = await request.get('/api/state').set('Cookie', adminCookie);
+  assert.equal(stateRes.status, 200);
+  const foundPupil = stateRes.body.pupils.find(p => p.id === 'NF-6001');
+  assert.equal(foundPupil.collectors.length, 2);
+
+  // 3 & 4. Staff selects approved collector and verification method -> confirms release
+  const depRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-6001',
+      type: 'departure',
+      collectorId: 2,
+      verification: 'Approved ID document checked',
+      device: 'East Gate Handheld',
+      campus: 'Secondary campus',
+      gate: 'East pedestrian gate'
+    });
+  assert.equal(depRes.status, 201);
+  assert.ok(depRes.body.ok);
+
+  // Check event record in MongoDB
+  const savedEvent = await AttendanceEvent.findOne({ id: depRes.body.eventId });
+  assert.ok(savedEvent);
+  assert.equal(savedEvent.collector, 'Marcus Davis');
+  assert.equal(savedEvent.verification, 'Approved ID document checked');
+  assert.equal(savedEvent.device, 'East Gate Handheld');
+  assert.equal(savedEvent.campus, 'Secondary campus');
+  assert.equal(savedEvent.gate, 'East pedestrian gate');
+  assert.equal(savedEvent.staff, 'Amara Okafor');
+
+  // Check audit entry for departure event in MongoDB
+  const auditEntry = await AuditEntry.findOne({ action: 'record_departure', objectId: depRes.body.eventId });
+  assert.ok(auditEntry);
+  assert.ok(auditEntry.reason.includes('device=East Gate Handheld'));
+  assert.ok(auditEntry.reason.includes('collector=Marcus Davis'));
+
+  // 5. Guardian alert with collector display name disclosure enabled
+  assert.ok(depRes.body.notification.message.includes('Marcus Davis'));
+
+  // Now test with disclosure disabled
+  await request
+    .post('/api/settings')
+    .set('Cookie', adminCookie)
+    .send({ discloseCollectorName: false });
+
+  // Setup second pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Brianna Cole',
+      id: 'NF-6002',
+      className: 'Grade 4A',
+      guardian: 'Sarah Cole'
+    });
+  const pupil2 = await Pupil.findOne({ id: 'NF-6002' });
+  pupil2.collectors.push({ id: 1, name: 'Sarah Cole', relation: 'Mother', until: 'Ongoing', active: true });
+  await pupil2.save();
+
+  await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({ pupilId: 'NF-6002', type: 'arrival' });
+
+  const depResNoDisclosure = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-6002',
+      type: 'departure',
+      collectorId: 1,
+      verification: 'Photo matched'
+    });
+  assert.equal(depResNoDisclosure.status, 201);
+  assert.ok(depResNoDisclosure.body.notification.message.includes('an authorized contact'));
+  assert.ok(!depResNoDisclosure.body.notification.message.includes('Sarah Cole'));
+
+  // Reset disclosure setting
+  await request
+    .post('/api/settings')
+    .set('Cookie', adminCookie)
+    .send({ discloseCollectorName: true });
+
+  // 6. Collector not approved: Block / Escalation instruction & Admin Exception
+  // Setup third pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Leo Vance',
+      id: 'NF-6003',
+      className: 'Grade 1C',
+      guardian: 'Elena Vance'
+    });
+  await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({ pupilId: 'NF-6003', type: 'arrival' });
+
+  // Attempt departure with invalid collector ID (unapproved)
+  const blockRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-6003',
+      type: 'departure',
+      collectorId: 999
+    });
+  assert.equal(blockRes.status, 400);
+  assert.ok(blockRes.body.error.includes('Release is blocked'));
+
+  // Manager attempt to authorize exception -> must be blocked (admin only)
+  await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Staff Manager',
+      email: 'manager.gate@northfield.school',
+      role: 'manager',
+      password: 'Password12345!'
+    });
+  const managerCookie = await login('manager.gate@northfield.school', 'Password12345!');
+
+  const managerExceptionRes = await request
+    .post('/api/events')
+    .set('Cookie', managerCookie)
+    .send({
+      pupilId: 'NF-6003',
+      type: 'authorized_exception',
+      collectorName: 'Grandpa Frank',
+      reason: 'Emergency pickup'
+    });
+  assert.equal(managerExceptionRes.status, 403);
+  assert.ok(managerExceptionRes.body.error.includes('Only a school administrator'));
+
+  // Administrator authorizes exception with reason
+  const adminExceptionRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-6003',
+      type: 'authorized_exception',
+      collectorName: 'Grandpa Frank',
+      reason: 'Parent called school office with verified emergency code',
+      verification: 'Admin Exception: ID checked',
+      device: 'Admin Front Desk'
+    });
+  assert.equal(adminExceptionRes.status, 201);
+  assert.ok(adminExceptionRes.body.ok);
+
+  // Check preserved audit entry in MongoDB for the exception
+  const exceptionAudit = await AuditEntry.findOne({ action: 'record_authorized_exception', objectId: adminExceptionRes.body.eventId });
+  assert.ok(exceptionAudit);
+  assert.ok(exceptionAudit.reason.includes('Parent called school office with verified emergency code'));
+  assert.ok(exceptionAudit.reason.includes('collector=Grandpa Frank'));
+});

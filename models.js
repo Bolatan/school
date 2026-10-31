@@ -66,6 +66,9 @@ const attendanceEventSchema = new mongoose.Schema({
   source: { type: String, required: true, default: 'Card scan' },
   collector: { type: String, default: null },
   verification: { type: String, default: null },
+  device: { type: String, default: 'Primary Gate Terminal' },
+  campus: { type: String, default: 'Primary campus' },
+  gate: { type: String, default: 'Main gate' },
   alert: { type: String, default: 'Demo only' },
   reason: { type: String, default: '' },
   manualEntry: { type: Boolean, default: false },
@@ -96,6 +99,13 @@ const Notification = mongoose.model('Notification', notificationSchema);
 const AuditEntry = mongoose.model('AuditEntry', auditEntrySchema);
 const Session = mongoose.model('Session', sessionSchema);
 
+const schoolSettingSchema = new mongoose.Schema({
+  key: { type: String, required: true, unique: true },
+  val: { type: mongoose.Schema.Types.Mixed, required: true }
+}, { timestamps: true });
+
+const SchoolSetting = mongoose.model('SchoolSetting', schoolSettingSchema);
+
 module.exports = {
   User,
   Pupil,
@@ -103,5 +113,6 @@ module.exports = {
   AttendanceEvent,
   Notification,
   AuditEntry,
-  Session
+  Session,
+  SchoolSetting
 };

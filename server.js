@@ -7,7 +7,7 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 const XLSX = require('xlsx');
 
-const { User, Pupil, PickupRequest, AttendanceEvent, Notification, AuditEntry, Session } = require('./models');
+const { User, Pupil, PickupRequest, AttendanceEvent, Notification, AuditEntry, Session, SchoolSetting } = require('./models');
 const {
   DEMO_EMAIL,
   DEMO_PASSWORD,
@@ -103,6 +103,10 @@ app.use((req, res, next) => {
 });
 
 async function getStateJson() {
+  const settingsDocs = await SchoolSetting.find();
+  const schoolSettingsMap = {};
+  settingsDocs.forEach(s => { schoolSettingsMap[s.key] = s.val; });
+
   const pupilDocs = await Pupil.find({ active: true }).sort({ name: 1 });
   const pupils = pupilDocs.map(p => {
     const activeCollectors = (p.collectors || [])
@@ -148,6 +152,9 @@ async function getStateJson() {
     source: e.source,
     collector: e.collector,
     verification: e.verification,
+    device: e.device || 'Primary Gate Terminal',
+    campus: e.campus || 'Primary campus',
+    gate: e.gate || 'Main gate',
     alert: e.alert,
     reason: e.reason || '',
     manualEntry: Boolean(e.manualEntry),
@@ -176,6 +183,8 @@ async function getStateJson() {
       campuses: ["Primary campus", "Secondary campus", "North gate annex"],
       gates: ["Main gate", "East pedestrian gate", "Bus drop-off gate"],
       sessions: ["Morning Arrival (07:30 - 08:30)", "Standard Day", "Afternoon Dismissal (14:30 - 15:30)"],
+      devices: ["Primary Gate Terminal", "East Gate Handheld", "Bus Loop Scanner", "Admin Front Desk"],
+      discloseCollectorName: schoolSettingsMap.discloseCollectorName !== undefined ? Boolean(schoolSettingsMap.discloseCollectorName) : true,
       totalPupils: 248
     },
     notificationsStatus: "active"
@@ -476,6 +485,9 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
 
     let collector = null;
     let verification = null;
+    const device = String(req.body.device || 'Primary Gate Terminal').slice(0, 80);
+    const campus = String(req.body.campus || 'Primary campus').slice(0, 50);
+    const gate = String(req.body.gate || 'Main gate').slice(0, 50);
 
     if (typ === 'departure') {
       const collectorId = req.body.collectorId;
@@ -488,30 +500,39 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
       );
       const cr = activeCollectors.find(c => c.id === Number(collectorId));
       if (!cr) {
-        return res.status(400).json({ error: 'That collector is not approved for this pupil.' });
+        return res.status(400).json({ error: 'That collector is not approved for this pupil. Escalation instruction: Release is blocked. An unapproved collector requires a school administrator exception authorization.' });
       }
       collector = cr.name;
       verification = String(req.body.verification || 'Photo matched').slice(0, 60);
     } else if (typ === 'authorized_exception') {
-      if (req.user.role !== 'admin' && req.user.role !== 'manager') {
-        return res.status(403).json({ error: 'Only administrators or managers can authorize exceptions.' });
+      if (req.user.role !== 'admin') {
+        return res.status(403).json({ error: 'Only a school administrator can authorize an unapproved collector exception.' });
       }
-      collector = req.body.collectorName ? String(req.body.collectorName).slice(0, 100) : 'Exception Authorized';
-      verification = 'Admin Exception';
+      if (!reason) {
+        return res.status(400).json({ error: 'An administrator exception requires a preserved reason.' });
+      }
+      collector = req.body.collectorName ? String(req.body.collectorName).trim().slice(0, 100) : '';
+      if (!collector) {
+        return res.status(400).json({ error: 'Collector name is required for authorized exceptions.' });
+      }
+      verification = String(req.body.verification || 'Admin Exception: ID checked').slice(0, 60);
     }
 
     const now = nowLocal();
     const eid = crypto.randomBytes(9).toString('base64url');
-    const campus = String(req.body.campus || 'Primary campus').slice(0, 50);
-    const gate = String(req.body.gate || 'Main gate').slice(0, 50);
+
+    // Retrieve school disclosure configuration
+    const settingDoc = await SchoolSetting.findOne({ key: 'discloseCollectorName' });
+    const discloseCollectorName = settingDoc ? Boolean(settingDoc.val) : true;
 
     // Format guardian notification alert details
     const channel = (pupil.preferredChannel || 'sms').toLowerCase();
     const recipient = channel === 'email' ? (pupil.guardianEmail || `${pupil.guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`) : (pupil.guardianPhone || '+1 555-0100');
     const isArrival = typ === 'arrival' || typ === 'manual_arrival';
+    const collectorDisplay = discloseCollectorName ? (collector || 'authorized contact') : 'an authorized contact';
     const alertMsg = isArrival
       ? `Gatewise Alert: ${pupil.name} has arrived safely at ${campus} (${gate}) at ${formatTime(now)}.`
-      : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collector || 'authorized contact'} at ${formatTime(now)}.`;
+      : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collectorDisplay} at ${formatTime(now)}.`;
 
     const nid = crypto.randomBytes(9).toString('base64url');
     await Notification.create({
@@ -537,6 +558,9 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
       source,
       collector,
       verification,
+      device,
+      campus,
+      gate,
       alert: 'Sent',
       reason,
       manualEntry,
@@ -548,7 +572,7 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
       action: `record_${typ}`,
       objectType: 'event',
       objectId: eid,
-      reason: `campus=${campus}; gate=${gate}; source=${source}; reason=${reason}; alert_channel=${channel.toUpperCase()}`,
+      reason: `campus=${campus}; gate=${gate}; device=${device}; source=${source}; collector=${collector || 'none'}; verification=${verification || 'none'}; reason=${reason}; alert_channel=${channel.toUpperCase()}`,
       createdAt: now
     });
 
@@ -833,6 +857,31 @@ app.post('/api/import/commit', requireAuth(['admin', 'manager']), async (req, re
     if (err.code === 11000) {
       return res.status(409).json({ error: 'A pupil ID now exists in Gatewise. Preview the roster again and resolve duplicate IDs.' });
     }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/settings', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { discloseCollectorName } = req.body;
+    if (discloseCollectorName !== undefined) {
+      await SchoolSetting.findOneAndUpdate(
+        { key: 'discloseCollectorName' },
+        { key: 'discloseCollectorName', val: Boolean(discloseCollectorName) },
+        { upsert: true, new: true }
+      );
+      await AuditEntry.create({
+        userId: req.user._id,
+        action: 'update_school_settings',
+        objectType: 'school_setting',
+        objectId: 'discloseCollectorName',
+        reason: `discloseCollectorName set to ${Boolean(discloseCollectorName)}`,
+        createdAt: new Date()
+      });
+    }
+    const state = await getStateJson();
+    res.json({ ok: true, school: state.school });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

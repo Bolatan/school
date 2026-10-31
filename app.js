@@ -14,11 +14,19 @@
   const today = new Date().toLocaleDateString('en-CA');
   const localTime = (minsAgo=0) => {const d=new Date(Date.now()-minsAgo*60000);return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
   const load=(key,fallback)=>{try{const v=JSON.parse(localStorage.getItem('gatewise-'+key));return v??fallback}catch{return fallback}};
-  let pupils=[], events=[], requests=[], signedInUser=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
+  let pupils=[], events=[], requests=[], schoolSettings={}, signedInUser=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
   const $=(s,root=document)=>root.querySelector(s), $$=(s,root=document)=>[...root.querySelectorAll(s)];
   const save=()=>{};
   async function api(path,body){const response=await fetch(path,{method:body?'POST':'GET',credentials:'same-origin',headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.error||(response.status===404?'Server endpoint not found (404). Check that the Gatewise app server is running.':`Request failed (${response.status})`));return data;}
-  function acceptState(state){pupils=state.pupils||[];events=(state.events||[]).map(e=>({...e,createdAt:e.createdAt||Date.now()}));requests=state.requests||[];}
+  function acceptState(state){
+    pupils=state.pupils||[];
+    events=(state.events||[]).map(e=>({...e,createdAt:e.createdAt||Date.now()}));
+    requests=state.requests||[];
+    schoolSettings=state.school||{};
+    if($('#disclosureToggle')){
+      $('#disclosureToggle').checked=schoolSettings.discloseCollectorName!==false;
+    }
+  }
   async function refreshState(){const state=await api('/api/state');acceptState(state);render();}
   function setSignedIn(user){signedInUser=user;$('#authScreen').classList.add('hidden');$('.profile strong').textContent=user.name;$('.profile small').textContent=({admin:'School administrator',manager:'School manager',viewer:'View only'})[user.role]||'School staff';$('#userNav').classList.toggle('hidden',user.role!=='admin');$('#addPupilBtn').classList.toggle('hidden',user.role==='viewer');$('#uploadRosterBtn').classList.toggle('hidden',user.role==='viewer');$('[data-page="scan"]').classList.toggle('hidden',user.role==='viewer');$('[data-goto="scan"]').classList.toggle('hidden',user.role==='viewer');}
   const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -51,34 +59,181 @@
   }
 
   function eventConfirm(p, isManual=false, initialReason='card_missing'){
-    const collectors=p.collectors||[];
+    const collectors = p.collectors || [];
     const hasCollectors = collectors.length > 0;
+    const device = $('#deviceSelect')?.value || 'Primary Gate Terminal';
     const campus = $('#campusSelect')?.value || 'Primary campus';
     const gate = $('#gateSelect')?.value || 'Main gate';
-    const select=mode==='departure' && hasCollectors?`<div class="form-field"><label>Approved collector (Mandatory for departure)</label><select id="collectorSelect">${collectors.map(c=>`<option value="${c.id}">${escapeHtml(c.name)} · ${escapeHtml(c.relation)}</option>`).join('')}</select></div><div class="form-field"><label>Verification method</label><select id="verifySelect"><option>Photo matched</option><option>School ID checked</option><option>Known to staff</option></select></div>`:'';
-    const exceptionBlock=mode==='departure' && !hasCollectors?`<div class="danger-note" style="margin-bottom:12px">No approved collectors found for ${escapeHtml(p.name)}. You may request an authorized administrator exception with a recorded reason.</div><div class="form-field"><label>Collector Name (Unapproved)</label><input id="exceptionCollectorInput" placeholder="Full name of person collecting child" required></div><div class="form-field"><label>Exception Reason (Required for audit)</label><textarea id="exceptionReasonInput" placeholder="Why is this unapproved collector authorized?" required style="width:100%;padding:8px;border-radius:6px;border:1px solid #d0d5dd;font:inherit"></textarea></div>`:'';
-    const manualReasonSelect=isManual?`<div class="form-field"><label>Manual entry reason</label><select id="reasonSelect"><option value="card_missing" ${initialReason==='card_missing'?'selected':''}>Card missing</option><option value="card_unreadable" ${initialReason==='card_unreadable'?'selected':''}>Unreadable QR code</option><option value="other">Other reason</option></select></div>`:'';
+    const isAdmin = signedInUser?.role === 'admin';
     const channelLabel = (p.preferredChannel || 'sms').toUpperCase();
 
-    openModal(`<h2 id="modalTitle">Confirm ${mode === 'arrival' ? 'Arrival' : 'Departure'}</h2><p class="modal-intro">Staff must visually verify the pupil against their official photo before confirming. Location: <b>${escapeHtml(campus)}</b> (${escapeHtml(gate)}).</p><div class="confirm-profile"><div class="photo-preview-large">${escapeHtml(p.photo||p.initials)}</div><div><strong style="font-size:14px">${escapeHtml(p.name)}</strong><small style="font-size:11px;color:#6f7487">${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small><small style="display:block;margin-top:4px">Guardian: ${escapeHtml(p.guardian)} <span class="channel-badge">${escapeHtml(channelLabel)} ALERT READY</span></small></div></div>${manualReasonSelect}${mode==='departure'?(hasCollectors?select:exceptionBlock):'<p class="confirm-info" style="margin:12px 0">Clicking confirm will record arrival at the school gate and immediately dispatch an arrival alert to the eligible guardian.</p>'}<div class="modal-actions"><button class="button button-outline" id="cancelConfirm">Cancel</button><button class="button button-primary" id="saveEvent">${mode==='departure'&&!hasCollectors?'Authorize Exception & Release':`Confirm ${mode === 'arrival' ? 'Arrival' : 'Departure'}`}</button></div>`);
+    // Approved contacts list with visual cards
+    let departureSection = '';
+    if (mode === 'departure') {
+      const contactsHtml = hasCollectors ? `
+        <div style="margin:12px 0">
+          <label style="font-size:10px;font-weight:700;color:#454b60;display:block;margin-bottom:6px">Active Approved Pickup Contacts</label>
+          <div class="approved-collectors-list">
+            ${collectors.map((c, i) => `
+              <label class="collector-card-item ${i === 0 ? 'selected' : ''}" data-collector-id="${c.id}">
+                <input type="radio" name="selectedCollectorRadio" value="${c.id}" ${i === 0 ? 'checked' : ''}>
+                <div class="collector-avatar">${escapeHtml(initials(c.name))}</div>
+                <div class="collector-meta">
+                  <strong>${escapeHtml(c.name)} <span style="font-weight:normal;color:#6f7487">(${escapeHtml(c.relation)})</span></strong>
+                  <small>Status: Approved · Valid until: ${escapeHtml(c.until || 'Ongoing')}</small>
+                </div>
+              </label>
+            `).join('')}
+          </div>
+        </div>
+        <div class="form-field" style="margin-bottom:12px">
+          <label>Identity Verification Method (School Policy Check)</label>
+          <select id="verifySelect">
+            <option value="Photo matched">Photo matched (official records comparison)</option>
+            <option value="Approved ID document checked">Approved ID document checked</option>
+            <option value="Known to staff">Known to staff</option>
+          </select>
+        </div>
+      ` : `
+        <div class="block-escalation">
+          <div class="block-icon">!</div>
+          <div>
+            <strong>BLOCK: Collector not approved</strong>
+            <p>Escalation instruction: Release is blocked. No approved pickup contacts found for this pupil. Only a school administrator can authorize an exception with a preserved audit entry.</p>
+          </div>
+        </div>
+      `;
 
-    $('#cancelConfirm').onclick=closeModal;
-    $('#saveEvent').onclick=()=>{
-      if (mode==='departure' && !hasCollectors) {
-        const collectorName = $('#exceptionCollectorInput')?.value.trim();
-        const reason = $('#exceptionReasonInput')?.value.trim();
-        if (!collectorName || !reason) {
-          toast('Collector name and exception reason are required.','!');
+      // Option to trigger or show administrator exception
+      const unapprovedTrigger = hasCollectors ? `
+        <div style="margin:10px 0 14px">
+          <button type="button" class="text-link" id="toggleUnapprovedBtn" style="font-size:10px;color:#c05621">
+            Person collecting child is NOT listed as approved? Click for escalation / admin exception ↗
+          </button>
+        </div>
+      ` : '';
+
+      const adminExceptionForm = `
+        <div id="exceptionSection" class="exception-box ${hasCollectors ? 'hidden' : ''}">
+          <h3>Authorize Unapproved Collector Exception (Administrator Only)</h3>
+          ${!isAdmin ? `
+            <div class="danger-note" style="margin-bottom:10px">
+              <b>Escalation required:</b> Your account (${escapeHtml(signedInUser?.role)}) cannot authorize pickup exceptions. Please summon a school administrator to review and authorize release.
+            </div>
+          ` : `
+            <div class="form-field" style="margin-bottom:8px">
+              <label>Unapproved Collector Full Name *</label>
+              <input id="exceptionCollectorInput" placeholder="Full legal name of collector" required>
+            </div>
+            <div class="form-field" style="margin-bottom:8px">
+              <label>Exception Reason (Preserved in Audit Log) *</label>
+              <textarea id="exceptionReasonInput" placeholder="Detailed reason for releasing to unapproved collector (e.g. parent emergency phone authorization)..." required style="width:100%;padding:8px;border-radius:6px;border:1px solid #d0d5dd;font:inherit;font-size:10px;min-height:50px"></textarea>
+            </div>
+            <div class="form-field">
+              <label>Identity Verification Method</label>
+              <select id="exceptionVerifySelect">
+                <option value="Approved ID document checked">Government / Approved ID document checked</option>
+                <option value="Photo matched">Photo matched</option>
+                <option value="Known to staff">Known to staff</option>
+              </select>
+            </div>
+          `}
+        </div>
+      `;
+
+      departureSection = contactsHtml + unapprovedTrigger + adminExceptionForm;
+    }
+
+    const manualReasonSelect = isManual ? `
+      <div class="form-field" style="margin-bottom:12px">
+        <label>Manual entry reason</label>
+        <select id="reasonSelect">
+          <option value="card_missing" ${initialReason==='card_missing'?'selected':''}>Card missing</option>
+          <option value="card_unreadable" ${initialReason==='card_unreadable'?'selected':''}>Unreadable QR code</option>
+          <option value="other">Other reason</option>
+        </select>
+      </div>
+    ` : '';
+
+    openModal(`
+      <h2 id="modalTitle">Confirm ${mode === 'arrival' ? 'Arrival' : 'Departure & Release'}</h2>
+      <p class="modal-intro">
+        Staff verifies pupil against official photograph before recording handover. Device: <b>${escapeHtml(device)}</b> · Location: <b>${escapeHtml(campus)} (${escapeHtml(gate)})</b>.
+      </p>
+      <div class="confirm-profile">
+        <div class="photo-preview-large">${escapeHtml(p.photo||p.initials)}</div>
+        <div>
+          <strong style="font-size:14px">${escapeHtml(p.name)}</strong>
+          <small style="font-size:11px;color:#6f7487">${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small>
+          <small style="display:block;margin-top:4px">Guardian: ${escapeHtml(p.guardian)} <span class="channel-badge">${escapeHtml(channelLabel)} ALERT READY</span></small>
+        </div>
+      </div>
+      ${manualReasonSelect}
+      ${mode === 'departure' ? departureSection : '<p class="confirm-info" style="margin:12px 0">Confirming will record arrival at the school gate and dispatch an arrival alert to eligible guardians.</p>'}
+      <div class="modal-actions">
+        <button class="button button-outline" id="cancelConfirm">Cancel</button>
+        <button class="button button-primary" id="saveEvent">
+          ${mode === 'departure' && !hasCollectors ? (isAdmin ? 'Authorize Exception & Release' : 'Blocked — Admin Required') : `Confirm ${mode === 'arrival' ? 'Arrival' : 'Release'}`}
+        </button>
+      </div>
+    `);
+
+    // Radio selection interactivity for collectors
+    $$('.collector-card-item').forEach(card => {
+      card.onclick = () => {
+        $$('.collector-card-item').forEach(c => c.classList.remove('selected'));
+        card.classList.add('selected');
+        const radio = card.querySelector('input[type="radio"]');
+        if (radio) radio.checked = true;
+      };
+    });
+
+    const toggleUnapproved = $('#toggleUnapprovedBtn');
+    if (toggleUnapproved) {
+      toggleUnapproved.onclick = () => {
+        const exc = $('#exceptionSection');
+        if (exc) {
+          const isHidden = exc.classList.toggle('hidden');
+          toggleUnapproved.textContent = isHidden
+            ? 'Person collecting child is NOT listed as approved? Click for escalation / admin exception ↗'
+            : '▲ Hide unapproved collector / exception form';
+          if (!isHidden && isAdmin) {
+            $('#saveEvent').textContent = 'Authorize Exception & Release';
+          } else {
+            $('#saveEvent').textContent = `Confirm ${mode === 'arrival' ? 'Arrival' : 'Release'}`;
+          }
+        }
+      };
+    }
+
+    $('#cancelConfirm').onclick = closeModal;
+    $('#saveEvent').onclick = () => {
+      const excSection = $('#exceptionSection');
+      const isExceptionMode = excSection && !excSection.classList.contains('hidden');
+
+      if (mode === 'departure' && (!hasCollectors || isExceptionMode)) {
+        if (!isAdmin) {
+          toast('Collector not approved. Escalation instruction: Only a school administrator can authorize an exception.', '!');
           return;
         }
-        recordAuthorizedException(p, collectorName, reason);
+        const collectorName = $('#exceptionCollectorInput')?.value.trim();
+        const reason = $('#exceptionReasonInput')?.value.trim();
+        const verification = $('#exceptionVerifySelect')?.value || 'Admin Exception: ID checked';
+        if (!collectorName || !reason) {
+          toast('Collector name and exception reason are required for administrator authorization.', '!');
+          return;
+        }
+        recordAuthorizedException(p, collectorName, reason, verification);
       } else {
-        recordEvent(p, mode, isManual? 'Manual entry' : 'Card scan', isManual? ($('#reasonSelect')?.value||'card_missing') : '');
+        recordEvent(p, mode, isManual ? 'Manual entry' : 'Card scan', isManual ? ($('#reasonSelect')?.value || 'card_missing') : '');
       }
     };
   }
 
-  async function recordAuthorizedException(p, collectorName, reason) {
+  async function recordAuthorizedException(p, collectorName, reason, verification) {
+    const device = $('#deviceSelect')?.value || 'Primary Gate Terminal';
+    const campus = $('#campusSelect')?.value || 'Primary campus';
+    const gate = $('#gateSelect')?.value || 'Main gate';
     try {
       const res = await api('/api/events', {
         pupilId: p.id,
@@ -86,11 +241,19 @@
         source: 'Authorized exception',
         reason,
         collectorName,
+        verification,
+        device,
+        campus,
+        gate,
         manualEntry: true
       });
       acceptState(res.state);
       closeModal();
       render();
+      const headline = 'Authorized Exception Departure recorded';
+      const notifInfo = res.notification ? ` · Alert sent via ${res.notification.channel}` : '';
+      $('#lastScanCard').innerHTML = `<div class="pupil-cell">${avatar(p)}<span><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(headline)} · with ${escapeHtml(collectorName)}${escapeHtml(notifInfo)}</small></span></div>`;
+      showScanResult(true, `Exception authorized and departure recorded for ${p.name}.`, `Collector: ${collectorName} · Verified: ${verification} · Reason: ${reason}`);
       toast(`Authorized exception departure recorded for ${p.name}.`);
       navigate('scan');
     } catch(err) {
@@ -98,46 +261,55 @@
     }
   }
 
-  function resolvePickupRequest(r,action){if(action==='approve'){const localToday=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);openModal(`<h2 id="modalTitle">Approve pickup</h2><p class="modal-intro">This adds ${escapeHtml(r.name)} to the approved collector list for ${escapeHtml(pupil(r.pupilId)?.name||'the pupil')}. Set the last valid pickup date.</p><form id="approvePickupForm"><div class="form-field"><label>Approval expires on</label><input name="validUntil" type="date" min="${localToday}" value="${localToday}" required></div><div class="danger-note" style="margin-top:12px">Staff must still verify this person’s identity at pickup. Confirm the expiry with the guardian before approving.</div><div class="modal-actions"><button type="button" class="button button-outline" id="cancelPickupApproval">Cancel</button><button class="button button-primary" type="submit">Approve collector</button></div></form>`);$('#cancelPickupApproval').onclick=closeModal;$('#approvePickupForm').onsubmit=async ev=>{ev.preventDefault();const validUntil=new FormData(ev.currentTarget).get('validUntil');try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action,validUntil});acceptState(res.state);closeModal();render();toast(`${r.name} approved until ${validUntil}.`)}catch(err){toast(err.message,'!')}};return}openModal(`<h2 id="modalTitle">Decline pickup request?</h2><p class="modal-intro">${escapeHtml(r.name)} will not be added to the approved collector list. Contact the guardian through the school’s usual process.</p><div class="modal-actions"><button class="button button-outline" id="cancelDecline">Keep request</button><button class="button button-dark" id="confirmDecline">Decline request</button></div>`);$('#cancelDecline').onclick=closeModal;$('#confirmDecline').onclick=async()=>{try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action});acceptState(res.state);closeModal();render();toast('Pickup request declined.')}catch(err){toast(err.message,'!')}}}
-  async function recordEvent(p,type,source='Card scan',reason=''){
-    let collector=null,verification=null;
-    const campus=$('#campusSelect')?.value || 'Primary campus';
-    const gate=$('#gateSelect')?.value || 'Main gate';
-    if(type==='departure'){
-      const c=p.collectors.find(x=>String(x.id)===String($('#collectorSelect')?.value));
-      if(!c){toast('Choose an approved collector.','!');return}
-      collector=c.name;
-      verification=$('#verifySelect')?.value||'Photo matched';
+  async function recordEvent(p, type, source='Card scan', reason='') {
+    let collectorId = null, verification = null;
+    const device = $('#deviceSelect')?.value || 'Primary Gate Terminal';
+    const campus = $('#campusSelect')?.value || 'Primary campus';
+    const gate = $('#gateSelect')?.value || 'Main gate';
+
+    if (type === 'departure') {
+      const selectedRadio = $('input[name="selectedCollectorRadio"]:checked');
+      if (!selectedRadio) {
+        toast('Select an approved collector. If collector is unapproved, escalate to administrator.', '!');
+        return;
+      }
+      collectorId = Number(selectedRadio.value);
+      verification = $('#verifySelect')?.value || 'Photo matched';
     }
-    try{
-      const res=await api('/api/events',{
-        pupilId:p.id,
+
+    try {
+      const res = await api('/api/events', {
+        pupilId: p.id,
         type,
         source,
         reason,
+        device,
         campus,
         gate,
-        manualEntry:source==='Manual entry'||source==='Manual ID lookup'||!!reason,
-        collectorId:type==='departure'?Number($('#collectorSelect').value):undefined,
+        manualEntry: source === 'Manual entry' || source === 'Manual ID lookup' || !!reason,
+        collectorId: type === 'departure' ? collectorId : undefined,
         verification
       });
       acceptState(res.state);
       closeModal();
       render();
-      const e=events.find(x=>x.id===res.eventId);
-      const headline=type==='arrival'?'Arrival recorded':'Departure recorded';
-      const mTag=reason?` · MANUAL ENTRY (${reason.replace('_',' ')})`:'';
-      const notifInfo=res.notification ? ` · Alert sent via ${res.notification.channel} to ${res.notification.guardian}` : '';
-      $('#lastScanCard').innerHTML=`<div class="pupil-cell">${avatar(p)}<span><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(headline)} · ${escapeHtml(e?.time||localTime())}${collector?` · with ${escapeHtml(collector)}`:''}${mTag}${escapeHtml(notifInfo)}</small></span></div>`;
-      showScanResult(true, `${headline} successfully for ${p.name}.`, `Campus: ${campus} (${gate}) · Guardian alert sent via ${(p.preferredChannel||'sms').toUpperCase()}`);
+      const e = events.find(x => x.id === res.eventId);
+      const headline = type === 'arrival' ? 'Arrival recorded' : 'Departure recorded';
+      const mTag = reason ? ` · MANUAL ENTRY (${reason.replace('_',' ')})` : '';
+      const notifInfo = res.notification ? ` · Alert sent via ${res.notification.channel} to ${res.notification.guardian}` : '';
+      const collectorText = e?.collector ? ` · with ${e.collector}` : '';
+      $('#lastScanCard').innerHTML = `<div class="pupil-cell">${avatar(p)}<span><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(headline)} · ${escapeHtml(e?.time||localTime())}${escapeHtml(collectorText)}${mTag}${escapeHtml(notifInfo)}</small></span></div>`;
+      showScanResult(true, `${headline} successfully for ${p.name}.`, `Device: ${device} · Location: ${campus} (${gate}) · Verification: ${verification || 'N/A'}`);
       toast(`${headline} for ${p.name}. Guardian alerted via ${(p.preferredChannel||'sms').toUpperCase()}.`);
       navigate('scan');
-    }catch(err){
+    } catch(err) {
       closeModal();
       showScanResult(false, `Could not record ${type} for ${p.name}`, err.message);
-      toast(err.message,'!');
+      toast(err.message, '!');
     }
   }
+
+  function resolvePickupRequest(r,action){if(action==='approve'){const localToday=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);openModal(`<h2 id="modalTitle">Approve pickup</h2><p class="modal-intro">This adds ${escapeHtml(r.name)} to the approved collector list for ${escapeHtml(pupil(r.pupilId)?.name||'the pupil')}. Set the last valid pickup date.</p><form id="approvePickupForm"><div class="form-field"><label>Approval expires on</label><input name="validUntil" type="date" min="${localToday}" value="${localToday}" required></div><div class="danger-note" style="margin-top:12px">Staff must still verify this person’s identity at pickup. Confirm the expiry with the guardian before approving.</div><div class="modal-actions"><button type="button" class="button button-outline" id="cancelPickupApproval">Cancel</button><button class="button button-primary" type="submit">Approve collector</button></div></form>`);$('#cancelPickupApproval').onclick=closeModal;$('#approvePickupForm').onsubmit=async ev=>{ev.preventDefault();const validUntil=new FormData(ev.currentTarget).get('validUntil');try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action,validUntil});acceptState(res.state);closeModal();render();toast(`${r.name} approved until ${validUntil}.`)}catch(err){toast(err.message,'!')}};return}openModal(`<h2 id="modalTitle">Decline pickup request?</h2><p class="modal-intro">${escapeHtml(r.name)} will not be added to the approved collector list. Contact the guardian through the school’s usual process.</p><div class="modal-actions"><button class="button button-outline" id="cancelDecline">Keep request</button><button class="button button-dark" id="confirmDecline">Decline request</button></div>`);$('#cancelDecline').onclick=closeModal;$('#confirmDecline').onclick=async()=>{try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action});acceptState(res.state);closeModal();render();toast('Pickup request declined.')}catch(err){toast(err.message,'!')}}}
   function findAndScan(term,source='Card scan'){const query=term.trim().toLowerCase();if(!query)return;const matches=pupils.filter(p=>p.id.toLowerCase()===query || p.name.toLowerCase().includes(query));if(!matches.length){toast('Pupil not found by ID or name. Search the directory.','!');return}if(matches.length===1){eventConfirm(matches[0], source!=='Card scan');return}const listHtml=matches.map(p=>`<div class="confirm-profile pupil-select-item" data-select-pupil="${escapeHtml(p.id)}" style="cursor:pointer">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)} · ${escapeHtml(p.guardian)}</small></div></div>`).join('');openModal(`<h2 id="modalTitle">Select pupil</h2><p class="modal-intro">Multiple pupils matched "${escapeHtml(term)}". Select the pupil to verify using their photo on screen.</p><div style="display:grid;gap:8px;max-height:280px;overflow:auto">${listHtml}</div><div class="modal-actions"><button class="button button-outline" id="cancelSelectPupil">Cancel</button></div>`);$('#cancelSelectPupil').onclick=closeModal;$$('[data-select-pupil]').forEach(el=>{el.onclick=()=>{const selected=pupil(el.dataset.selectPupil);if(selected)eventConfirm(selected, source!=='Card scan');};});}
   function openAddPupil(){openModal(`<h2 id="modalTitle">Add a pupil</h2><p class="modal-intro">Create a school profile. The guardian relationship still needs to be verified by the school.</p><form id="addPupilForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required placeholder="Pupil name"></div><div class="form-field"><label>Pupil ID</label><input name="id" placeholder="Auto-generated if blank"></div><div class="form-field"><label>Class</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div><div class="form-field full"><label>Guardian name</label><input name="guardian" required placeholder="Parent or guardian"></div><div class="form-field full"><div class="danger-note">Local MVP only: do not enter real pupil or guardian data. No guardian login or messaging is connected.</div></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAdd">Cancel</button><button class="button button-primary" type="submit">Create pupil</button></div></form>`);$('#cancelAdd').onclick=closeModal;$('#addPupilForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget),name=String(f.get('name')).trim();try{const res=await api('/api/pupils',{name,id:String(f.get('id')).trim(),className:f.get('className'),guardian:String(f.get('guardian')).trim()});acceptState(res.state);closeModal();render();toast(`${name} added to the directory.`)}catch(err){toast(err.message,'!')}};}
   async function renderUsers(){if(signedInUser?.role!=='admin')return;const body=$('#userRows');body.innerHTML='<tr><td colspan="5">Loading accounts…</td></tr>';try{const {users}=await api('/api/users');body.innerHTML=users.map(u=>`<tr><td><b>${escapeHtml(u.name)}</b></td><td>${escapeHtml(u.email)}</td><td><select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option><option value="manager" ${u.role==='manager'?'selected':''}>Manager</option><option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option></select></td><td>${badge(u.active?'Active':'Disabled',u.active?'status-approved':'status-neutral')}</td><td><button class="button button-outline user-toggle" data-user-active="${u.id}" data-active="${u.active?0:1}" ${u.id===signedInUser.id?'disabled':''}>${u.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5">No staff accounts.</td></tr>'}catch(err){body.innerHTML=`<tr><td colspan="5">${escapeHtml(err.message)}</td></tr>`}}
@@ -190,6 +362,22 @@
     const req=e.target.closest('[data-request]');if(req){const r=requests.find(x=>x.id===req.dataset.request);if(r)resolvePickupRequest(r,req.dataset.action);}
     const corr=e.target.closest('[data-correct-event]');if(corr){openCorrectionModal(corr.dataset.correctEvent);}
     const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openModal(`<h2 id="modalTitle">Pupil card</h2><p class="modal-intro">Demo school ID card. QR contains only a random lookup code in a production implementation.</p><div class="confirm-profile">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small></div></div><div style="display:grid;place-items:center;padding:20px;background:#fafbff;border:1px solid #eceef4;border-radius:8px"><div id="qrCanvas" style="font:700 14px monospace;color:#4c5ddd;border:8px solid white;background:white;padding:18px;letter-spacing:1px">▦ ${escapeHtml(qrValue(p))}</div><small class="card-tag" style="margin-top:8px">Demo QR reference (not scannable artwork)</small></div><div class="modal-actions"><button class="button button-outline" id="closeCard">Close</button></div>`);$('#closeCard').onclick=closeModal;}
+  });
+
+  $('#disclosureToggle')?.addEventListener('change', async e => {
+    if (signedInUser?.role !== 'admin') {
+      toast('Only an administrator can change disclosure settings.', '!');
+      e.target.checked = !e.target.checked;
+      return;
+    }
+    try {
+      const res = await api('/api/settings', { discloseCollectorName: e.target.checked });
+      schoolSettings = res.school || {};
+      toast(`Alert disclosure updated: ${e.target.checked ? 'Collector names disclosed' : 'Collector names kept private'}.`);
+    } catch(err) {
+      toast(err.message, '!');
+      e.target.checked = !e.target.checked;
+    }
   });
 
   $('#uploadRosterBtn').onclick=()=>$('#rosterFile').click();$('#rosterFile').onchange=e=>previewRoster(e.target.files[0]);$('#addUserBtn').onclick=openAddUser;$('#userRows').addEventListener('change',async e=>{const select=e.target.closest('[data-user-role]');if(!select)return;try{await api(`/api/users/${select.dataset.userRole}`,{role:select.value});toast('User role updated.');renderUsers()}catch(err){toast(err.message,'!');renderUsers()}});$('#userRows').addEventListener('click',async e=>{const button=e.target.closest('[data-user-active]');if(!button)return;try{await api(`/api/users/${button.dataset.userActive}`,{active:Number(button.dataset.active)===1});toast('User status updated.');renderUsers()}catch(err){toast(err.message,'!')}});
