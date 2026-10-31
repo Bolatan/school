@@ -270,4 +270,12 @@ test('Serverless handler (api/index.js)', async () => {
   const res = await serverlessRequest.get('/api/me');
   assert.equal(res.status, 200);
   assert.equal(res.body.user, null);
+
+  // Test serverless handler with pre-parsed req.body and vercel origin
+  const loginRes = await serverlessRequest
+    .post('/api/login')
+    .set('Origin', 'https://school-five-wheat.vercel.app')
+    .send({ email: DEMO_EMAIL, password: DEMO_PASSWORD });
+  assert.equal(loginRes.status, 200);
+  assert.equal(loginRes.body.user.email, DEMO_EMAIL);
 });
