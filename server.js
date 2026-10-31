@@ -7,7 +7,7 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 const XLSX = require('xlsx');
 
-const { User, Pupil, PickupRequest, AttendanceEvent, AuditEntry, Session } = require('./models');
+const { User, Pupil, PickupRequest, AttendanceEvent, Notification, AuditEntry, Session } = require('./models');
 const {
   DEMO_EMAIL,
   DEMO_PASSWORD,
@@ -113,12 +113,28 @@ async function getStateJson() {
       name: p.name,
       className: p.className,
       guardian: p.guardian,
+      guardianPhone: p.guardianPhone || '+1 555-0100',
+      guardianEmail: p.guardianEmail || '',
+      preferredChannel: p.preferredChannel || 'sms',
       initials: p.initials,
       color: p.color,
       photo: p.photo,
       collectors: activeCollectors
     };
   });
+
+  const notificationDocs = await Notification.find().sort({ createdAt: -1 }).limit(100);
+  const notifications = notificationDocs.map(n => ({
+    id: n.id,
+    eventId: n.eventId,
+    pupilId: n.pupilId,
+    guardianName: n.guardianName,
+    channel: n.channel,
+    recipient: n.recipient,
+    message: n.message,
+    status: n.status,
+    sentAt: n.sentAt
+  }));
 
   const eventDocs = await AttendanceEvent.find().sort({ createdAt: -1 }).limit(150);
   const events = eventDocs.map(e => ({
@@ -153,8 +169,16 @@ async function getStateJson() {
     pupils,
     events,
     requests,
-    school: { name: "Northfield Academy", campus: "Primary campus", totalPupils: 248 },
-    notifications: "demo"
+    notifications,
+    school: {
+      name: "Northfield Academy",
+      campus: "Primary campus",
+      campuses: ["Primary campus", "Secondary campus", "North gate annex"],
+      gates: ["Main gate", "East pedestrian gate", "Bus drop-off gate"],
+      sessions: ["Morning Arrival (07:30 - 08:30)", "Standard Day", "Afternoon Dismissal (14:30 - 15:30)"],
+      totalPupils: 248
+    },
+    notificationsStatus: "active"
   };
 }
 
@@ -478,6 +502,29 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
 
     const now = nowLocal();
     const eid = crypto.randomBytes(9).toString('base64url');
+    const campus = String(req.body.campus || 'Primary campus').slice(0, 50);
+    const gate = String(req.body.gate || 'Main gate').slice(0, 50);
+
+    // Format guardian notification alert details
+    const channel = (pupil.preferredChannel || 'sms').toLowerCase();
+    const recipient = channel === 'email' ? (pupil.guardianEmail || `${pupil.guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`) : (pupil.guardianPhone || '+1 555-0100');
+    const isArrival = typ === 'arrival' || typ === 'manual_arrival';
+    const alertMsg = isArrival
+      ? `Gatewise Alert: ${pupil.name} has arrived safely at ${campus} (${gate}) at ${formatTime(now)}.`
+      : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collector || 'authorized contact'} at ${formatTime(now)}.`;
+
+    const nid = crypto.randomBytes(9).toString('base64url');
+    await Notification.create({
+      id: nid,
+      eventId: eid,
+      pupilId: pid,
+      guardianName: pupil.guardian,
+      channel: channel.toUpperCase(),
+      recipient,
+      message: alertMsg,
+      status: 'Sent',
+      sentAt: formatTime(now)
+    });
 
     await AttendanceEvent.create({
       id: eid,
@@ -490,7 +537,7 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
       source,
       collector,
       verification,
-      alert: 'Demo only',
+      alert: 'Sent',
       reason,
       manualEntry,
       correctionLink
@@ -501,12 +548,24 @@ app.post('/api/events', requireAuth(['admin', 'manager']), async (req, res) => {
       action: `record_${typ}`,
       objectType: 'event',
       objectId: eid,
-      reason: `source=${source}; reason=${reason}`,
+      reason: `campus=${campus}; gate=${gate}; source=${source}; reason=${reason}; alert_channel=${channel.toUpperCase()}`,
       createdAt: now
     });
 
     const state = await getStateJson();
-    res.status(201).json({ ok: true, eventId: eid, alertStatus: 'demo_only', state });
+    res.status(201).json({
+      ok: true,
+      eventId: eid,
+      alertStatus: 'sent',
+      notification: {
+        id: nid,
+        guardian: pupil.guardian,
+        channel: channel.toUpperCase(),
+        recipient,
+        message: alertMsg
+      },
+      state
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
