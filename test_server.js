@@ -475,3 +475,89 @@ test('Departure & Pickup: Full 6-step workflow in MongoDB', async () => {
   assert.ok(exceptionAudit.reason.includes('Parent called school office with verified emergency code'));
   assert.ok(exceptionAudit.reason.includes('collector=Grandpa Frank'));
 });
+
+test("Missing card and unreadable QR: manual arrival and departure with collector verification", async () => {
+  const cookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Create a pupil for testing manual workflows
+  await request
+    .post("/api/pupils")
+    .set("Cookie", cookie)
+    .send({
+      name: "Chukwudi Nnamdi",
+      id: "NF-8888",
+      className: "Grade 3A",
+      guardian: "Ngozi Nnamdi"
+    });
+
+  // Add an approved collector for NF-8888
+  const pupil = await Pupil.findOne({ id: "NF-8888" });
+  pupil.collectors.push({
+    id: 1,
+    name: "Ngozi Nnamdi",
+    relation: "Mother",
+    until: "Ongoing",
+    active: true
+  });
+  await pupil.save();
+
+  // 2. Record manual arrival due to card_missing
+  const arrRes = await request
+    .post("/api/events")
+    .set("Cookie", cookie)
+    .send({
+      pupilId: "NF-8888",
+      type: "arrival",
+      source: "Manual entry",
+      reason: "card_missing"
+    });
+  assert.equal(arrRes.status, 201);
+  assert.equal(arrRes.body.ok, true);
+
+  const arrEvent = await AttendanceEvent.findOne({ id: arrRes.body.eventId });
+  assert.ok(arrEvent);
+  assert.equal(arrEvent.reason, "card_missing");
+  assert.equal(arrEvent.manualEntry, true);
+  assert.equal(arrEvent.source, "Manual entry");
+
+  // 3. Manual departure without collector must fail (collector verification required)
+  const failDepRes = await request
+    .post("/api/events")
+    .set("Cookie", cookie)
+    .send({
+      pupilId: "NF-8888",
+      type: "departure",
+      source: "Manual entry",
+      reason: "card_unreadable"
+    });
+  assert.equal(failDepRes.status, 400);
+  assert.ok(failDepRes.body.error.includes("Select an approved collector"));
+
+  // 4. Manual departure with approved collector and card_unreadable reason succeeds
+  const depRes = await request
+    .post("/api/events")
+    .set("Cookie", cookie)
+    .send({
+      pupilId: "NF-8888",
+      type: "departure",
+      source: "Manual entry",
+      reason: "card_unreadable",
+      collectorId: 1,
+      verification: "Photo matched"
+    });
+  assert.equal(depRes.status, 201);
+  assert.equal(depRes.body.ok, true);
+
+  const depEvent = await AttendanceEvent.findOne({ id: depRes.body.eventId });
+  assert.ok(depEvent);
+  assert.equal(depEvent.reason, "card_unreadable");
+  assert.equal(depEvent.manualEntry, true);
+  assert.equal(depEvent.collector, "Ngozi Nnamdi");
+  assert.equal(depEvent.verification, "Photo matched");
+
+  // 5. Verify audit log captures reason and manual source
+  const audit = await AuditEntry.findOne({ action: "record_departure", objectId: depRes.body.eventId });
+  assert.ok(audit);
+  assert.ok(audit.reason.includes("reason=card_unreadable"));
+  assert.ok(audit.reason.includes("source=Manual entry"));
+});

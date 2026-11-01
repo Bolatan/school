@@ -22,3 +22,10 @@
 .block-escalation p{margin:0;font-size:9px;color:#7e221d;line-height:1.4}
 .exception-box{background:#fdfaf3;border:1px dashed #d4b160;border-radius:8px;padding:12px;margin-top:12px}
 .exception-box h3{font:700 11px Manrope;color:#916812;margin:0 0 8px}
+
+.policy-warning-note{background:#fff8ed;border:1px solid #fde6b8;border-left:4px solid #d97706;border-radius:6px;padding:10px 12px;font-size:9.5px;color:#92400e;line-height:1.45;margin-top:12px}
+.policy-warning-note strong{color:#78350f}
+.photo-verification-banner{background:#eef2ff;border:1px solid #c7d2fe;border-radius:8px;padding:10px 12px;margin:10px 0;display:flex;align-items:center;gap:10px}
+.photo-verification-banner strong{display:block;font-size:11px;color:#3730a3}
+.photo-verification-banner p{font-size:9.5px;color:#4338ca;margin:2px 0 0}
+.manual-entry-highlight{border:1px solid #f59e0b;box-shadow:0 0 0 2px #fef3c7}
