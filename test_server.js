@@ -475,3 +475,185 @@ test('Departure & Pickup: Full 6-step workflow in MongoDB', async () => {
   assert.ok(exceptionAudit.reason.includes('Parent called school office with verified emergency code'));
   assert.ok(exceptionAudit.reason.includes('collector=Grandpa Frank'));
 });
+
+test('Offline or delayed sync: device encryption/managed validation, idempotency, queue expiry, and stale pickup policy', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // Setup pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Offline Pupil',
+      id: 'NF-5001',
+      className: 'Grade 5A',
+      guardian: 'Offline Guardian'
+    });
+  const pupil = await Pupil.findOne({ id: 'NF-5001' });
+  pupil.collectors.push({ id: 1, name: 'Offline Guardian', relation: 'Mother', until: 'Ongoing', active: true });
+  await pupil.save();
+
+  // 1. Device not managed or unencrypted -> sync rejected
+  const unmanagedRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5001',
+      type: 'arrival',
+      clientEventId: 'client-offline-001',
+      offlineQueued: true,
+      deviceManaged: false,
+      deviceEncrypted: true
+    });
+  assert.equal(unmanagedRes.status, 400);
+  assert.ok(unmanagedRes.body.error.includes('managed and encrypted'));
+
+  const unencryptedRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5001',
+      type: 'arrival',
+      clientEventId: 'client-offline-002',
+      offlineQueued: true,
+      deviceManaged: true,
+      deviceEncrypted: false
+    });
+  assert.equal(unencryptedRes.status, 400);
+  assert.ok(unencryptedRes.body.error.includes('managed and encrypted'));
+
+  // 2. Queue expiry: event captured > 24 hours ago rejected
+  const expiredRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5001',
+      type: 'arrival',
+      clientEventId: 'client-offline-expired',
+      offlineQueued: true,
+      deviceManaged: true,
+      deviceEncrypted: true,
+      deviceCapturedAt: Date.now() - (25 * 60 * 60 * 1000)
+    });
+  assert.equal(expiredRes.status, 400);
+  assert.ok(expiredRes.body.error.includes('expired under the defined queue retention policy'));
+
+  // 3. Valid offline queued arrival sync
+  const validArrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5001',
+      type: 'arrival',
+      clientEventId: 'client-offline-valid-arr',
+      offlineQueued: true,
+      deviceManaged: true,
+      deviceEncrypted: true,
+      deviceCapturedAt: Date.now() - 60000,
+      staffEmail: DEMO_EMAIL
+    });
+  assert.equal(validArrivalRes.status, 201);
+  assert.ok(validArrivalRes.body.ok);
+
+  // 4. Idempotent sync deduplication: resending same clientEventId returns duplicate status without re-recording
+  const duplicateSyncRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5001',
+      type: 'arrival',
+      clientEventId: 'client-offline-valid-arr',
+      offlineQueued: true,
+      deviceManaged: true,
+      deviceEncrypted: true
+    });
+  assert.equal(duplicateSyncRes.status, 200);
+  assert.equal(duplicateSyncRes.body.isDuplicate, true);
+  assert.equal(duplicateSyncRes.body.alertStatus, 'already_synced');
+
+  // Verify only 1 event exists for NF-5001
+  const eventsForPupil = await AttendanceEvent.find({ pupilId: 'NF-5001', type: 'arrival' });
+  assert.equal(eventsForPupil.length, 1);
+  assert.equal(eventsForPupil[0].clientEventId, 'client-offline-valid-arr');
+
+  // 5. Offline departure with stale pickup permissions: blocked without policy
+  // Default allowOfflineStalePickupPolicy is false
+  const blockedDepartureRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5001',
+      type: 'departure',
+      collectorId: 1,
+      clientEventId: 'client-offline-dep-stale',
+      offlineQueued: true,
+      deviceManaged: true,
+      deviceEncrypted: true,
+      allowOfflineStalePickupPolicy: false
+    });
+  assert.equal(blockedDepartureRes.status, 400);
+  assert.ok(blockedDepartureRes.body.error.includes('stale pickup permissions'));
+
+  // Enable school offline stale pickup policy
+  await request
+    .post('/api/settings')
+    .set('Cookie', adminCookie)
+    .send({ allowOfflineStalePickupPolicy: true });
+
+  const allowedDepartureRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5001',
+      type: 'departure',
+      collectorId: 1,
+      clientEventId: 'client-offline-dep-stale',
+      offlineQueued: true,
+      deviceManaged: true,
+      deviceEncrypted: true,
+      allowOfflineStalePickupPolicy: true
+    });
+  assert.equal(allowedDepartureRes.status, 201);
+  assert.ok(allowedDepartureRes.body.ok);
+
+  // 6. Manual paper/voice fallback reconciliation with required audit reason
+  // Create another pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Paper Fallback Child',
+      id: 'NF-5002',
+      className: 'Grade 1A',
+      guardian: 'Paper Guardian'
+    });
+
+  // Reconcile arrival without reason -> error
+  const noReasonReconcile = await request
+    .post('/api/events/reconcile')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5002',
+      type: 'arrival',
+      reconciliationAuditReason: ''
+    });
+  assert.equal(noReasonReconcile.status, 400);
+  assert.ok(noReasonReconcile.body.error.includes('audit reason'));
+
+  // Reconcile arrival with preserved reason -> success
+  const validReconcile = await request
+    .post('/api/events/reconcile')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5002',
+      type: 'arrival',
+      reconciliationAuditReason: 'Internet outage drill - paper log sheet #12 verified by gate supervisor'
+    });
+  assert.equal(validReconcile.status, 201);
+  assert.ok(validReconcile.body.ok);
+
+  const reconciledEvent = await AttendanceEvent.findOne({ id: validReconcile.body.eventId });
+  assert.ok(reconciledEvent);
+  assert.equal(reconciledEvent.source, 'Paper/voice manual fallback');
+  assert.equal(reconciledEvent.reconciliationAuditReason, 'Internet outage drill - paper log sheet #12 verified by gate supervisor');
+});

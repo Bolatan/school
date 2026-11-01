@@ -72,7 +72,13 @@ const attendanceEventSchema = new mongoose.Schema({
   alert: { type: String, default: 'Demo only' },
   reason: { type: String, default: '' },
   manualEntry: { type: Boolean, default: false },
-  correctionLink: { type: String, default: null }
+  correctionLink: { type: String, default: null },
+  clientEventId: { type: String, default: null, index: true },
+  offlineQueued: { type: Boolean, default: false },
+  deviceCapturedAt: { type: Number, default: null },
+  serverReceivedAt: { type: Number, default: null },
+  syncStatus: { type: String, enum: ['synced', 'pending_sync', 'reconciled_fallback'], default: 'synced' },
+  reconciliationAuditReason: { type: String, default: '' }
 }, { timestamps: true });
 
 const auditEntrySchema = new mongoose.Schema({

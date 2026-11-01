@@ -119,6 +119,18 @@ def init_db():
             c.execute("ALTER TABLE events ADD COLUMN campus TEXT NOT NULL DEFAULT 'Primary campus'")
         if "gate" not in event_cols:
             c.execute("ALTER TABLE events ADD COLUMN gate TEXT NOT NULL DEFAULT 'Main gate'")
+        if "client_event_id" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN client_event_id TEXT")
+        if "offline_queued" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN offline_queued INTEGER NOT NULL DEFAULT 0")
+        if "device_captured_at" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN device_captured_at INTEGER")
+        if "server_received_at" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN server_received_at INTEGER")
+        if "sync_status" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'")
+        if "reconciliation_audit_reason" not in event_cols:
+            c.execute("ALTER TABLE events ADD COLUMN reconciliation_audit_reason TEXT NOT NULL DEFAULT ''")
         pupil_cols = [col[1] for col in c.execute("PRAGMA table_info(pupils)").fetchall()]
         if "guardian_phone" not in pupil_cols:
             c.execute("ALTER TABLE pupils ADD COLUMN guardian_phone TEXT NOT NULL DEFAULT '+1 555-0100'")
@@ -198,6 +210,12 @@ def state_json(c):
         if row:
             disclose = row["val"] in ("1", "true", "True")
 
+    allow_offline_stale = False
+    if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='school_settings'").fetchone():
+        row2 = c.execute("SELECT val FROM school_settings WHERE key='allowOfflineStalePickupPolicy'").fetchone()
+        if row2:
+            allow_offline_stale = row2["val"] in ("1", "true", "True")
+
     return {
         "pupils": pupils,
         "events": events,
@@ -211,6 +229,7 @@ def state_json(c):
             "sessions": ["Morning Arrival (07:30 - 08:30)", "Standard Day", "Afternoon Dismissal (14:30 - 15:30)"],
             "devices": ["Primary Gate Terminal", "East Gate Handheld", "Bus Loop Scanner", "Admin Front Desk"],
             "discloseCollectorName": disclose,
+            "allowOfflineStalePickupPolicy": allow_offline_stale,
             "totalPupils": 248
         },
         "notificationsStatus": "active"
