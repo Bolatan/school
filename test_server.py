@@ -281,5 +281,133 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertEqual(data.get("error"), "Endpoint not found.")
 
+    def test_offline_delayed_sync_and_reconciliation(self):
+        session_token = self.login()
+
+        # Create pupil
+        status, data, _ = self.make_request("/api/pupils", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "name": "Offline Pupil Py",
+            "id": "NF-5555",
+            "className": "Grade 5A",
+            "guardian": "Offline Guardian Py"
+        })
+        self.assertEqual(status, 201)
+
+        # 1. Device unmanaged / unencrypted rejected
+        status, data, _ = self.make_request("/api/events", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-5555",
+            "type": "arrival",
+            "clientEventId": "offline-py-01",
+            "offlineQueued": True,
+            "deviceManaged": False,
+            "deviceEncrypted": True
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("managed and encrypted", data["error"])
+
+        # 2. Expiration check (>24h)
+        status, data, _ = self.make_request("/api/events", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-5555",
+            "type": "arrival",
+            "clientEventId": "offline-py-expired",
+            "offlineQueued": True,
+            "deviceManaged": True,
+            "deviceEncrypted": True,
+            "deviceCapturedAt": int(time.time() * 1000) - (25 * 60 * 60 * 1000)
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("expired", data["error"])
+
+        # 3. Valid offline queued arrival sync
+        status, data, _ = self.make_request("/api/events/sync", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "events": [{
+                "pupilId": "NF-5555",
+                "type": "arrival",
+                "clientEventId": "offline-py-valid",
+                "offlineQueued": True,
+                "deviceManaged": True,
+                "deviceEncrypted": True,
+                "deviceCapturedAt": int(time.time() * 1000) - 30000,
+                "staffEmail": server.DEMO_EMAIL
+            }]
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(data["results"][0]["ok"])
+
+        # 4. Idempotent duplicate sync
+        status, data, _ = self.make_request("/api/events/sync", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "events": [{
+                "pupilId": "NF-5555",
+                "type": "arrival",
+                "clientEventId": "offline-py-valid",
+                "offlineQueued": True,
+                "deviceManaged": True,
+                "deviceEncrypted": True
+            }]
+        })
+        self.assertEqual(status, 200)
+        self.assertTrue(data["results"][0]["isDuplicate"])
+
+        # 5. Stale pickup permissions policy gating
+        with server.db() as c:
+            c.execute("INSERT INTO collectors(pupil_id, name, relation) VALUES(?,?,?)", ("NF-5555", "Offline Guardian Py", "Mother"))
+            cid = c.execute("SELECT id FROM collectors WHERE pupil_id='NF-5555'").fetchone()["id"]
+
+        status, data, _ = self.make_request("/api/events", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-5555",
+            "type": "departure",
+            "collectorId": cid,
+            "clientEventId": "offline-py-dep",
+            "offlineQueued": True,
+            "deviceManaged": True,
+            "deviceEncrypted": True,
+            "allowOfflineStalePickupPolicy": False
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("stale pickup permissions", data["error"])
+
+        # Enable policy
+        status, data, _ = self.make_request("/api/settings", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "allowOfflineStalePickupPolicy": True
+        })
+        self.assertEqual(status, 200)
+
+        status, data, _ = self.make_request("/api/events", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-5555",
+            "type": "departure",
+            "collectorId": cid,
+            "clientEventId": "offline-py-dep",
+            "offlineQueued": True,
+            "deviceManaged": True,
+            "deviceEncrypted": True,
+            "allowOfflineStalePickupPolicy": True
+        })
+        self.assertEqual(status, 201)
+
+        # 6. Fallback reconciliation requiring audit reason
+        status, data, _ = self.make_request("/api/pupils", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "name": "Reconcile Pupil",
+            "id": "NF-5556",
+            "className": "Grade 1B",
+            "guardian": "Reconcile Guardian"
+        })
+        self.assertEqual(status, 201)
+
+        status, data, _ = self.make_request("/api/events/reconcile", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-5556",
+            "type": "arrival",
+            "reconciliationAuditReason": ""
+        })
+        self.assertEqual(status, 400)
+        self.assertIn("audit reason", data["error"])
+
+        status, data, _ = self.make_request("/api/events/reconcile", method="POST", cookies_dict={"gw_session": session_token}, data={
+            "pupilId": "NF-5556",
+            "type": "arrival",
+            "reconciliationAuditReason": "Paper log reconcile sheet #5 verified by gate staff"
+        })
+        self.assertEqual(status, 201)
+        self.assertTrue(data["ok"])
+
 if __name__ == "__main__":
     unittest.main()
