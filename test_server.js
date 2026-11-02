@@ -15,7 +15,7 @@ const {
   PupilGuardian,
   CorrectionRequest
 } = require('./models');
-const { DEMO_EMAIL, DEMO_PASSWORD } = require('./authUtils');
+const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
 let mongod;
 let request;
@@ -61,6 +61,29 @@ test('Authentication: login success and logout', async () => {
     .get('/api/me')
     .set('Cookie', cookie);
   assert.equal(meAfterLogout.body.user, null);
+});
+
+test('Authentication: seeded demo guardian login and portal access', async () => {
+  const cookie = await login(DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD);
+  assert.ok(cookie.includes('gw_session'));
+
+  const meRes = await request
+    .get('/api/me')
+    .set('Cookie', cookie);
+  assert.equal(meRes.status, 200);
+  assert.equal(meRes.body.user.email, DEMO_GUARDIAN_EMAIL);
+  assert.equal(meRes.body.user.role, 'guardian');
+  assert.equal(meRes.body.user.guardianStatus, 'active');
+
+  const portalRes = await request
+    .get('/api/guardian/me')
+    .set('Cookie', cookie);
+  assert.equal(portalRes.status, 200);
+  assert.equal(portalRes.body.guardian.name, 'Tomi Adeyemi');
+  assert.equal(portalRes.body.pupils.length, 1);
+  assert.equal(portalRes.body.pupils[0].id, 'NF-1042');
+  assert.equal(portalRes.body.pupils[0].isLegalGuardian, true);
+  assert.ok(portalRes.body.correctionRequests.length >= 1);
 });
 
 test('Authentication: login failure', async () => {

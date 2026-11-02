@@ -1,8 +1,10 @@
 const crypto = require('crypto');
-const { User, Pupil, PickupRequest, AttendanceEvent } = require('./models');
+const { User, Pupil, PickupRequest, AttendanceEvent, Guardian, PupilGuardian, CorrectionRequest } = require('./models');
 
 const DEMO_EMAIL = 'admin@northfield.school';
 const DEMO_PASSWORD = 'GatewiseDemo!26';
+const DEMO_GUARDIAN_EMAIL = 'tomi.adeyemi@guardian.northfield.school';
+const DEMO_GUARDIAN_PASSWORD = 'GatewiseDemo!26';
 
 function passwordHash(password, saltHex = null) {
   const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
@@ -152,6 +154,62 @@ async function seedInitialData() {
     for (const req of requests) {
       await PickupRequest.create(req);
     }
+
+    // Seed default demo guardian account and link to pupil NF-1042 (Zara Adeyemi)
+    const guardianDoc = await Guardian.create({
+      id: 'GD-DEMO-1042',
+      name: 'Tomi Adeyemi',
+      email: DEMO_GUARDIAN_EMAIL,
+      phone: '+1 555-0142',
+      verifiedContactMethod: 'sms',
+      verificationCode: '849201',
+      inviteToken: 'demo-invite-tomi-adeyemi',
+      channelVerified: true,
+      channelVerifiedAt: new Date(),
+      privacyNoticeAccepted: true,
+      privacyNoticeVersion: '2026.1',
+      privacyAcceptedAt: new Date(),
+      consentAccepted: true,
+      consentAcceptedAt: new Date(),
+      status: 'active',
+      preferredChannels: ['sms', 'whatsapp']
+    });
+
+    const { salt: gSalt, hash: gHash } = passwordHash(DEMO_GUARDIAN_PASSWORD);
+    const guardianUser = await User.create({
+      email: DEMO_GUARDIAN_EMAIL,
+      name: 'Tomi Adeyemi',
+      role: 'guardian',
+      salt: gSalt,
+      passwordHash: gHash,
+      active: true,
+      guardianId: guardianDoc.id
+    });
+
+    guardianDoc.userId = guardianUser._id;
+    await guardianDoc.save();
+
+    await PupilGuardian.create({
+      id: 'PG-DEMO-1042',
+      pupilId: 'NF-1042',
+      guardianId: guardianDoc.id,
+      relationship: 'Mother',
+      isLegalGuardian: true,
+      status: 'active',
+      legalStatusApprovedBySchool: true,
+      approvedBySchoolAt: new Date(),
+      approvedByStaff: 'Amara Okafor'
+    });
+
+    await CorrectionRequest.create({
+      id: 'CR-DEMO-01',
+      guardianId: guardianDoc.id,
+      pupilId: 'NF-1042',
+      type: 'record_correction',
+      subject: 'Emergency contact update request',
+      message: 'Please update secondary emergency mobile number to +1 555-0199 on school file.',
+      status: 'pending'
+    });
   }
 }
 
@@ -168,6 +226,8 @@ async function getNextCollectorId(pupilDoc) {
 module.exports = {
   DEMO_EMAIL,
   DEMO_PASSWORD,
+  DEMO_GUARDIAN_EMAIL,
+  DEMO_GUARDIAN_PASSWORD,
   passwordHash,
   verifyPassword,
   nowLocal,

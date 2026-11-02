@@ -840,7 +840,89 @@
       closeModal();
     }
   }
-  function openAddPupil(){openModal(`<h2 id="modalTitle">Add a pupil</h2><p class="modal-intro">Create a school profile. The guardian relationship still needs to be verified by the school.</p><form id="addPupilForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required placeholder="Pupil name"></div><div class="form-field"><label>Pupil ID</label><input name="id" placeholder="Auto-generated if blank"></div><div class="form-field"><label>Class</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div><div class="form-field full"><label>Guardian name</label><input name="guardian" required placeholder="Parent or guardian"></div><div class="form-field full"><div class="danger-note">Local MVP only: do not enter real pupil or guardian data. No guardian login or messaging is connected.</div></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAdd">Cancel</button><button class="button button-primary" type="submit">Create pupil</button></div></form>`);$('#cancelAdd').onclick=closeModal;$('#addPupilForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget),name=String(f.get('name')).trim();try{const res=await api('/api/pupils',{name,id:String(f.get('id')).trim(),className:f.get('className'),guardian:String(f.get('guardian')).trim()});acceptState(res.state);closeModal();render();toast(`${name} added to the directory.`)}catch(err){toast(err.message,'!')}};}
+  function openAddPupil(){
+    openModal(`
+      <h2 id="modalTitle">Add a pupil & invite guardian</h2>
+      <p class="modal-intro">The school creates the pupil record and invites each guardian using a verified contact method. Guardian proves channel control and accepts privacy terms.</p>
+      <form id="addPupilForm" class="form-grid">
+        <div class="form-field full"><label>Pupil Full Name *</label><input name="name" required placeholder="e.g. Maya Lin"></div>
+        <div class="form-field"><label>Pupil ID</label><input name="id" placeholder="Auto-generated if blank (e.g. NF-4001)"></div>
+        <div class="form-field"><label>Class *</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div>
+        <div class="form-field full"><label>Primary Guardian Name *</label><input name="guardian" required placeholder="Parent or legal guardian name"></div>
+        <div class="form-field"><label>Guardian Mobile Phone</label><input name="guardianPhone" placeholder="+1 555-0100" value="+1 555-0100"></div>
+        <div class="form-field"><label>Guardian Email</label><input name="guardianEmail" type="email" placeholder="guardian@example.com"></div>
+        <div class="form-field full">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:700;color:#334155">
+            <input type="checkbox" name="inviteGuardian" id="inviteGuardianCheckbox" checked>
+            <span>Invite guardian now via verified contact method</span>
+          </label>
+        </div>
+        <div id="pupilInviteFields" class="form-field full" style="display:grid;grid-template-columns:1fr 1fr;gap:10px;background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0">
+          <div>
+            <label>Verified Contact Method *</label>
+            <select name="verifiedContactMethod">
+              <option value="sms">SMS Text (proves phone control)</option>
+              <option value="email">Email (proves inbox control)</option>
+            </select>
+          </div>
+          <div>
+            <label>Relationship to Child</label>
+            <select name="relationship">
+              <option value="Mother">Mother</option>
+              <option value="Father">Father</option>
+              <option value="Legal Guardian">Legal Guardian</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div style="grid-column:1/-1">
+            <label style="display:flex;align-items:center;gap:6px;cursor:pointer;font-size:10px">
+              <input type="checkbox" name="isLegalGuardian" checked>
+              <span>School certifies legal guardian status (school authority required)</span>
+            </label>
+          </div>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelAdd">Cancel</button>
+          <button class="button button-primary" type="submit">Create pupil record</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelAdd').onclick=closeModal;
+    $('#inviteGuardianCheckbox').onchange = (e) => {
+      $('#pupilInviteFields').style.display = e.target.checked ? 'grid' : 'none';
+    };
+
+    $('#addPupilForm').onsubmit=async e=>{
+      e.preventDefault();
+      const f=new FormData(e.currentTarget);
+      const name=String(f.get('name')).trim();
+      const shouldInvite = f.get('inviteGuardian') !== null;
+      try {
+        const res = await api('/api/pupils', {
+          name,
+          id: String(f.get('id')).trim(),
+          className: f.get('className'),
+          guardian: String(f.get('guardian')).trim(),
+          guardianPhone: String(f.get('guardianPhone') || '').trim(),
+          guardianEmail: String(f.get('guardianEmail') || '').trim(),
+          inviteGuardian: shouldInvite,
+          verifiedContactMethod: f.get('verifiedContactMethod') || 'sms',
+          relationship: f.get('relationship') || 'Parent',
+          isLegalGuardian: f.get('isLegalGuardian') !== null
+        });
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast(`${name} added to the directory.`);
+        if (res.invite) {
+          openInviteSentSuccessModal(res.invite);
+        }
+      } catch(err) {
+        toast(err.message, '!');
+      }
+    };
+  }
   async function renderUsers(){if(signedInUser?.role!=='admin')return;const body=$('#userRows');body.innerHTML='<tr><td colspan="5">Loading accounts…</td></tr>';try{const {users}=await api('/api/users');body.innerHTML=users.map(u=>`<tr><td><b>${escapeHtml(u.name)}</b></td><td>${escapeHtml(u.email)}</td><td><select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option><option value="manager" ${u.role==='manager'?'selected':''}>Manager</option><option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option></select></td><td>${badge(u.active?'Active':'Disabled',u.active?'status-approved':'status-neutral')}</td><td><button class="button button-outline user-toggle" data-user-active="${u.id}" data-active="${u.active?0:1}" ${u.id===signedInUser.id?'disabled':''}>${u.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5">No staff accounts.</td></tr>'}catch(err){body.innerHTML=`<tr><td colspan="5">${escapeHtml(err.message)}</td></tr>`}}
   function openAddUser(){openModal(`<h2 id="modalTitle">Create staff account</h2><p class="modal-intro">The staff member will use this temporary password at sign-in. Share it privately.</p><form id="addUserForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required maxlength="120"></div><div class="form-field full"><label>School email</label><input name="email" type="email" required maxlength="254"></div><div class="form-field full"><label>Role</label><select name="role"><option value="manager">Manager — manage pupils and gate operations</option><option value="viewer">View only — read school records</option><option value="admin">Admin — manage users and all operations</option></select></div><div class="form-field full"><label>Temporary password (at least 12 characters)</label><input name="password" type="password" minlength="12" required autocomplete="new-password"></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAddUser">Cancel</button><button class="button button-primary" type="submit">Create account</button></div></form>`);$('#cancelAddUser').onclick=closeModal;$('#addUserForm').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);try{await api('/api/users',{name:String(f.get('name')).trim(),email:String(f.get('email')).trim(),role:f.get('role'),password:f.get('password')});closeModal();toast('Staff account created. Share the temporary password privately.');renderUsers()}catch(err){toast(err.message,'!')}}}
   async function previewRoster(file){if(!file)return;if(file.size>8*1024*1024){toast('Roster files must be 8 MB or smaller.','!');return}if(!/\.(csv|xlsx)$/i.test(file.name)){toast('Choose a CSV or XLSX file.','!');return}try{const buffer=await file.arrayBuffer();let binary='';const bytes=new Uint8Array(buffer);for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const {preview,errors,errorCount,token}=await api('/api/import/preview',{filename:file.name,fileBase64:btoa(binary)});const rows=preview.map(p=>`<tr><td>${escapeHtml(p.pupil_id)}</td><td>${escapeHtml(p.pupil_name)}</td><td>${escapeHtml(p.class_name)}</td><td>${escapeHtml(p.guardian_name)}</td></tr>`).join('');openModal(`<h2 id="modalTitle">Review pupil roster</h2><p class="modal-intro">${errorCount?`${errorCount} issue(s) found. Correct the file and upload again; nothing has been imported.`:`${preview.length} pupil(s) ready. Review the sample, then import the entire file.`}</p>${preview.length?`<div class="import-preview-wrap"><table class="import-preview-table"><thead><tr><th>PUPIL ID</th><th>NAME</th><th>CLASS</th><th>GUARDIAN</th></tr></thead><tbody>${rows}</tbody></table></div>`:''}${errorCount?`<div class="import-errors">${errors.map(e=>`<div>Row ${e.row}${e.pupil_id?` · ${escapeHtml(e.pupil_id)}`:''}: ${escapeHtml(e.message)}</div>`).join('')}</div>`:''}<div class="modal-actions"><button class="button button-outline" id="cancelImport">Close</button>${token&&!errorCount?'<button class="button button-primary" id="commitImport">Import pupils</button>':''}</div>`);$('#cancelImport').onclick=closeModal;if(token&&!errorCount)$('#commitImport').onclick=async()=>{const button=$('#commitImport');button.disabled=true;button.textContent='Importing…';try{const result=await api('/api/import/commit',{token});acceptState(result.state);closeModal();render();toast(`${result.imported} pupil(s) imported.`)}catch(err){toast(err.message,'!');button.disabled=false;button.textContent='Import pupils'}}}catch(err){toast(err.message,'!')}finally{$('#rosterFile').value=''}}
@@ -1426,6 +1508,10 @@
   $('#notificationsBtn').onclick=()=>toast('Message delivery is not configured in this local MVP.','!');
   $('.more-button').onclick=async()=>{try{await api('/api/logout',{});signedInUser=null;$('#authScreen').classList.remove('hidden');pupils=[];events=[];requests=[];$('#loginPassword').value='';$('#loginError').classList.add('hidden')}catch(err){toast(err.message,'!')}};
   const now=new Date();$('#todayLabel').textContent=now.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'});$('#dateEyebrow').innerHTML=`${now.toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'}).toUpperCase()} <span class="live-label"><i></i> LIVE</span>`;
+  $('#startOnboardingFromLogin')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    openGuardianOnboardingFlow();
+  });
   $('#loginForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('.auth-submit');button.disabled=true;button.textContent='Signing in…';$('#loginError').classList.add('hidden');try{const result=await api('/api/login',{email:$('#loginEmail').value,password:$('#loginPassword').value});setSignedIn(result.user);acceptState(result.state);render()}catch(err){$('#loginError').textContent=err.message==='Failed to fetch'?'Cannot reach the app server. Start Node.js server with npm start and reload this page.':err.message;$('#loginError').classList.remove('hidden')}finally{button.disabled=false;button.innerHTML='Sign in <span>→</span>'}});
   api('/api/me').then(async({user})=>{if(user){setSignedIn(user);await refreshState()}}).catch(()=>{});
 })();
