@@ -5,7 +5,16 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 const mongoose = require('mongoose');
 
 const { app, seedInitialData } = require('./server');
-const { User, Pupil, PickupRequest, AttendanceEvent, AuditEntry } = require('./models');
+const {
+  User,
+  Pupil,
+  PickupRequest,
+  AttendanceEvent,
+  AuditEntry,
+  Guardian,
+  PupilGuardian,
+  CorrectionRequest
+} = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD } = require('./authUtils');
 
 let mongod;
@@ -656,4 +665,226 @@ test('Offline or delayed sync: device encryption/managed validation, idempotency
   assert.ok(reconciledEvent);
   assert.equal(reconciledEvent.source, 'Paper/voice manual fallback');
   assert.equal(reconciledEvent.reconciliationAuditReason, 'Internet outage drill - paper log sheet #12 verified by gate supervisor');
+});
+
+test('Guardian onboarding: invitation, channel verification, consent acceptance, pupil scoping, preferences, and school authority over permissions', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. School creates pupil record and invites guardian using a verified contact method (SMS or Email)
+  const createPupilRes = await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Maya Lin',
+      id: 'NF-4001',
+      className: 'Grade 2B',
+      guardian: 'David Lin',
+      guardianPhone: '+1 555-0401',
+      guardianEmail: 'david.lin@example.com',
+      preferredChannel: 'sms',
+      inviteGuardian: true,
+      verifiedContactMethod: 'sms',
+      relationship: 'Father',
+      isLegalGuardian: true
+    });
+  assert.equal(createPupilRes.status, 201);
+  assert.ok(createPupilRes.body.invite);
+  const invite = createPupilRes.body.invite;
+  assert.equal(invite.verifiedContactMethod, 'sms');
+  assert.ok(invite.inviteToken);
+  assert.ok(invite.verificationCode);
+
+  // Check audit entry for guardian invitation
+  const inviteAudit = await AuditEntry.findOne({ action: 'invite_guardian', objectId: invite.guardianId });
+  assert.ok(inviteAudit);
+
+  // Also create a second pupil NOT linked to this guardian to verify access boundary scoping
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Unlinked Child',
+      id: 'NF-4002',
+      className: 'Grade 5A',
+      guardian: 'Other Parent'
+    });
+
+  // 2. Guardian proves control of the contact channel (valid vs invalid OTP code)
+  // Invalid code fails
+  const badVerifyRes = await request
+    .post('/api/guardian/verify-channel')
+    .send({
+      inviteToken: invite.inviteToken,
+      verificationCode: '000000'
+    });
+  assert.equal(badVerifyRes.status, 400);
+  assert.ok(badVerifyRes.body.error.includes('Invalid verification code'));
+
+  // Valid code succeeds
+  const goodVerifyRes = await request
+    .post('/api/guardian/verify-channel')
+    .send({
+      inviteToken: invite.inviteToken,
+      verificationCode: invite.verificationCode
+    });
+  assert.equal(goodVerifyRes.status, 200);
+  assert.equal(goodVerifyRes.body.ok, true);
+  assert.equal(goodVerifyRes.body.guardian.channelVerified, true);
+
+  // Check audit entry for channel verification
+  const channelAudit = await AuditEntry.findOne({ action: 'guardian_verify_channel', objectId: invite.guardianId });
+  assert.ok(channelAudit);
+
+  // 3. Guardian accepts the school's privacy notice and applicable consent/acknowledgment flow
+  // Missing privacy notice or consent fails
+  const missingConsentRes = await request
+    .post('/api/guardian/accept-consent')
+    .send({
+      inviteToken: invite.inviteToken,
+      acceptPrivacyNotice: false,
+      acceptConsent: true,
+      password: 'GuardianPassword123!'
+    });
+  assert.equal(missingConsentRes.status, 400);
+  assert.ok(missingConsentRes.body.error.includes('privacy notice'));
+
+  const missingStatutoryRes = await request
+    .post('/api/guardian/accept-consent')
+    .send({
+      inviteToken: invite.inviteToken,
+      acceptPrivacyNotice: true,
+      acceptConsent: false,
+      password: 'GuardianPassword123!'
+    });
+  assert.equal(missingStatutoryRes.status, 400);
+  assert.ok(missingStatutoryRes.body.error.includes('consent'));
+
+  // Valid acceptance completes onboarding and signs in guardian
+  const consentRes = await request
+    .post('/api/guardian/accept-consent')
+    .send({
+      inviteToken: invite.inviteToken,
+      acceptPrivacyNotice: true,
+      acceptConsent: true,
+      password: 'GuardianPassword123!',
+      preferredChannels: ['sms', 'whatsapp']
+    });
+  assert.equal(consentRes.status, 200);
+  assert.equal(consentRes.body.ok, true);
+  assert.equal(consentRes.body.guardian.status, 'active');
+  assert.ok(consentRes.headers['set-cookie']);
+  const guardianCookie = consentRes.headers['set-cookie'][0];
+
+  // Check audit entry for consent acceptance
+  const consentAudit = await AuditEntry.findOne({ action: 'guardian_consent_accepted', objectId: invite.guardianId });
+  assert.ok(consentAudit);
+
+  // 4. Guardian sees ONLY linked pupil(s)
+  const portalRes = await request
+    .get('/api/guardian/me')
+    .set('Cookie', guardianCookie);
+  assert.equal(portalRes.status, 200);
+  assert.equal(portalRes.body.pupils.length, 1);
+  assert.equal(portalRes.body.pupils[0].id, 'NF-4001');
+  assert.equal(portalRes.body.pupils[0].name, 'Maya Lin');
+  // Confirm unlinked pupil (NF-4002) is NOT returned
+  const unlinkedPupil = portalRes.body.pupils.find(p => p.id === 'NF-4002');
+  assert.equal(unlinkedPupil, undefined);
+
+  // 5. Guardian can set notification preferences
+  const prefRes = await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      channels: ['whatsapp', 'email']
+    });
+  assert.equal(prefRes.status, 200);
+  assert.deepEqual(prefRes.body.preferredChannels, ['whatsapp', 'email']);
+
+  const updatedGuardianDoc = await Guardian.findOne({ id: invite.guardianId });
+  assert.deepEqual(updatedGuardianDoc.preferredChannels, ['whatsapp', 'email']);
+
+  // 6. Guardian requests corrections or contacts the school
+  const unlinkedCorrectionRes = await request
+    .post('/api/guardian/correction-request')
+    .set('Cookie', guardianCookie)
+    .send({
+      pupilId: 'NF-4002', // Not linked to this guardian
+      type: 'record_correction',
+      subject: 'Correction for unlinked pupil',
+      message: 'This should be blocked'
+    });
+  assert.equal(unlinkedCorrectionRes.status, 403);
+
+  const validCorrectionRes = await request
+    .post('/api/guardian/correction-request')
+    .set('Cookie', guardianCookie)
+    .send({
+      pupilId: 'NF-4001',
+      type: 'record_correction',
+      subject: 'Correct spelling of middle name',
+      message: 'Please change middle name to Mei on school file.'
+    });
+  assert.equal(validCorrectionRes.status, 201);
+  assert.equal(validCorrectionRes.body.ok, true);
+  const corrReqId = validCorrectionRes.body.request.id;
+
+  // 7. Direct modification of legal guardian status and pickup permissions by guardian app is strictly prohibited
+  const directLegalAttempt = await request
+    .post('/api/guardian/legal-status')
+    .set('Cookie', guardianCookie)
+    .send({ isLegalGuardian: false });
+  assert.equal(directLegalAttempt.status, 403);
+  assert.ok(directLegalAttempt.body.error.includes('school—not the guardian app—approves'));
+
+  const directPickupAttempt = await request
+    .post('/api/guardian/pickup-permissions')
+    .set('Cookie', guardianCookie)
+    .send({ collectorName: 'Hacker Collector' });
+  assert.equal(directPickupAttempt.status, 403);
+  assert.ok(directPickupAttempt.body.error.includes('school—not the guardian app—approves'));
+
+  // 8. The school—not the guardian app—approves changes to legal guardian status and pickup permissions
+  // School admin views pending corrections
+  const adminCorrectionsRes = await request
+    .get('/api/admin/corrections')
+    .set('Cookie', adminCookie);
+  assert.equal(adminCorrectionsRes.status, 200);
+  const foundRequest = adminCorrectionsRes.body.requests.find(r => r.id === corrReqId);
+  assert.ok(foundRequest);
+
+  // School admin approves correction request
+  const approveCorrRes = await request
+    .post(`/api/admin/corrections/${corrReqId}`)
+    .set('Cookie', adminCookie)
+    .send({
+      action: 'approve',
+      reviewNote: 'Verified parent identity via telephone callback; updated file.'
+    });
+  assert.equal(approveCorrRes.status, 200);
+  assert.equal(approveCorrRes.body.request.status, 'approved');
+
+  // School admin manages / updates legal guardian status with required audit reason
+  const missingReasonLegalRes = await request
+    .post(`/api/pupils/NF-4001/guardians/${invite.guardianId}/legal-status`)
+    .set('Cookie', adminCookie)
+    .send({
+      isLegalGuardian: false,
+      reason: ''
+    });
+  assert.equal(missingReasonLegalRes.status, 400);
+
+  const schoolUpdateLegalRes = await request
+    .post(`/api/pupils/NF-4001/guardians/${invite.guardianId}/legal-status`)
+    .set('Cookie', adminCookie)
+    .send({
+      isLegalGuardian: false,
+      reason: 'Court custody determination decree ref #2026-CT-889'
+    });
+  assert.equal(schoolUpdateLegalRes.status, 200);
+  assert.equal(schoolUpdateLegalRes.body.link.isLegalGuardian, false);
+
+  const legalAudit = await AuditEntry.findOne({ action: 'update_legal_guardian_status', objectId: `NF-4001:${invite.guardianId}` });
+  assert.ok(legalAudit);
+  assert.ok(legalAudit.reason.includes('Court custody determination decree'));
 });
