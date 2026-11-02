@@ -18,7 +18,10 @@ const {
   SchoolSetting,
   Guardian,
   PupilGuardian,
-  CorrectionRequest
+  CorrectionRequest,
+  Household,
+  PupilHousehold,
+  Card
 } = require('./models');
 const {
   DEMO_EMAIL,
@@ -28,6 +31,8 @@ const {
   nowLocal,
   formatTime,
   formatDate,
+  generateCardToken,
+  hashCardToken,
   seedInitialData,
   getNextCollectorId
 } = require('./authUtils');
@@ -119,7 +124,64 @@ async function getStateJson() {
   const schoolSettingsMap = {};
   settingsDocs.forEach(s => { schoolSettingsMap[s.key] = s.val; });
 
-  const pupilDocs = await Pupil.find({ active: true }).sort({ name: 1 });
+  const pupilDocs = await Pupil.find().sort({ name: 1 });
+  const pupilIds = pupilDocs.map(p => p.id);
+
+  // Load active cards
+  const activeCards = await Card.find({ pupilId: { $in: pupilIds }, status: 'active' });
+  const cardMap = {};
+  activeCards.forEach(c => {
+    cardMap[c.pupilId] = {
+      id: c.id,
+      cardToken: c.cardToken,
+      status: c.status,
+      issuedAt: c.issuedAt
+    };
+  });
+
+  // Load linked pupil-guardians
+  const pgLinks = await PupilGuardian.find({ pupilId: { $in: pupilIds }, status: { $ne: 'revoked' } });
+  const guardianIds = pgLinks.map(l => l.guardianId);
+  const guardianDocs = await Guardian.find({ id: { $in: guardianIds } });
+  const guardianMap = {};
+  guardianDocs.forEach(g => { guardianMap[g.id] = g; });
+
+  const pupilGuardiansMap = {};
+  pgLinks.forEach(l => {
+    if (!pupilGuardiansMap[l.pupilId]) pupilGuardiansMap[l.pupilId] = [];
+    const gDoc = guardianMap[l.guardianId];
+    pupilGuardiansMap[l.pupilId].push({
+      guardianId: l.guardianId,
+      name: gDoc ? gDoc.name : 'Unknown Guardian',
+      relationship: l.relationship,
+      isLegalGuardian: l.isLegalGuardian,
+      status: l.status,
+      phone: gDoc ? gDoc.phone : '',
+      email: gDoc ? gDoc.email : ''
+    });
+  });
+
+  // Load pupil-households
+  const phLinks = await PupilHousehold.find({ pupilId: { $in: pupilIds } });
+  const householdIds = phLinks.map(ph => ph.householdId);
+  const householdDocs = await Household.find({ id: { $in: householdIds } });
+  const householdMap = {};
+  householdDocs.forEach(h => { householdMap[h.id] = h; });
+
+  const pupilHouseholdsMap = {};
+  phLinks.forEach(ph => {
+    if (!pupilHouseholdsMap[ph.pupilId]) pupilHouseholdsMap[ph.pupilId] = [];
+    const hDoc = householdMap[ph.householdId];
+    pupilHouseholdsMap[ph.pupilId].push({
+      householdId: ph.householdId,
+      name: hDoc ? hDoc.name : 'Unknown Household',
+      address: hDoc ? hDoc.address : '',
+      phone: hDoc ? hDoc.phone : '',
+      isPrimary: ph.isPrimary,
+      relationshipNotes: ph.relationshipNotes
+    });
+  });
+
   const pupils = pupilDocs.map(p => {
     const activeCollectors = (p.collectors || [])
       .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
@@ -128,6 +190,9 @@ async function getStateJson() {
       id: p.id,
       name: p.name,
       className: p.className,
+      campus: p.campus || 'Primary campus',
+      status: p.status || (p.active ? 'active' : 'archived'),
+      active: p.status ? p.status === 'active' : p.active,
       guardian: p.guardian,
       guardianPhone: p.guardianPhone || '+1 555-0100',
       guardianEmail: p.guardianEmail || '',
@@ -135,7 +200,10 @@ async function getStateJson() {
       initials: p.initials,
       color: p.color,
       photo: p.photo,
-      collectors: activeCollectors
+      collectors: activeCollectors,
+      card: cardMap[p.id] || null,
+      guardians: pupilGuardiansMap[p.id] || [],
+      households: pupilHouseholdsMap[p.id] || []
     };
   });
 
@@ -190,11 +258,21 @@ async function getStateJson() {
     note: r.note
   }));
 
+  const allHouseholds = await Household.find().sort({ name: 1 });
+
   return {
     pupils,
     events,
     requests,
     notifications,
+    households: allHouseholds.map(h => ({
+      id: h.id,
+      name: h.name,
+      address: h.address,
+      phone: h.phone,
+      notes: h.notes,
+      active: h.active
+    })),
     school: {
       name: "Northfield Academy",
       campus: "Primary campus",
@@ -446,21 +524,54 @@ app.post('/api/pupils', requireAuth(['admin', 'manager']), async (req, res) => {
     const guardianEmail = String(req.body.guardianEmail || '').trim().toLowerCase();
     const guardianPhone = String(req.body.guardianPhone || '+1 555-0100').trim();
     const preferredChannel = String(req.body.preferredChannel || 'sms').toLowerCase();
+    const campus = String(req.body.campus || 'Primary campus').trim();
+    const status = ['active', 'withdrawn', 'transferred', 'archived'].includes(req.body.status) ? req.body.status : 'active';
+    const photo = String(req.body.photo || '♙').trim();
 
     await Pupil.create({
       id: pid,
       name,
       className,
+      campus,
+      status,
       guardian,
       guardianPhone,
       guardianEmail,
       preferredChannel: ['sms', 'whatsapp', 'push', 'email'].includes(preferredChannel) ? preferredChannel : 'sms',
       initials,
       color: colors[Math.floor(Date.now() / 1000) % colors.length],
-      photo: '♙',
-      active: true,
+      photo,
+      active: status === 'active',
       collectors: []
     });
+
+    // Automatically generate a random, non-meaningful card token for this pupil
+    // (Never encodes pupil name, birth date, phone number, or other personal details in the QR/token)
+    const cardToken = generateCardToken();
+    await Card.create({
+      id: 'CARD-' + pid,
+      pupilId: pid,
+      cardToken,
+      tokenHash: hashCardToken(cardToken),
+      status: 'active',
+      issuedAt: new Date(),
+      issuedBy: req.user.name
+    });
+
+    // Handle household linking if householdId is provided
+    if (req.body.householdId) {
+      const hId = String(req.body.householdId).trim().toUpperCase();
+      const household = await Household.findOne({ id: hId });
+      if (household) {
+        await PupilHousehold.create({
+          id: 'PH-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+          pupilId: pid,
+          householdId: hId,
+          isPrimary: true,
+          relationshipNotes: req.body.householdNotes || 'Primary household'
+        });
+      }
+    }
 
     // Optionally auto-invite or link guardian if inviteGuardian flag is present
     let inviteData = null;
@@ -521,6 +632,371 @@ app.post('/api/pupils', requireAuth(['admin', 'manager']), async (req, res) => {
 
     const state = await getStateJson();
     res.status(201).json({ ok: true, state, invite: inviteData });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update pupil lifecycle status (active, withdrawn, transferred, archived)
+app.post('/api/pupils/:id/status', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pid = req.params.id.toUpperCase();
+    const { status, reason } = req.body;
+    const allowed = ['active', 'withdrawn', 'transferred', 'archived'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Choose one of: ${allowed.join(', ')}.` });
+    }
+
+    const pupil = await Pupil.findOne({ id: pid });
+    if (!pupil) return res.status(404).json({ error: 'Pupil not found.' });
+
+    const prevStatus = pupil.status || (pupil.active ? 'active' : 'archived');
+    pupil.status = status;
+    pupil.active = status === 'active';
+    await pupil.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_pupil_status',
+      objectType: 'pupil',
+      objectId: pid,
+      reason: `Transitioned from ${prevStatus} to ${status}. Reason: ${reason || 'Administrative update'}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.json({ ok: true, pupil: state.pupils.find(p => p.id === pid), state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// Card Token Management: Generation, Revocation, and Reissue
+// - Generates random, non-meaningful tokens (no pupil name, DOB, phone, etc.)
+// - Card revocation & reissue preserves pupil's historical attendance records
+// -------------------------------------------------------------
+
+// Issue new card for pupil
+app.post('/api/pupils/:id/cards/issue', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pid = req.params.id.toUpperCase();
+    const pupil = await Pupil.findOne({ id: pid });
+    if (!pupil) return res.status(404).json({ error: 'Pupil not found.' });
+
+    // Revoke any existing active card for this pupil first
+    await Card.updateMany(
+      { pupilId: pid, status: 'active' },
+      {
+        $set: {
+          status: 'revoked',
+          revokedAt: new Date(),
+          revokedBy: req.user.name,
+          revocationReason: 'Superseded by new card issuance'
+        }
+      }
+    );
+
+    const cardToken = generateCardToken();
+    const newCard = await Card.create({
+      id: 'CARD-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+      pupilId: pid,
+      cardToken,
+      tokenHash: hashCardToken(cardToken),
+      status: 'active',
+      issuedAt: new Date(),
+      issuedBy: req.user.name
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'issue_card',
+      objectType: 'card',
+      objectId: newCard.id,
+      reason: `Issued card for pupil ${pid} (token: ${cardToken})`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({ ok: true, card: newCard, state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Revoke a card
+app.post('/api/pupils/:id/cards/revoke', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pid = req.params.id.toUpperCase();
+    const reason = String(req.body.reason || 'Card reported lost or compromised').trim();
+    const cardId = req.body.cardId ? String(req.body.cardId).trim() : null;
+
+    const query = { pupilId: pid, status: 'active' };
+    if (cardId) query.id = cardId;
+
+    const activeCard = await Card.findOne(query);
+    if (!activeCard) {
+      return res.status(404).json({ error: 'No active card found for this pupil to revoke.' });
+    }
+
+    activeCard.status = 'revoked';
+    activeCard.revokedAt = new Date();
+    activeCard.revokedBy = req.user.name;
+    activeCard.revocationReason = reason;
+    await activeCard.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'revoke_card',
+      objectType: 'card',
+      objectId: activeCard.id,
+      reason: `Revoked card for pupil ${pid}. Reason: ${reason}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.json({ ok: true, revokedCard: activeCard, state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reissue card: revokes current active card and issues a fresh random token WITHOUT changing historical attendance
+app.post('/api/pupils/:id/cards/reissue', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pid = req.params.id.toUpperCase();
+    const reason = String(req.body.reason || 'Card replacement / reissue').trim();
+
+    const pupil = await Pupil.findOne({ id: pid });
+    if (!pupil) return res.status(404).json({ error: 'Pupil not found.' });
+
+    // Revoke old active cards
+    await Card.updateMany(
+      { pupilId: pid, status: 'active' },
+      {
+        $set: {
+          status: 'revoked',
+          revokedAt: new Date(),
+          revokedBy: req.user.name,
+          revocationReason: reason
+        }
+      }
+    );
+
+    // Issue new random token
+    const newCardToken = generateCardToken();
+    const newCard = await Card.create({
+      id: 'CARD-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+      pupilId: pid,
+      cardToken: newCardToken,
+      tokenHash: hashCardToken(newCardToken),
+      status: 'active',
+      issuedAt: new Date(),
+      issuedBy: req.user.name
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'reissue_card',
+      objectType: 'card',
+      objectId: newCard.id,
+      reason: `Reissued card for pupil ${pid}. New token: ${newCardToken}. Old cards revoked. Reason: ${reason}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({ ok: true, card: newCard, state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get card history for a pupil
+app.get('/api/pupils/:id/cards', requireAuth(), async (req, res) => {
+  try {
+    const pid = req.params.id.toUpperCase();
+    const cards = await Card.find({ pupilId: pid }).sort({ issuedAt: -1 });
+    res.json({ cards });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Lookup pupil by random card token
+app.get('/api/cards/lookup/:token', requireAuth(), async (req, res) => {
+  try {
+    let token = String(req.params.token || '').trim();
+    if (token.startsWith('GW:')) token = token.slice(3).trim();
+
+    const card = await Card.findOne({ cardToken: token });
+    if (!card) {
+      return res.status(404).json({ error: 'Card token not found in the system.' });
+    }
+    if (card.status === 'revoked') {
+      return res.status(400).json({ error: 'This card has been revoked and cannot be used for gate operations.', card });
+    }
+
+    const pupil = await Pupil.findOne({ id: card.pupilId });
+    if (!pupil) {
+      return res.status(404).json({ error: 'Pupil associated with this card was not found.' });
+    }
+    if (pupil.status && pupil.status !== 'active') {
+      return res.status(400).json({ error: `Pupil record is ${pupil.status}. Gate operation not permitted.`, pupil });
+    }
+
+    res.json({ ok: true, pupil, card });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// Household and Multi-Household Linking Endpoints
+// - Store household name, address, phone, notes
+// - Pupils can be linked to more than one household
+// - Support multiple guardians per pupil
+// -------------------------------------------------------------
+
+// Get households
+app.get('/api/households', requireAuth(), async (req, res) => {
+  try {
+    const households = await Household.find().sort({ name: 1 });
+    res.json({ households });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Create household
+app.post('/api/households', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    let id = String(req.body.id || '').trim().toUpperCase();
+    const address = String(req.body.address || '').trim();
+    const phone = String(req.body.phone || '').trim();
+    const notes = String(req.body.notes || '').trim();
+
+    if (!name) return res.status(400).json({ error: 'Household name is required.' });
+    if (!id) id = 'HH-' + String(Math.floor(Math.random() * 900) + 100);
+
+    const existing = await Household.findOne({ id });
+    if (existing) return res.status(409).json({ error: 'Household with that ID already exists.' });
+
+    const newH = await Household.create({
+      id,
+      name,
+      address,
+      phone,
+      notes,
+      active: true
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'create_household',
+      objectType: 'household',
+      objectId: id,
+      reason: `Name=${name}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({ ok: true, household: newH, state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Link pupil to household (supports linking to more than one household)
+app.post('/api/pupils/:id/households', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pid = req.params.id.toUpperCase();
+    const householdId = String(req.body.householdId || '').trim().toUpperCase();
+    const isPrimary = Boolean(req.body.isPrimary);
+    const relationshipNotes = String(req.body.relationshipNotes || '').trim();
+
+    const pupil = await Pupil.findOne({ id: pid });
+    if (!pupil) return res.status(404).json({ error: 'Pupil not found.' });
+
+    const household = await Household.findOne({ id: householdId });
+    if (!household) return res.status(404).json({ error: 'Household not found.' });
+
+    const existingLink = await PupilHousehold.findOne({ pupilId: pid, householdId });
+    if (existingLink) {
+      existingLink.isPrimary = isPrimary;
+      existingLink.relationshipNotes = relationshipNotes;
+      await existingLink.save();
+    } else {
+      await PupilHousehold.create({
+        id: 'PH-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+        pupilId: pid,
+        householdId,
+        isPrimary,
+        relationshipNotes
+      });
+    }
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'link_pupil_household',
+      objectType: 'pupil_household',
+      objectId: `${pid}:${householdId}`,
+      reason: `Primary=${isPrimary}; Notes=${relationshipNotes}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({ ok: true, state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Link additional guardian to pupil (supports multiple guardians per pupil)
+app.post('/api/pupils/:id/guardians', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pid = req.params.id.toUpperCase();
+    const guardianId = String(req.body.guardianId || '').trim().toUpperCase();
+    const relationship = String(req.body.relationship || 'Guardian').trim();
+    const isLegalGuardian = req.body.isLegalGuardian !== undefined ? Boolean(req.body.isLegalGuardian) : true;
+
+    const pupil = await Pupil.findOne({ id: pid });
+    if (!pupil) return res.status(404).json({ error: 'Pupil not found.' });
+
+    const guardian = await Guardian.findOne({ id: guardianId });
+    if (!guardian) return res.status(404).json({ error: 'Guardian not found.' });
+
+    const existingLink = await PupilGuardian.findOne({ pupilId: pid, guardianId });
+    if (existingLink) {
+      existingLink.relationship = relationship;
+      existingLink.isLegalGuardian = isLegalGuardian;
+      existingLink.status = 'active';
+      await existingLink.save();
+    } else {
+      await PupilGuardian.create({
+        id: 'PG-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+        pupilId: pid,
+        guardianId,
+        relationship,
+        isLegalGuardian,
+        status: 'active',
+        legalStatusApprovedBySchool: true,
+        approvedBySchoolAt: new Date(),
+        approvedByStaff: req.user.name
+      });
+    }
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'link_pupil_guardian',
+      objectType: 'pupil_guardian',
+      objectId: `${pid}:${guardianId}`,
+      reason: `Relationship=${relationship}; Legal=${isLegalGuardian}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({ ok: true, state });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -606,7 +1082,21 @@ app.post('/api/guardians/invite', requireAuth(['admin', 'manager']), async (req,
 });
 
 async function processEventRecord(user, eventData) {
-  const pid = String(eventData.pupilId || '').trim().toUpperCase().slice(0, 30);
+  let pid = String(eventData.pupilId || '').trim().toUpperCase().slice(0, 30);
+  const cardToken = eventData.cardToken ? String(eventData.cardToken).trim() : null;
+
+  // If a card token was scanned/provided, resolve the pupil and verify card validity
+  if (cardToken) {
+    const cardDoc = await Card.findOne({ cardToken });
+    if (!cardDoc) {
+      throw new Error('Unrecognized card token.');
+    }
+    if (cardDoc.status === 'revoked') {
+      throw new Error('Scanned card is REVOKED and cannot be used for check-in or checkout.');
+    }
+    pid = cardDoc.pupilId;
+  }
+
   const typ = String(eventData.type || '');
   let source = String(eventData.source || 'Card scan').slice(0, 50);
   const reason = String(eventData.reason || '').trim().slice(0, 200);
@@ -675,9 +1165,17 @@ async function processEventRecord(user, eventData) {
     throw new Error('Choose arrival or departure.');
   }
 
-  const pupil = await Pupil.findOne({ id: pid, active: true });
+  const pupil = await Pupil.findOne({ id: pid });
   if (!pupil) {
     throw new Error('Pupil ID not found.');
+  }
+
+  if (pupil.status && pupil.status !== 'active') {
+    throw new Error(`Pupil ${pupil.name} has lifecycle status "${pupil.status}". Check-in and checkout are restricted.`);
+  }
+
+  if (!pupil.active) {
+    throw new Error(`Pupil record for ${pupil.name} is inactive.`);
   }
 
   const todayStr = formatDate(nowLocal());
@@ -1129,12 +1627,26 @@ app.post('/api/import/commit', requireAuth(['admin', 'manager']), async (req, re
         id: r.pupil_id,
         name,
         className: r.class_name.trim(),
+        campus: 'Primary campus',
+        status: 'active',
         guardian: r.guardian_name.trim(),
         initials,
         color: colors[index % colors.length],
         photo: '♙',
         active: true,
         collectors: []
+      });
+
+      // Issue random non-meaningful card token for imported pupil
+      const cardToken = generateCardToken();
+      await Card.create({
+        id: 'CARD-' + r.pupil_id,
+        pupilId: r.pupil_id,
+        cardToken,
+        tokenHash: hashCardToken(cardToken),
+        status: 'active',
+        issuedAt: new Date(),
+        issuedBy: req.user.name
       });
     }
 

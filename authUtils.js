@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { User, Pupil, PickupRequest, AttendanceEvent } = require('./models');
+const { User, Pupil, PickupRequest, AttendanceEvent, Household, PupilHousehold, Card } = require('./models');
 
 const DEMO_EMAIL = 'admin@northfield.school';
 const DEMO_PASSWORD = 'GatewiseDemo!26';
@@ -39,6 +39,17 @@ function formatDate(d) {
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
+}
+
+// Generate a random, non-meaningful card token.
+// Does NOT encode pupil name, birth date, phone number, or other personal details.
+function generateCardToken() {
+  const randomBytes = crypto.randomBytes(16).toString('hex').toUpperCase();
+  return `GWC-${randomBytes.slice(0, 4)}-${randomBytes.slice(4, 8)}-${randomBytes.slice(8, 12)}-${randomBytes.slice(12, 16)}`;
+}
+
+function hashCardToken(token) {
+  return crypto.createHash('sha256').update(token.trim()).digest('hex');
 }
 
 async function seedInitialData() {
@@ -106,6 +117,8 @@ async function seedInitialData() {
         id,
         name,
         className,
+        campus: 'Primary campus',
+        status: 'active',
         guardian,
         guardianPhone: guardianPhones[id] || "+1 555-0100",
         guardianEmail: `${guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`,
@@ -116,7 +129,65 @@ async function seedInitialData() {
         active: true,
         collectors: collectorsMap[id] || []
       });
+
+      // Issue random non-meaningful card token for each pupil
+      const cardToken = generateCardToken();
+      await Card.create({
+        id: `CARD-${id}`,
+        pupilId: id,
+        cardToken,
+        tokenHash: hashCardToken(cardToken),
+        status: 'active',
+        issuedAt: new Date(),
+        issuedBy: 'System Seed'
+      });
     }
+
+    // Seed sample Households and PupilHousehold links
+    const household1 = await Household.create({
+      id: 'HH-101',
+      name: 'Adeyemi Household',
+      address: '14 Kensington Crescent, Northfield',
+      phone: '+1 555-0142',
+      notes: 'Primary residence'
+    });
+    const household2 = await Household.create({
+      id: 'HH-102',
+      name: 'Adeyemi Secondary / Grandparents',
+      address: '28 Pine Grove, Northfield',
+      phone: '+1 555-0143',
+      notes: 'Grandparents home - alternate pickup address'
+    });
+    const household3 = await Household.create({
+      id: 'HH-103',
+      name: 'Mensah Household',
+      address: '9 Victoria Way, Northfield',
+      phone: '+1 555-0187',
+      notes: 'Family residence'
+    });
+
+    // Pupil linked to more than one household (Zara Adeyemi linked to HH-101 and HH-102)
+    await PupilHousehold.create({
+      id: 'PH-1',
+      pupilId: 'NF-1042',
+      householdId: 'HH-101',
+      isPrimary: true,
+      relationshipNotes: 'Main residence'
+    });
+    await PupilHousehold.create({
+      id: 'PH-2',
+      pupilId: 'NF-1042',
+      householdId: 'HH-102',
+      isPrimary: false,
+      relationshipNotes: 'Alternate weekend / grandparents residence'
+    });
+    await PupilHousehold.create({
+      id: 'PH-3',
+      pupilId: 'NF-1087',
+      householdId: 'HH-103',
+      isPrimary: true,
+      relationshipNotes: 'Main residence'
+    });
 
     const now = nowLocal();
     const samples = [
@@ -173,6 +244,8 @@ module.exports = {
   nowLocal,
   formatTime,
   formatDate,
+  generateCardToken,
+  hashCardToken,
   seedInitialData,
   getNextCollectorId
 };
