@@ -120,10 +120,35 @@ async function getStateJson() {
   settingsDocs.forEach(s => { schoolSettingsMap[s.key] = s.val; });
 
   const pupilDocs = await Pupil.find({ active: true }).sort({ name: 1 });
+  const pupilIds = pupilDocs.map(p => p.id);
+  const pupilGuardians = await PupilGuardian.find({ pupilId: { $in: pupilIds }, status: { $ne: 'revoked' } });
+  const guardianIds = [...new Set(pupilGuardians.map(pg => pg.guardianId))];
+  const guardianDocs = await Guardian.find({ id: { $in: guardianIds } });
+  const guardianMap = new Map();
+  guardianDocs.forEach(g => guardianMap.set(g.id, g));
+
   const pupils = pupilDocs.map(p => {
     const activeCollectors = (p.collectors || [])
       .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
       .map(c => ({ id: c.id, name: c.name, relation: c.relation, until: c.until }));
+
+    const links = pupilGuardians.filter(pg => pg.pupilId === p.id);
+    const linkedGuardians = links.map(link => {
+      const gDoc = guardianMap.get(link.guardianId);
+      return {
+        guardianId: link.guardianId,
+        name: gDoc ? gDoc.name : p.guardian,
+        relationship: link.relationship,
+        isLegalGuardian: Boolean(link.isLegalGuardian),
+        status: link.status,
+        verifiedContactMethod: gDoc ? gDoc.verifiedContactMethod : 'sms',
+        channelVerified: gDoc ? Boolean(gDoc.channelVerified) : false,
+        privacyNoticeAccepted: gDoc ? Boolean(gDoc.privacyNoticeAccepted) : false,
+        inviteToken: gDoc ? gDoc.inviteToken : null,
+        verificationCode: gDoc ? gDoc.verificationCode : null
+      };
+    });
+
     return {
       id: p.id,
       name: p.name,
@@ -135,7 +160,8 @@ async function getStateJson() {
       initials: p.initials,
       color: p.color,
       photo: p.photo,
-      collectors: activeCollectors
+      collectors: activeCollectors,
+      guardians: linkedGuardians
     };
   });
 

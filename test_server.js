@@ -887,4 +887,16 @@ test('Guardian onboarding: invitation, channel verification, consent acceptance,
   const legalAudit = await AuditEntry.findOne({ action: 'update_legal_guardian_status', objectId: `NF-4001:${invite.guardianId}` });
   assert.ok(legalAudit);
   assert.ok(legalAudit.reason.includes('Court custody determination decree'));
+
+  // 9. Verify state payload returns linked guardians with their legal status and verification state
+  const schoolStateRes = await request.get('/api/state').set('Cookie', adminCookie);
+  assert.equal(schoolStateRes.status, 200);
+  const maya = schoolStateRes.body.pupils.find(p => p.id === 'NF-4001');
+  assert.ok(maya);
+  assert.ok(Array.isArray(maya.guardians));
+  assert.equal(maya.guardians.length, 1);
+  assert.equal(maya.guardians[0].guardianId, invite.guardianId);
+  assert.equal(maya.guardians[0].isLegalGuardian, false); // updated in step 8
+  assert.equal(maya.guardians[0].channelVerified, true);
+  assert.equal(maya.guardians[0].privacyNoticeAccepted, true);
 });

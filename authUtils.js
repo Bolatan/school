@@ -1,8 +1,9 @@
 const crypto = require('crypto');
-const { User, Pupil, PickupRequest, AttendanceEvent } = require('./models');
+const { User, Pupil, PickupRequest, AttendanceEvent, Guardian, PupilGuardian, CorrectionRequest } = require('./models');
 
 const DEMO_EMAIL = 'admin@northfield.school';
 const DEMO_PASSWORD = 'GatewiseDemo!26';
+const DEMO_GUARDIAN_EMAIL = 'tomi.adeyemi@guardian.northfield.school';
 
 function passwordHash(password, saltHex = null) {
   const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
@@ -153,6 +154,103 @@ async function seedInitialData() {
       await PickupRequest.create(req);
     }
   }
+
+  // Ensure demo guardian accounts and relations exist
+  const existingDemoInvite = await Guardian.findOne({ inviteToken: 'DEMO-INVITE-MENSAH' });
+  if (!existingDemoInvite) {
+    const { salt: gSalt, hash: gHash } = passwordHash(DEMO_PASSWORD);
+
+    // 1. Seed active verified guardian: Tomi Adeyemi (parent of Zara Adeyemi NF-1042)
+    let activeGuardian = await Guardian.findOne({ id: 'GD-1042' });
+    if (!activeGuardian) {
+      activeGuardian = await Guardian.create({
+        id: 'GD-1042',
+        name: 'Tomi Adeyemi',
+        email: DEMO_GUARDIAN_EMAIL,
+        phone: '+1 555-0142',
+        verifiedContactMethod: 'sms',
+        verificationCode: '782194',
+        inviteToken: 'DEMO-INVITE-TOMI',
+        channelVerified: true,
+        channelVerifiedAt: new Date(Date.now() - 3600000),
+        privacyNoticeAccepted: true,
+        privacyNoticeVersion: '2026.1',
+        privacyAcceptedAt: new Date(Date.now() - 3600000),
+        consentAccepted: true,
+        consentAcceptedAt: new Date(Date.now() - 3600000),
+        status: 'active',
+        preferredChannels: ['sms', 'email']
+      });
+
+      let guardianUser = await User.findOne({ email: DEMO_GUARDIAN_EMAIL });
+      if (!guardianUser) {
+        guardianUser = await User.create({
+          email: DEMO_GUARDIAN_EMAIL,
+          name: 'Tomi Adeyemi',
+          role: 'guardian',
+          salt: gSalt,
+          passwordHash: gHash,
+          active: true,
+          guardianId: activeGuardian.id
+        });
+      }
+
+      activeGuardian.userId = guardianUser._id;
+      await activeGuardian.save();
+
+      await PupilGuardian.findOneAndUpdate(
+        { id: 'PG-1042' },
+        {
+          id: 'PG-1042',
+          pupilId: 'NF-1042',
+          guardianId: activeGuardian.id,
+          relationship: 'Mother',
+          isLegalGuardian: true,
+          status: 'active',
+          legalStatusApprovedBySchool: true,
+          approvedBySchoolAt: new Date(),
+          approvedByStaff: 'Amara Okafor'
+        },
+        { upsert: true }
+      );
+    }
+
+    // 2. Seed pending invited guardian: Ama Mensah (parent of Daniel Mensah NF-1087)
+    await Guardian.findOneAndUpdate(
+      { inviteToken: 'DEMO-INVITE-MENSAH' },
+      {
+        id: 'GD-1087',
+        name: 'Ama Mensah',
+        email: 'ama.mensah@example.com',
+        phone: '+1 555-0187',
+        verifiedContactMethod: 'sms',
+        verificationCode: '554921',
+        inviteToken: 'DEMO-INVITE-MENSAH',
+        channelVerified: false,
+        privacyNoticeAccepted: false,
+        consentAccepted: false,
+        status: 'invited',
+        preferredChannels: ['sms']
+      },
+      { upsert: true }
+    );
+
+    await PupilGuardian.findOneAndUpdate(
+      { id: 'PG-1087' },
+      {
+        id: 'PG-1087',
+        pupilId: 'NF-1087',
+        guardianId: 'GD-1087',
+        relationship: 'Mother',
+        isLegalGuardian: true,
+        status: 'pending_verification',
+        legalStatusApprovedBySchool: true,
+        approvedBySchoolAt: new Date(),
+        approvedByStaff: 'Amara Okafor'
+      },
+      { upsert: true }
+    );
+  }
 }
 
 async function getNextCollectorId(pupilDoc) {
@@ -168,6 +266,7 @@ async function getNextCollectorId(pupilDoc) {
 module.exports = {
   DEMO_EMAIL,
   DEMO_PASSWORD,
+  DEMO_GUARDIAN_EMAIL,
   passwordHash,
   verifyPassword,
   nowLocal,

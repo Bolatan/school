@@ -230,7 +230,24 @@
 
   function renderDashboard(){const es=todayEvents(), arrivals=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival'), deps=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception'), present=pupils.filter(p=>statusFor(p)==='On campus').length;$('#presentCount').innerHTML=`${present} <small>/ 248</small>`;$('#presentProgress').style.width=`${Math.min(100,present/248*100)}%`;$('#arrivalsCount').textContent=arrivals.length;$('#departuresCount').textContent=deps.length;$('#lastArrival').textContent=arrivals.length?arrivals.sort((a,b)=>b.createdAt-a.createdAt)[0].time:'—';$('#alertsSent').textContent=es.filter(e=>e.alert==='Sent').length;$('#attentionCount').textContent=requests.length+1;const term=($('#arrivalSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>statusFor(p)==='On campus'&&(!term||`${p.name} ${p.className}`.toLowerCase().includes(term))&&(classChoice==='All classes'||p.className===classChoice));$('#arrivalRows').innerHTML=list.slice(0,7).map(p=>{const e=lastEvent(p.id);return `<tr><td>${pupilCell(p)}</td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td class="time-cell">${escapeHtml(e?.time||'—')}</td><td>${badge('On campus','status-present')}</td></tr>`}).join('');$('#emptyArrivals').classList.toggle('hidden',list.length>0);const recent=es.slice().sort((a,b)=>b.createdAt-a.createdAt).slice(0,5);$('#recentActivity').innerHTML=recent.map(activityItem).join('')||'<div class="empty-state">No events recorded yet.</div>';updateOfflineStatusUI();}
   function activityItem(e){const p=pupil(e.pupilId)||{name:'Unknown pupil'};let type=e.type;const isArrival=type==='arrival'||type==='manual_arrival';const isDep=type==='departure'||type==='manual_departure'||type==='authorized_exception';const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION</span>`:'';const pendingTag=isPendingSync?`<span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">PENDING SYNC (NOT NOTIFIED)</span>`:'';const alertText=isPendingSync?'Pending sync (parents NOT notified)':(e.alert||'Sent');return `<div class="activity-item"><div class="activity-icon ${isArrival?'arrival':isDep?'departure':'request'}">${isArrival?'↘':isDep?'↗':'◷'}</div><div class="activity-copy"><b>${isArrival?'Arrival recorded':isDep?'Departure recorded':'Activity'}</b> for ${escapeHtml(p.name)}${e.collector?` with ${escapeHtml(e.collector)}`:''} ${manualTag} ${corrTag} ${pendingTag}<small>${escapeHtml(e.time)} · ${escapeHtml(e.staff)} · Guardian alert: <b>${escapeHtml(alertText)}</b></small></div></div>`;}
-  function renderPupils(){const q=($('#pupilSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>{const st=statusFor(p);const matchStatus=pupilStatusChoice==='All statuses'||st===pupilStatusChoice;const matchQ=!q||`${p.name} ${p.id} ${p.className}`.toLowerCase().includes(q);const matchCls=classChoice==='All classes'||p.className===classChoice;return matchStatus&&matchQ&&matchCls;});$('#pupilResultCount').textContent=`${list.length} pupils`;$('#pupilRows').innerHTML=list.map(p=>`<tr><td>${pupilCell(p)}</td><td><span class="pupil-id">${escapeHtml(p.id)}</span></td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td>${p.collectors.length} approved</td><td>${badge(statusFor(p),statusClass(statusFor(p)))}</td><td><button class="row-menu" data-pupil-detail="${escapeHtml(p.id)}" aria-label="Pupil options">···</button></td></tr>`).join('');}
+  function renderPupils(){
+    const q=($('#pupilSearch')?.value||'').toLowerCase();
+    const list=pupils.filter(p=>{
+      const st=statusFor(p);
+      const matchStatus=pupilStatusChoice==='All statuses'||st===pupilStatusChoice;
+      const matchQ=!q||`${p.name} ${p.id} ${p.className}`.toLowerCase().includes(q);
+      const matchCls=classChoice==='All classes'||p.className===classChoice;
+      return matchStatus&&matchQ&&matchCls;
+    });
+    $('#pupilResultCount').textContent=`${list.length} pupils`;
+    $('#pupilRows').innerHTML=list.map(p=>{
+      const gList = p.guardians || [];
+      const guardianSummary = gList.length > 0
+        ? `${gList.length} linked (${gList.filter(g=>g.isLegalGuardian).length} legal)`
+        : escapeHtml(p.guardian || '1 guardian');
+      return `<tr><td>${pupilCell(p)}</td><td><span class="pupil-id">${escapeHtml(p.id)}</span></td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td>${guardianSummary}</td><td>${badge(statusFor(p),statusClass(statusFor(p)))}</td><td><button class="row-menu" data-pupil-detail="${escapeHtml(p.id)}" aria-label="Pupil options">···</button></td></tr>`;
+    }).join('');
+  }
   function renderPickup(){const total=pupils.reduce((n,p)=>n+p.collectors.length,0);$('#pendingCount').textContent=requests.length;$('#approvedCount').textContent=total;$('#requestList').innerHTML=requests.length?requests.map(r=>{const p=pupil(r.pupilId)||{name:'Unknown pupil',initials:'?',color:'blue'};return `<div class="request-card"><div>${avatar(p)}</div><div class="request-details"><strong>${escapeHtml(r.name)} <span class="card-tag">· ${escapeHtml(r.relation)}</span></strong><p>Pickup for <b>${escapeHtml(p.name)}</b> · Requested by ${escapeHtml(r.requestedBy)}</p><small>${escapeHtml(r.time)} — ${escapeHtml(r.note)}</small></div>${signedInUser?.role==='viewer'?'':`<div class="request-actions"><button class="decline-button" data-request="${r.id}" data-action="decline">Decline</button><button class="approve-button" data-request="${r.id}" data-action="approve">✓ Approve</button></div>`}</div>`}).join(''):'<div class="empty-state">No pending pickup requests.</div>';const q=($('#pickupSearch')?.value||'').toLowerCase();const active=pupils.flatMap(p=>p.collectors.map(c=>({p,c}))).filter(x=>`${x.p.name} ${x.c.name} ${x.c.relation}`.toLowerCase().includes(q));$('#approvedRows').innerHTML=active.map(({p,c})=>`<tr><td>${pupilCell(p)}</td><td><b>${escapeHtml(c.name)}</b></td><td>${escapeHtml(c.relation)}</td><td>${escapeHtml(c.until||'Ongoing')}</td><td>${badge('Approved','status-approved')}</td></tr>`).join('');}
   function renderActivity(){const q=($('#activitySearch')?.value||'').toLowerCase();let es=todayEvents().slice().sort((a,b)=>b.createdAt-a.createdAt);if(activityChoice==='Arrivals')es=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival');else if(activityChoice==='Departures')es=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception');else if(activityChoice==='Manual entries')es=es.filter(e=>e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.source==='Paper/voice manual fallback'||e.reason);es=es.filter(e=>{const p=pupil(e.pupilId)||{};return `${p.name||''} ${e.type} ${e.source} ${e.staff} ${e.reason||''} ${e.alert||''}`.toLowerCase().includes(q)});$('#activityResultCount').textContent=`${es.length} events`;$('#activityRows').innerHTML=es.map(e=>{const p=pupil(e.pupilId)||{name:'Unknown pupil',guardian:'',initials:'?',color:'blue'};const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<br><span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<br><span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION (LINKED: ${escapeHtml(e.correctionLink)})</span>`:'';const offlineTag=e.source==='Offline queued'||isPendingSync?`<br><span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">OFFLINE QUEUED</span>`:'';const fallbackTag=e.source==='Paper/voice manual fallback'?`<br><span class="manual-tag" style="background:#f3e8ff;color:#6b21a8;font-weight:700">RECONCILED FALLBACK (${escapeHtml(e.reconciliationAuditReason||'Manual log')})</span>`:'';const canCorrect=(signedInUser?.role==='admin'||signedInUser?.role==='manager')&&!isPendingSync?`<button class="text-link" data-correct-event="${escapeHtml(e.id)}" style="margin-left:8px;font-size:11px">Correct</button>`:'';const alertBadge=isPendingSync?`<span class="status-pill status-pending" title="Parents have NOT been notified. Will sync upon reconnection."><i></i>Pending sync</span>`:badge(e.alert||'Sent',e.alert==='Sent'?'status-approved':'status-pending');return `<tr><td>${badge(e.type.includes('arrival')?'Arrival':e.type.includes('exception')?'Authorized Exception':'Departure',e.type.includes('arrival')?'status-present':'status-departed')}</td><td>${pupilCell(p)}</td><td>${escapeHtml(e.source||'Card scan')}${e.collector?`<small class="card-tag"> · ${escapeHtml(e.collector)}</small>`:''}${manualTag}${corrTag}${offlineTag}${fallbackTag}${canCorrect}</td><td>${escapeHtml(e.staff)}</td><td class="time-cell">${escapeHtml(e.time)}</td><td>${alertBadge}</td></tr>`}).join('');$('#emptyActivity').classList.toggle('hidden',es.length>0);updateOfflineStatusUI();}
   function showScanResult(isSuccess, message, details = '') {
@@ -718,7 +735,82 @@
 
   function resolvePickupRequest(r,action){if(action==='approve'){const localToday=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);openModal(`<h2 id="modalTitle">Approve pickup</h2><p class="modal-intro">This adds ${escapeHtml(r.name)} to the approved collector list for ${escapeHtml(pupil(r.pupilId)?.name||'the pupil')}. Set the last valid pickup date.</p><form id="approvePickupForm"><div class="form-field"><label>Approval expires on</label><input name="validUntil" type="date" min="${localToday}" value="${localToday}" required></div><div class="danger-note" style="margin-top:12px">Staff must still verify this person’s identity at pickup. Confirm the expiry with the guardian before approving.</div><div class="modal-actions"><button type="button" class="button button-outline" id="cancelPickupApproval">Cancel</button><button class="button button-primary" type="submit">Approve collector</button></div></form>`);$('#cancelPickupApproval').onclick=closeModal;$('#approvePickupForm').onsubmit=async ev=>{ev.preventDefault();const validUntil=new FormData(ev.currentTarget).get('validUntil');try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action,validUntil});acceptState(res.state);closeModal();render();toast(`${r.name} approved until ${validUntil}.`)}catch(err){toast(err.message,'!')}};return}openModal(`<h2 id="modalTitle">Decline pickup request?</h2><p class="modal-intro">${escapeHtml(r.name)} will not be added to the approved collector list. Contact the guardian through the school’s usual process.</p><div class="modal-actions"><button class="button button-outline" id="cancelDecline">Keep request</button><button class="button button-dark" id="confirmDecline">Decline request</button></div>`);$('#cancelDecline').onclick=closeModal;$('#confirmDecline').onclick=async()=>{try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action});acceptState(res.state);closeModal();render();toast('Pickup request declined.')}catch(err){toast(err.message,'!')}}}
   function findAndScan(term,source='Card scan'){const query=term.trim().toLowerCase();if(!query)return;const matches=pupils.filter(p=>p.id.toLowerCase()===query || p.name.toLowerCase().includes(query));if(!matches.length){toast('Pupil not found by ID or name. Search the directory.','!');return}if(matches.length===1){eventConfirm(matches[0], source!=='Card scan');return}const listHtml=matches.map(p=>`<div class="confirm-profile pupil-select-item" data-select-pupil="${escapeHtml(p.id)}" style="cursor:pointer">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)} · ${escapeHtml(p.guardian)}</small></div></div>`).join('');openModal(`<h2 id="modalTitle">Select pupil</h2><p class="modal-intro">Multiple pupils matched "${escapeHtml(term)}". Select the pupil to verify using their photo on screen.</p><div style="display:grid;gap:8px;max-height:280px;overflow:auto">${listHtml}</div><div class="modal-actions"><button class="button button-outline" id="cancelSelectPupil">Cancel</button></div>`);$('#cancelSelectPupil').onclick=closeModal;$$('[data-select-pupil]').forEach(el=>{el.onclick=()=>{const selected=pupil(el.dataset.selectPupil);if(selected)eventConfirm(selected, source!=='Card scan');};});}
-  function openAddPupil(){openModal(`<h2 id="modalTitle">Add a pupil</h2><p class="modal-intro">Create a school profile. The guardian relationship still needs to be verified by the school.</p><form id="addPupilForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required placeholder="Pupil name"></div><div class="form-field"><label>Pupil ID</label><input name="id" placeholder="Auto-generated if blank"></div><div class="form-field"><label>Class</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div><div class="form-field full"><label>Guardian name</label><input name="guardian" required placeholder="Parent or guardian"></div><div class="form-field full"><div class="danger-note">Local MVP only: do not enter real pupil or guardian data. No guardian login or messaging is connected.</div></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAdd">Cancel</button><button class="button button-primary" type="submit">Create pupil</button></div></form>`);$('#cancelAdd').onclick=closeModal;$('#addPupilForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget),name=String(f.get('name')).trim();try{const res=await api('/api/pupils',{name,id:String(f.get('id')).trim(),className:f.get('className'),guardian:String(f.get('guardian')).trim()});acceptState(res.state);closeModal();render();toast(`${name} added to the directory.`)}catch(err){toast(err.message,'!')}};}
+  function openAddPupil(){
+    openModal(`
+      <h2 id="modalTitle">Add a pupil & Invite Guardian</h2>
+      <p class="modal-intro">Create a pupil profile and optionally issue an onboarding invitation via a verified contact method.</p>
+      <form id="addPupilForm" class="form-grid">
+        <div class="form-field full"><label>Full name *</label><input name="name" required placeholder="Pupil name"></div>
+        <div class="form-field"><label>Pupil ID</label><input name="id" placeholder="Auto-generated if blank"></div>
+        <div class="form-field"><label>Class *</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div>
+        <div class="form-field full"><label>Primary Guardian name *</label><input name="guardian" required placeholder="Parent or guardian full name"></div>
+        <div class="form-field"><label>Guardian Phone (for SMS)</label><input name="guardianPhone" placeholder="+1 555-0100" value="+1 555-0100"></div>
+        <div class="form-field"><label>Guardian Email</label><input name="guardianEmail" type="email" placeholder="guardian@example.com"></div>
+        <div class="form-field full">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" name="inviteGuardian" id="autoInviteGuardian" checked>
+            <span>Invite guardian now via verified contact method (OTP proving channel control)</span>
+          </label>
+        </div>
+        <div class="form-field">
+          <label>Verified Contact Method</label>
+          <select name="verifiedContactMethod">
+            <option value="sms">SMS Text Message</option>
+            <option value="email">Email</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Relationship</label>
+          <select name="relationship">
+            <option value="Mother">Mother</option>
+            <option value="Father">Father</option>
+            <option value="Legal Guardian">Legal Guardian</option>
+          </select>
+        </div>
+        <div class="form-field full">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" name="isLegalGuardian" checked>
+            <span>School certifies legal guardian status (School Authority Required)</span>
+          </label>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelAdd">Cancel</button>
+          <button class="button button-primary" type="submit">Create pupil</button>
+        </div>
+      </form>
+    `);
+    $('#cancelAdd').onclick = closeModal;
+    $('#addPupilForm').onsubmit = async e => {
+      e.preventDefault();
+      const f = new FormData(e.currentTarget);
+      const name = String(f.get('name')).trim();
+      const payload = {
+        name,
+        id: String(f.get('id')).trim(),
+        className: f.get('className'),
+        guardian: String(f.get('guardian')).trim(),
+        guardianPhone: String(f.get('guardianPhone') || '').trim(),
+        guardianEmail: String(f.get('guardianEmail') || '').trim(),
+        inviteGuardian: f.get('inviteGuardian') !== null,
+        verifiedContactMethod: f.get('verifiedContactMethod') || 'sms',
+        relationship: f.get('relationship') || 'Parent',
+        isLegalGuardian: f.get('isLegalGuardian') !== null
+      };
+
+      try {
+        const res = await api('/api/pupils', payload);
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast(`${name} added to the directory.`);
+        if (res.invite) {
+          openInviteSentSuccessModal(res.invite);
+        }
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
   async function renderUsers(){if(signedInUser?.role!=='admin')return;const body=$('#userRows');body.innerHTML='<tr><td colspan="5">Loading accounts…</td></tr>';try{const {users}=await api('/api/users');body.innerHTML=users.map(u=>`<tr><td><b>${escapeHtml(u.name)}</b></td><td>${escapeHtml(u.email)}</td><td><select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option><option value="manager" ${u.role==='manager'?'selected':''}>Manager</option><option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option></select></td><td>${badge(u.active?'Active':'Disabled',u.active?'status-approved':'status-neutral')}</td><td><button class="button button-outline user-toggle" data-user-active="${u.id}" data-active="${u.active?0:1}" ${u.id===signedInUser.id?'disabled':''}>${u.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5">No staff accounts.</td></tr>'}catch(err){body.innerHTML=`<tr><td colspan="5">${escapeHtml(err.message)}</td></tr>`}}
   function openAddUser(){openModal(`<h2 id="modalTitle">Create staff account</h2><p class="modal-intro">The staff member will use this temporary password at sign-in. Share it privately.</p><form id="addUserForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required maxlength="120"></div><div class="form-field full"><label>School email</label><input name="email" type="email" required maxlength="254"></div><div class="form-field full"><label>Role</label><select name="role"><option value="manager">Manager — manage pupils and gate operations</option><option value="viewer">View only — read school records</option><option value="admin">Admin — manage users and all operations</option></select></div><div class="form-field full"><label>Temporary password (at least 12 characters)</label><input name="password" type="password" minlength="12" required autocomplete="new-password"></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAddUser">Cancel</button><button class="button button-primary" type="submit">Create account</button></div></form>`);$('#cancelAddUser').onclick=closeModal;$('#addUserForm').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);try{await api('/api/users',{name:String(f.get('name')).trim(),email:String(f.get('email')).trim(),role:f.get('role'),password:f.get('password')});closeModal();toast('Staff account created. Share the temporary password privately.');renderUsers()}catch(err){toast(err.message,'!')}}}
   async function previewRoster(file){if(!file)return;if(file.size>8*1024*1024){toast('Roster files must be 8 MB or smaller.','!');return}if(!/\.(csv|xlsx)$/i.test(file.name)){toast('Choose a CSV or XLSX file.','!');return}try{const buffer=await file.arrayBuffer();let binary='';const bytes=new Uint8Array(buffer);for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const {preview,errors,errorCount,token}=await api('/api/import/preview',{filename:file.name,fileBase64:btoa(binary)});const rows=preview.map(p=>`<tr><td>${escapeHtml(p.pupil_id)}</td><td>${escapeHtml(p.pupil_name)}</td><td>${escapeHtml(p.class_name)}</td><td>${escapeHtml(p.guardian_name)}</td></tr>`).join('');openModal(`<h2 id="modalTitle">Review pupil roster</h2><p class="modal-intro">${errorCount?`${errorCount} issue(s) found. Correct the file and upload again; nothing has been imported.`:`${preview.length} pupil(s) ready. Review the sample, then import the entire file.`}</p>${preview.length?`<div class="import-preview-wrap"><table class="import-preview-table"><thead><tr><th>PUPIL ID</th><th>NAME</th><th>CLASS</th><th>GUARDIAN</th></tr></thead><tbody>${rows}</tbody></table></div>`:''}${errorCount?`<div class="import-errors">${errors.map(e=>`<div>Row ${e.row}${e.pupil_id?` · ${escapeHtml(e.pupil_id)}`:''}: ${escapeHtml(e.message)}</div>`).join('')}</div>`:''}<div class="modal-actions"><button class="button button-outline" id="cancelImport">Close</button>${token&&!errorCount?'<button class="button button-primary" id="commitImport">Import pupils</button>':''}</div>`);$('#cancelImport').onclick=closeModal;if(token&&!errorCount)$('#commitImport').onclick=async()=>{const button=$('#commitImport');button.disabled=true;button.textContent='Importing…';try{const result=await api('/api/import/commit',{token});acceptState(result.state);closeModal();render();toast(`${result.imported} pupil(s) imported.`)}catch(err){toast(err.message,'!');button.disabled=false;button.textContent='Import pupils'}}}catch(err){toast(err.message,'!')}finally{$('#rosterFile').value=''}}
@@ -768,7 +860,7 @@
     const modeBtn=e.target.closest('[data-mode]');if(modeBtn){mode=modeBtn.dataset.mode;$$('.mode-button').forEach(b=>b.classList.toggle('selected',b===modeBtn));$('.scan-start').textContent='Start camera scanner';$('.scan-frame h2').textContent=mode==='arrival'?'Scan pupil ID card':'Scan for departure';}
     const req=e.target.closest('[data-request]');if(req){const r=requests.find(x=>x.id===req.dataset.request);if(r)resolvePickupRequest(r,req.dataset.action);}
     const corr=e.target.closest('[data-correct-event]');if(corr){openCorrectionModal(corr.dataset.correctEvent);}
-    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openModal(`<h2 id="modalTitle">Pupil card</h2><p class="modal-intro">Demo school ID card. QR contains only a random lookup code in a production implementation.</p><div class="confirm-profile">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small></div></div><div style="display:grid;place-items:center;padding:20px;background:#fafbff;border:1px solid #eceef4;border-radius:8px"><div id="qrCanvas" style="font:700 14px monospace;color:#4c5ddd;border:8px solid white;background:white;padding:18px;letter-spacing:1px">▦ ${escapeHtml(qrValue(p))}</div><small class="card-tag" style="margin-top:8px">Demo QR reference (not scannable artwork)</small></div><div class="modal-actions"><button class="button button-outline" id="closeCard">Close</button></div>`);$('#closeCard').onclick=closeModal;}
+    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openPupilDetailModal(p);}
     if(e.target.id==='syncNowLink'||e.target.id==='syncNowBtn'){e.preventDefault();syncPendingQueue();}
     if(e.target.id==='reconcileFallbackBtn'){e.preventDefault();openReconcileModal();}
   });
@@ -1266,8 +1358,94 @@
     });
   }
 
-  $('#inviteGuardianBtn')?.addEventListener('click', openInviteGuardianModal);
+  function openPupilDetailModal(p) {
+    const isAdmin = signedInUser?.role === 'admin';
+    const isStaff = signedInUser?.role === 'admin' || signedInUser?.role === 'manager';
+    const guardians = p.guardians || [];
+
+    const guardiansHtml = guardians.length ? `
+      <div style="margin:12px 0">
+        <label style="font-size:10px;font-weight:700;color:#454b60;display:block;margin-bottom:6px">Linked Guardians & Legal Status</label>
+        <div style="display:grid;gap:8px">
+          ${guardians.map(g => `
+            <div style="border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;background:#f8fafc;display:flex;align-items:center;justify-content:space-between">
+              <div>
+                <strong style="font-size:11px;color:#1e293b">${escapeHtml(g.name)}</strong>
+                <small style="display:block;color:#64748b;font-size:9px">Relation: ${escapeHtml(g.relationship)} · Status: <b>${escapeHtml(g.status)}</b></small>
+                <div style="margin-top:2px">
+                  <span class="${g.isLegalGuardian ? 'badge-legal' : 'badge-nonlegal'}">
+                    ${g.isLegalGuardian ? 'Certified Legal Guardian' : 'Authorized Contact'}
+                  </span>
+                  <small style="color:#64748b;margin-left:6px">Method: ${escapeHtml(g.verifiedContactMethod.toUpperCase())} ${g.channelVerified ? '✓ Verified' : '⏳ Pending'}</small>
+                </div>
+              </div>
+              ${isAdmin ? `
+                <button type="button" class="button button-outline button-small" data-toggle-legal="${escapeHtml(g.guardianId)}" data-current-legal="${g.isLegalGuardian ? '1' : '0'}" style="font-size:9px">
+                  ${g.isLegalGuardian ? 'Revoke Legal Status' : 'Grant Legal Status'}
+                </button>
+              ` : ''}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    ` : `<div style="font-size:10px;color:#94a3b8;margin:8px 0">No verified guardians linked yet. Primary guardian on record: <b>${escapeHtml(p.guardian)}</b></div>`;
+
+    openModal(`
+      <h2 id="modalTitle">Pupil Profile: ${escapeHtml(p.name)}</h2>
+      <p class="modal-intro">Review pupil ID card, linked guardians, and authorized pickup collectors.</p>
+      <div class="confirm-profile">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)} · Phone: ${escapeHtml(p.guardianPhone || 'N/A')}</small></div></div>
+      <div style="display:grid;place-items:center;padding:14px;background:#fafbff;border:1px solid #eceef4;border-radius:8px;margin-bottom:12px">
+        <div id="qrCanvas" style="font:700 13px monospace;color:#4c5ddd;border:6px solid white;background:white;padding:12px;letter-spacing:1px">▦ ${escapeHtml(qrValue(p))}</div>
+        <small class="card-tag" style="margin-top:4px">School ID QR Code reference</small>
+      </div>
+      ${guardiansHtml}
+      ${isStaff ? `
+        <div style="margin-top:10px;border-top:1px dashed #e2e8f0;padding-top:10px">
+          <button type="button" class="button button-outline button-small" id="modalInviteGuardianBtn" style="width:100%">✉ Invite Guardian for ${escapeHtml(p.name)}</button>
+        </div>
+      ` : ''}
+      <div class="modal-actions"><button class="button button-outline" id="closeCard">Close</button></div>
+    `);
+
+    $('#closeCard').onclick = closeModal;
+
+    const inviteBtn = $('#modalInviteGuardianBtn');
+    if (inviteBtn) {
+      inviteBtn.onclick = () => {
+        closeModal();
+        openInviteGuardianModal(p.id);
+      };
+    }
+
+    $$('[data-toggle-legal]').forEach(btn => {
+      btn.onclick = async () => {
+        const guardianId = btn.dataset.toggleLegal;
+        const currentLegal = btn.dataset.currentLegal === '1';
+        const targetLegal = !currentLegal;
+        const reason = prompt(`Enter mandatory audit reason to ${targetLegal ? 'certify' : 'revoke'} legal guardian status for guardian ${guardianId}:`);
+        if (!reason || !reason.trim()) {
+          toast('Audit reason is required when modifying legal guardian status.', '!');
+          return;
+        }
+
+        try {
+          await api(`/api/pupils/${p.id}/guardians/${guardianId}/legal-status`, {
+            isLegalGuardian: targetLegal,
+            reason: reason.trim()
+          });
+          toast(`Legal guardian status updated.`);
+          closeModal();
+          refreshState();
+        } catch (err) {
+          toast(err.message, '!');
+        }
+      };
+    });
+  }
+
+  $('#inviteGuardianBtn')?.addEventListener('click', () => openInviteGuardianModal());
   $('#openCorrectionBtn')?.addEventListener('click', openGuardianCorrectionModal);
+  $('#authOnboardBtn')?.addEventListener('click', () => openGuardianOnboardingFlow());
 
   $('#uploadRosterBtn').onclick=()=>$('#rosterFile').click();$('#rosterFile').onchange=e=>previewRoster(e.target.files[0]);$('#addUserBtn').onclick=openAddUser;$('#userRows').addEventListener('change',async e=>{const select=e.target.closest('[data-user-role]');if(!select)return;try{await api(`/api/users/${select.dataset.userRole}`,{role:select.value});toast('User role updated.');renderUsers()}catch(err){toast(err.message,'!');renderUsers()}});$('#userRows').addEventListener('click',async e=>{const button=e.target.closest('[data-user-active]');if(!button)return;try{await api(`/api/users/${button.dataset.userActive}`,{active:Number(button.dataset.active)===1});toast('User status updated.');renderUsers()}catch(err){toast(err.message,'!')}});
   $('.main-nav').addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(b)navigate(b.dataset.page)});
