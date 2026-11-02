@@ -469,14 +469,17 @@ class Handler(BaseHTTPRequestHandler):
             user=self.require_user(("admin",))
             if not user:return
             disclose=body.get("discloseCollectorName")
-            if disclose is not None:
-                val = "1" if bool(disclose) else "0"
-                with db() as c:
+            allow_stale=body.get("allowOfflineStalePickupPolicy")
+            with db() as c:
+                if disclose is not None:
+                    val = "1" if bool(disclose) else "0"
                     c.execute("INSERT INTO school_settings(key,val) VALUES('discloseCollectorName',?) ON CONFLICT(key) DO UPDATE SET val=excluded.val", (val,))
                     c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],"update_school_settings","school_setting","discloseCollectorName",f"discloseCollectorName set to {bool(disclose)}",now_local().isoformat()))
-                    st=state_json(c)
-                return self.send_json(200,{"ok":True,"school":st["school"]})
-            with db() as c: st=state_json(c)
+                if allow_stale is not None:
+                    val2 = "1" if bool(allow_stale) else "0"
+                    c.execute("INSERT INTO school_settings(key,val) VALUES('allowOfflineStalePickupPolicy',?) ON CONFLICT(key) DO UPDATE SET val=excluded.val", (val2,))
+                    c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",(user["id"],"update_school_settings","school_setting","allowOfflineStalePickupPolicy",f"allowOfflineStalePickupPolicy set to {bool(allow_stale)}",now_local().isoformat()))
+                st=state_json(c)
             return self.send_json(200,{"ok":True,"school":st["school"]})
         if path=="/api/export/activity":
             user=self.require_user()
@@ -491,6 +494,14 @@ class Handler(BaseHTTPRequestHandler):
                 user=self.require_user(("admin","manager"))
                 if not user:return
                 return self.create_event(user,body)
+            if path=="/api/events/sync":
+                user=self.require_user(("admin","manager"))
+                if not user:return
+                return self.sync_events(user,body)
+            if path=="/api/events/reconcile":
+                user=self.require_user(("admin","manager"))
+                if not user:return
+                return self.reconcile_event(user,body)
             if path=="/api/pupils":
                 user=self.require_user(("admin","manager"))
                 if not user:return
@@ -503,68 +514,205 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:return self.send_json(400,{"error":str(exc)})
         except sqlite3.IntegrityError:return self.send_json(409,{"error":"That record already exists or is no longer available."})
 
-    def create_event(self,user,body):
-        pid=str(body.get("pupilId",""))[:30].strip(); typ=str(body.get("type","")); source=str(body.get("source","Card scan"))[:50]
+    def process_event(self, c, user, body):
+        pid=str(body.get("pupilId",""))[:30].strip().upper()
+        typ=str(body.get("type",""))
+        source=str(body.get("source","Card scan"))[:50]
         reason=str(body.get("reason",""))[:200].strip()
-        manual_entry=1 if (body.get("manualEntry") or reason in ("card_missing","card_unreadable") or source=="Manual entry" or source=="Manual ID lookup" or typ in ("authorized_exception","correction")) else 0
-        if manual_entry and source not in ("Manual entry", "Manual ID lookup", "Authorized exception", "Non-destructive correction"):
-            source = "Manual entry"
+        client_event_id=str(body.get("clientEventId","")).strip() if body.get("clientEventId") else None
+        is_offline=bool(body.get("offlineQueued"))
+        is_reconciled=bool(body.get("manualFallbackReconciled"))
+        reconciliation_audit_reason=str(body.get("reconciliationAuditReason","")).strip() if body.get("reconciliationAuditReason") else ""
+
+        # 1. Idempotency check
+        if client_event_id:
+            existing = c.execute("SELECT * FROM events WHERE client_event_id=?", (client_event_id,)).fetchone()
+            if existing:
+                return {
+                    "is_duplicate": True,
+                    "event_id": existing["id"],
+                    "event": dict(existing),
+                    "message": "Event was already synced idempotently."
+                }
+
+        # 2. Offline queue validation: managed and encrypted devices
+        if is_offline:
+            managed = body.get("deviceManaged") not in (False, "false")
+            encrypted = body.get("deviceEncrypted") not in (False, "false")
+            if not managed or not encrypted:
+                raise ValueError("Offline sync rejected: The device must be managed and encrypted to queue events locally.")
+
+            # Expiration policy: max 24 hours (86400000 ms)
+            max_age_ms = 24 * 60 * 60 * 1000
+            device_captured_at = int(body.get("deviceCapturedAt") or int(time.time() * 1000))
+            if (int(time.time() * 1000) - device_captured_at) > max_age_ms:
+                raise ValueError("Offline queued event has expired under the defined queue retention policy (exceeds 24 hours).")
+
+            # Staff binding validation
+            staff_email = body.get("staffEmail")
+            if staff_email and str(staff_email).lower() != user["email"].lower():
+                raise ValueError("Offline queued event signature does not match the active staff account.")
+
+        # 3. Fallback reconciliation validation
+        if is_reconciled and not reconciliation_audit_reason:
+            raise ValueError("Manual paper/voice fallback reconciliation requires an explicit audit reason.")
+
+        manual_entry=1 if (body.get("manualEntry") or reason in ("card_missing","card_unreadable") or source=="Manual entry" or source=="Manual ID lookup" or source=="Paper/voice manual fallback" or is_reconciled or typ in ("authorized_exception","correction")) else 0
+        if manual_entry and source not in ("Manual entry", "Manual ID lookup", "Authorized exception", "Non-destructive correction", "Paper/voice manual fallback"):
+            source = "Paper/voice manual fallback" if is_reconciled else "Manual entry"
         if reason and reason not in ("card_missing", "card_unreadable", "other") and not (typ in ("authorized_exception", "correction") or len(reason) > 0):
             raise ValueError("Invalid manual entry reason.")
         if typ not in ("arrival","departure","authorized_exception","correction"): raise ValueError("Choose arrival or departure.")
-        with db() as c:
-            p=c.execute("SELECT * FROM pupils WHERE id=? AND active=1",(pid,)).fetchone()
-            if not p: raise ValueError("Pupil ID not found.")
-            prev=c.execute("SELECT type FROM events WHERE pupil_id=? AND event_date=? ORDER BY created_ms DESC LIMIT 1",(pid,now_local().date().isoformat())).fetchone()
-            if typ=="arrival" and prev and prev["type"]=="arrival": raise ValueError(f"{p['name']} already has an arrival recorded today.")
-            if (typ=="departure" or typ=="authorized_exception") and (not prev or prev["type"]!="arrival"): raise ValueError(f"Record and verify {p['name']}'s arrival before departure.")
-            collector=None; verification=None
-            device = str(body.get("device", "Primary Gate Terminal"))[:80]
-            campus = str(body.get("campus", "Primary campus"))[:50]
-            gate = str(body.get("gate", "Main gate"))[:50]
 
-            if typ=="departure":
-                cid=body.get("collectorId")
-                if cid is None: raise ValueError("Select an approved collector.")
+        p=c.execute("SELECT * FROM pupils WHERE id=? AND active=1",(pid,)).fetchone()
+        if not p: raise ValueError("Pupil ID not found.")
+        prev=c.execute("SELECT type FROM events WHERE pupil_id=? AND event_date=? ORDER BY created_ms DESC LIMIT 1",(pid,now_local().date().isoformat())).fetchone()
+        if typ=="arrival" and prev and prev["type"]=="arrival": raise ValueError(f"{p['name']} already has an arrival recorded today.")
+        if (typ=="departure" or typ=="authorized_exception") and (not prev or prev["type"]!="arrival"): raise ValueError(f"Record and verify {p['name']}'s arrival before departure.")
+        collector=None; verification=None
+        device = str(body.get("device", "Primary Gate Terminal"))[:80]
+        campus = str(body.get("campus", "Primary campus"))[:50]
+        gate = str(body.get("gate", "Main gate"))[:50]
+
+        if typ=="departure":
+            # Check offline stale pickup policy
+            if is_offline:
+                setting_row = c.execute("SELECT val FROM school_settings WHERE key='allowOfflineStalePickupPolicy'").fetchone()
+                allow_stale = setting_row["val"] in ("1", "true", "True") if setting_row else False
+                client_ack = bool(body.get("allowOfflineStalePickupPolicy"))
+                if not allow_stale and not client_ack:
+                    raise ValueError("Offline mode must not permit stale pickup permissions to be treated as current without an explicit school policy and visible warning.")
+
+            cid=body.get("collectorId")
+            collector_name_input=str(body.get("collectorName","")).strip() if body.get("collectorName") else None
+            if cid is None and not collector_name_input:
+                raise ValueError("Select an approved collector.")
+            cr = None
+            if cid is not None:
                 cr=c.execute("SELECT name FROM collectors WHERE id=? AND pupil_id=? AND active=1 AND (valid_until='Ongoing' OR date(valid_until)>=date('now','localtime'))",(int(cid),pid)).fetchone()
-                if not cr: raise ValueError("That collector is not approved for this pupil. Escalation instruction: Release is blocked. An unapproved collector requires a school administrator exception authorization.")
-                collector=cr["name"]; verification=str(body.get("verification","Photo matched"))[:60]
-            elif typ=="authorized_exception":
-                if user["role"] != "admin":
-                    self.send_json(403, {"error": "Only a school administrator can authorize an unapproved collector exception."})
-                    return
-                if not reason:
-                    raise ValueError("An administrator exception requires a preserved reason.")
-                collector = str(body.get("collectorName", "")).strip()[:100]
-                if not collector:
-                    raise ValueError("Collector name is required for authorized exceptions.")
-                verification = str(body.get("verification", "Admin Exception: ID checked"))[:60]
+            elif collector_name_input:
+                cr=c.execute("SELECT name FROM collectors WHERE lower(name)=lower(?) AND pupil_id=? AND active=1 AND (valid_until='Ongoing' OR date(valid_until)>=date('now','localtime'))",(collector_name_input,pid)).fetchone()
+            if not cr: raise ValueError("That collector is not approved for this pupil. Escalation instruction: Release is blocked. An unapproved collector requires a school administrator exception authorization.")
+            collector=cr["name"]; verification=str(body.get("verification","Photo matched"))[:60]
+        elif typ=="authorized_exception":
+            if user["role"] != "admin":
+                err = ValueError("Only a school administrator can authorize an unapproved collector exception.")
+                err.status_code = 403
+                raise err
+            if not reason:
+                raise ValueError("An administrator exception requires a preserved reason.")
+            collector = str(body.get("collectorName", "")).strip()[:100]
+            if not collector:
+                raise ValueError("Collector name is required for authorized exceptions.")
+            verification = str(body.get("verification", "Admin Exception: ID checked"))[:60]
 
-            n=now_local(); eid=secrets.token_urlsafe(12)
+        n=now_local()
+        eid=client_event_id or secrets.token_urlsafe(12)
+        device_captured_at = int(body.get("deviceCapturedAt") or int(n.timestamp()*1000))
+        server_received_at = int(time.time() * 1000)
+        time_str = str(body.get("time")) if body.get("time") else n.strftime("%I:%M %p").lstrip("0")
+        date_str = str(body.get("date")) if body.get("date") else n.date().isoformat()
 
-            disclose = True
-            row = c.execute("SELECT val FROM school_settings WHERE key='discloseCollectorName'").fetchone()
-            if row:
-                disclose = row["val"] in ("1", "true", "True")
+        disclose = True
+        row = c.execute("SELECT val FROM school_settings WHERE key='discloseCollectorName'").fetchone()
+        if row:
+            disclose = row["val"] in ("1", "true", "True")
 
-            pref_ch = p["preferred_channel"] if "preferred_channel" in p.keys() else "sms"
-            phone = p["guardian_phone"] if "guardian_phone" in p.keys() else "+1 555-0100"
-            email = p["guardian_email"] if "guardian_email" in p.keys() else ""
-            recipient = email if pref_ch == "email" else phone
-            time_str = n.strftime("%I:%M %p").lstrip("0")
-            collector_display = (collector or "authorized contact") if disclose else "an authorized contact"
-            alert_msg = f"Gatewise Alert: {p['name']} has arrived safely at {campus} ({gate}) at {time_str}." if typ == "arrival" else f"Gatewise Alert: {p['name']} departed from {campus} with {collector_display} at {time_str}."
+        pref_ch = p["preferred_channel"] if "preferred_channel" in p.keys() else "sms"
+        phone = p["guardian_phone"] if "guardian_phone" in p.keys() else "+1 555-0100"
+        email = p["guardian_email"] if "guardian_email" in p.keys() else ""
+        recipient = email if pref_ch == "email" else phone
+        collector_display = (collector or "authorized contact") if disclose else "an authorized contact"
+        alert_msg = f"Gatewise Alert: {p['name']} has arrived safely at {campus} ({gate}) at {time_str}." if typ == "arrival" else f"Gatewise Alert: {p['name']} departed from {campus} with {collector_display} at {time_str}."
 
-            nid = secrets.token_urlsafe(12)
-            if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'").fetchone():
-                c.execute("INSERT INTO notifications(id,event_id,pupil_id,guardian_name,channel,recipient,message,status,sent_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                          (nid, eid, pid, p["guardian"], pref_ch.upper(), recipient, alert_msg, "Sent", time_str))
+        nid = secrets.token_urlsafe(12)
+        if c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='notifications'").fetchone():
+            c.execute("INSERT INTO notifications(id,event_id,pupil_id,guardian_name,channel,recipient,message,status,sent_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                      (nid, eid, pid, p["guardian"], pref_ch.upper(), recipient, alert_msg, "Sent", time_str))
 
-            c.execute("INSERT INTO events(id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,device,campus,gate,alert,reason,manual_entry) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                      (eid,pid,typ,time_str,n.date().isoformat(),int(n.timestamp()*1000),user["name"],source,collector,verification,device,campus,gate,"Sent",reason,manual_entry))
-            c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",
-                      (user["id"],f"record_{typ}","event",eid,f"campus={campus}; gate={gate}; device={device}; source={source}; collector={collector or 'none'}; verification={verification or 'none'}; reason={reason}; alert_channel={pref_ch.upper()}",n.isoformat()))
-            return self.send_json(201,{"ok":True,"eventId":eid,"alertStatus":"sent","notification":{"id":nid,"guardian":p["guardian"],"channel":pref_ch.upper(),"recipient":recipient,"message":alert_msg},"state":state_json(c)})
+        event_source = "Paper/voice manual fallback" if is_reconciled else ("Offline synced queue" if is_offline else source)
+        sync_status = "reconciled_fallback" if is_reconciled else "synced"
+
+        c.execute("""INSERT INTO events(
+          id,pupil_id,type,event_time,event_date,created_ms,staff,source,collector,verification,
+          device,campus,gate,alert,reason,manual_entry,client_event_id,offline_queued,
+          device_captured_at,server_received_at,sync_status,reconciliation_audit_reason
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                  (eid,pid,typ,time_str,date_str,device_captured_at,user["name"],event_source,collector,verification,
+                   device,campus,gate,"Sent",reason,manual_entry,client_event_id,1 if is_offline else 0,
+                   device_captured_at,server_received_at,sync_status,reconciliation_audit_reason))
+
+        action_name = "reconcile_manual_fallback" if is_reconciled else ("sync_offline_event" if is_offline else f"record_{typ}")
+        c.execute("INSERT INTO audit_log(user_id,action,object_type,object_id,reason,created_at) VALUES(?,?,?,?,?,?)",
+                  (user["id"],action_name,"event",eid,
+                   f"campus={campus}; gate={gate}; device={device}; source={event_source}; client_id={client_event_id or 'none'}; collector={collector or 'none'}; verification={verification or 'none'}; reason={reason}; offline_queued={is_offline}; reconciliation_audit_reason={reconciliation_audit_reason}; alert_channel={pref_ch.upper()}",
+                   n.isoformat()))
+
+        return {
+            "is_duplicate": False,
+            "event_id": eid,
+            "notification": {
+                "id": nid,
+                "guardian": p["guardian"],
+                "channel": pref_ch.upper(),
+                "recipient": recipient,
+                "message": alert_msg
+            }
+        }
+
+    def create_event(self,user,body):
+        with db() as c:
+            try:
+                res = self.process_event(c, user, body)
+                status = 200 if res["is_duplicate"] else 201
+                alert_status = "already_synced" if res["is_duplicate"] else "sent"
+                return self.send_json(status, {
+                    "ok": True,
+                    "eventId": res["event_id"],
+                    "isDuplicate": res["is_duplicate"],
+                    "alertStatus": alert_status,
+                    "notification": res.get("notification"),
+                    "state": state_json(c)
+                })
+            except ValueError as ve:
+                status_code = getattr(ve, "status_code", 400)
+                return self.send_json(status_code, {"error": str(ve)})
+
+    def sync_events(self, user, body):
+        events_to_sync = body.get("events") if isinstance(body.get("events"), list) else [body]
+        results = []
+        with db() as c:
+            for evt in events_to_sync:
+                client_id = evt.get("clientEventId")
+                try:
+                    res = self.process_event(c, user, {**evt, "offlineQueued": True})
+                    results.append({"clientEventId": client_id, "ok": True, "eventId": res["event_id"], "isDuplicate": res["is_duplicate"]})
+                except Exception as ex:
+                    results.append({"clientEventId": client_id, "ok": False, "error": str(ex)})
+            return self.send_json(200, {"ok": True, "results": results, "state": state_json(c)})
+
+    def reconcile_event(self, user, body):
+        reason = str(body.get("reconciliationAuditReason") or body.get("reason") or "").strip()
+        if not reason:
+            return self.send_json(400, {"error": "Manual paper/voice fallback reconciliation requires an explicit audit reason."})
+        with db() as c:
+            try:
+                res = self.process_event(c, user, {
+                    **body,
+                    "manualFallbackReconciled": True,
+                    "reconciliationAuditReason": reason,
+                    "source": "Paper/voice manual fallback"
+                })
+                status = 200 if res["is_duplicate"] else 201
+                return self.send_json(status, {
+                    "ok": True,
+                    "eventId": res["event_id"],
+                    "isDuplicate": res["is_duplicate"],
+                    "notification": res.get("notification"),
+                    "state": state_json(c)
+                })
+            except ValueError as ve:
+                return self.send_json(getattr(ve, "status_code", 400), {"error": str(ve)})
 
     def create_pupil(self,user,body):
         name=str(body.get("name",""))[:100].strip(); pid=str(body.get("id",""))[:30].strip().upper(); cls=str(body.get("className",""))[:30].strip(); guardian=str(body.get("guardian",""))[:100].strip()
