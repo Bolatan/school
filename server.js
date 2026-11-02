@@ -1688,6 +1688,78 @@ app.post('/api/settings', requireAuth(['admin']), async (req, res) => {
   }
 });
 
+app.get('/api/reports/exceptions', requireAuth(), async (req, res) => {
+  try {
+    const todayStr = formatDate(nowLocal());
+    // Find events with manualEntry or card_missing or card_unreadable or authorized_exception
+    const exceptionEvents = await AttendanceEvent.find({
+      $or: [
+        { manualEntry: true },
+        { reason: 'card_missing' },
+        { reason: 'card_unreadable' },
+        { source: 'Manual entry' },
+        { source: 'Manual ID lookup' },
+        { type: 'authorized_exception' }
+      ]
+    }).sort({ createdAt: -1 });
+
+    const pupilIds = [...new Set(exceptionEvents.map(e => e.pupilId))];
+    const pupils = await Pupil.find({ id: { $in: pupilIds } });
+    const pupilMap = {};
+    pupils.forEach(p => { pupilMap[p.id] = p; });
+
+    let todayMissingCardCount = 0;
+    let todayUnreadableQrCount = 0;
+    let todayManualEntryCount = 0;
+    let todayAuthorizedExceptionCount = 0;
+
+    const reportItems = exceptionEvents.map(e => {
+      const isToday = e.date === todayStr;
+      if (isToday) {
+        if (e.reason === 'card_missing') todayMissingCardCount++;
+        else if (e.reason === 'card_unreadable') todayUnreadableQrCount++;
+        if (e.manualEntry || e.reason === 'card_missing' || e.reason === 'card_unreadable' || e.source === 'Manual entry' || e.source === 'Manual ID lookup') todayManualEntryCount++;
+        if (e.type === 'authorized_exception') todayAuthorizedExceptionCount++;
+      }
+      const p = pupilMap[e.pupilId];
+      return {
+        id: e.id,
+        pupilId: e.pupilId,
+        pupilName: p ? p.name : 'Unknown pupil',
+        className: p ? p.className : '',
+        type: e.type,
+        time: e.time,
+        date: e.date,
+        createdAt: e.createdAt,
+        staff: e.staff,
+        source: e.source,
+        reason: e.reason || '',
+        manualEntry: Boolean(e.manualEntry || e.reason === 'card_missing' || e.reason === 'card_unreadable' || e.source === 'Manual entry' || e.source === 'Manual ID lookup'),
+        collector: e.collector || null,
+        verification: e.verification || null,
+        device: e.device,
+        campus: e.campus,
+        gate: e.gate,
+        syncStatus: e.syncStatus
+      };
+    });
+
+    res.json({
+      summary: {
+        totalExceptions: reportItems.length,
+        todayExceptions: reportItems.filter(e => e.date === todayStr).length,
+        todayMissingCard: todayMissingCardCount,
+        todayUnreadableQr: todayUnreadableQrCount,
+        todayManualEntries: todayManualEntryCount,
+        todayAuthorizedExceptions: todayAuthorizedExceptionCount
+      },
+      exceptions: reportItems
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/export/activity', requireAuth(), async (req, res) => {
   try {
     await AuditEntry.create({

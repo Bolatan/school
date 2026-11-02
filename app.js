@@ -717,7 +717,129 @@
   }
 
   function resolvePickupRequest(r,action){if(action==='approve'){const localToday=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);openModal(`<h2 id="modalTitle">Approve pickup</h2><p class="modal-intro">This adds ${escapeHtml(r.name)} to the approved collector list for ${escapeHtml(pupil(r.pupilId)?.name||'the pupil')}. Set the last valid pickup date.</p><form id="approvePickupForm"><div class="form-field"><label>Approval expires on</label><input name="validUntil" type="date" min="${localToday}" value="${localToday}" required></div><div class="danger-note" style="margin-top:12px">Staff must still verify this person’s identity at pickup. Confirm the expiry with the guardian before approving.</div><div class="modal-actions"><button type="button" class="button button-outline" id="cancelPickupApproval">Cancel</button><button class="button button-primary" type="submit">Approve collector</button></div></form>`);$('#cancelPickupApproval').onclick=closeModal;$('#approvePickupForm').onsubmit=async ev=>{ev.preventDefault();const validUntil=new FormData(ev.currentTarget).get('validUntil');try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action,validUntil});acceptState(res.state);closeModal();render();toast(`${r.name} approved until ${validUntil}.`)}catch(err){toast(err.message,'!')}};return}openModal(`<h2 id="modalTitle">Decline pickup request?</h2><p class="modal-intro">${escapeHtml(r.name)} will not be added to the approved collector list. Contact the guardian through the school’s usual process.</p><div class="modal-actions"><button class="button button-outline" id="cancelDecline">Keep request</button><button class="button button-dark" id="confirmDecline">Decline request</button></div>`);$('#cancelDecline').onclick=closeModal;$('#confirmDecline').onclick=async()=>{try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action});acceptState(res.state);closeModal();render();toast('Pickup request declined.')}catch(err){toast(err.message,'!')}}}
-  function findAndScan(term,source='Card scan'){const query=term.trim().toLowerCase();if(!query)return;const matches=pupils.filter(p=>p.id.toLowerCase()===query || p.name.toLowerCase().includes(query));if(!matches.length){toast('Pupil not found by ID or name. Search the directory.','!');return}if(matches.length===1){eventConfirm(matches[0], source!=='Card scan');return}const listHtml=matches.map(p=>`<div class="confirm-profile pupil-select-item" data-select-pupil="${escapeHtml(p.id)}" style="cursor:pointer">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)} · ${escapeHtml(p.guardian)}</small></div></div>`).join('');openModal(`<h2 id="modalTitle">Select pupil</h2><p class="modal-intro">Multiple pupils matched "${escapeHtml(term)}". Select the pupil to verify using their photo on screen.</p><div style="display:grid;gap:8px;max-height:280px;overflow:auto">${listHtml}</div><div class="modal-actions"><button class="button button-outline" id="cancelSelectPupil">Cancel</button></div>`);$('#cancelSelectPupil').onclick=closeModal;$$('[data-select-pupil]').forEach(el=>{el.onclick=()=>{const selected=pupil(el.dataset.selectPupil);if(selected)eventConfirm(selected, source!=='Card scan');};});}
+  function matchPupil(p, query) {
+    const q = query.trim().toLowerCase();
+    const pid = p.id.toLowerCase();
+    const name = p.name.toLowerCase();
+    const numericPart = pid.replace(/[^0-9]/g, '');
+    const queryNumeric = q.replace(/[^0-9]/g, '');
+    if (pid === q || pid.endsWith('-' + q)) return true;
+    if (queryNumeric && queryNumeric.length >= 3 && numericPart.includes(queryNumeric)) return true;
+    if (pid.includes(q)) return true;
+    if (name.includes(q)) return true;
+    return false;
+  }
+
+  function findAndScan(term, source='Card scan', manualReason='card_missing'){
+    const query = term.trim().toLowerCase();
+    if (!query) return;
+    const matches = pupils.filter(p => matchPupil(p, query));
+    if (!matches.length) {
+      toast('Pupil not found by name or pupil number. Search the directory.', '!');
+      return;
+    }
+    const isManual = source !== 'Card scan';
+    if (matches.length === 1) {
+      eventConfirm(matches[0], isManual, manualReason);
+      return;
+    }
+    const listHtml = matches.map(p => `
+      <div class="confirm-profile pupil-select-item" data-select-pupil="${escapeHtml(p.id)}" style="cursor:pointer;margin:4px 0">
+        <div class="photo-preview-large" style="width:40px;height:40px;font-size:20px">${escapeHtml(p.photo||p.initials)}</div>
+        <div style="flex:1">
+          <strong style="font-size:12px">${escapeHtml(p.name)}</strong>
+          <small style="display:block;color:#6f7487">${escapeHtml(p.id)} · ${escapeHtml(p.className)} · Guardian: ${escapeHtml(p.guardian)}</small>
+        </div>
+        <button class="button button-small button-outline">Select & Verify</button>
+      </div>
+    `).join('');
+    openModal(`
+      <h2 id="modalTitle">Select Pupil to Verify</h2>
+      <p class="modal-intro">
+        Multiple pupils matched "${escapeHtml(term)}". Select the pupil and verify against their on-screen photograph before logging ${mode === 'arrival' ? 'arrival' : 'departure'}.
+      </p>
+      <div style="display:grid;gap:6px;max-height:280px;overflow:auto;padding-right:4px">${listHtml}</div>
+      <div class="modal-actions"><button class="button button-outline" id="cancelSelectPupil">Cancel</button></div>
+    `);
+    $('#cancelSelectPupil').onclick = closeModal;
+    $$('[data-select-pupil]').forEach(el => {
+      el.onclick = () => {
+        const selected = pupil(el.dataset.selectPupil);
+        if (selected) eventConfirm(selected, isManual, manualReason);
+      };
+    });
+  }
+
+  async function openExceptionReport() {
+    openModal(`<h2 id="modalTitle">Exception Reporting: Missing & Unreadable Cards</h2><p class="modal-intro">Loading exception report data from MongoDB...</p>`);
+    try {
+      const data = await api('/api/reports/exceptions');
+      const { summary, exceptions } = data;
+      const rowsHtml = exceptions.length ? exceptions.map(ex => `
+        <tr>
+          <td><b>${escapeHtml(ex.pupilName)}</b><br><small style="color:#8a8fa3">${escapeHtml(ex.pupilId)} · ${escapeHtml(ex.className)}</small></td>
+          <td><span class="status-pill ${ex.type.includes('arrival')?'status-present':'status-departed'}">${escapeHtml(ex.type)}</span></td>
+          <td><span class="manual-tag">${escapeHtml(ex.reason === 'card_missing' ? 'Card missing' : ex.reason === 'card_unreadable' ? 'Unreadable QR' : (ex.reason || 'Manual'))}</span></td>
+          <td>${escapeHtml(ex.collector ? `${ex.collector} (${ex.verification||'ID checked'})` : '—')}</td>
+          <td>${escapeHtml(ex.staff)}</td>
+          <td><small>${escapeHtml(ex.date)} ${escapeHtml(ex.time)}</small></td>
+        </tr>
+      `).join('') : '<tr><td colspan="6" style="text-align:center;padding:16px;color:#9a9eae">No card exceptions recorded yet.</td></tr>';
+
+      openModal(`
+        <h2 id="modalTitle">Exception Report: Card Exceptions & Manual Entries</h2>
+        <p class="modal-intro">
+          Traceable audit log of all manual entries resulting from missing cards, unreadable QR codes, or authorized exceptions.
+        </p>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px">
+          <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:8px 10px;text-align:center">
+            <span style="font-size:18px;font-weight:700;color:#92400e">${summary.todayMissingCard}</span>
+            <small style="display:block;font-size:9px;color:#78350f;font-weight:600">Today Missing Cards</small>
+          </div>
+          <div style="background:#fef3c7;border:1px solid #fde68a;border-radius:6px;padding:8px 10px;text-align:center">
+            <span style="font-size:18px;font-weight:700;color:#92400e">${summary.todayUnreadableQr}</span>
+            <small style="display:block;font-size:9px;color:#78350f;font-weight:600">Today Unreadable QRs</small>
+          </div>
+          <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:8px 10px;text-align:center">
+            <span style="font-size:18px;font-weight:700;color:#1e40af">${summary.totalExceptions}</span>
+            <small style="display:block;font-size:9px;color:#1e3a8a;font-weight:600">Total Exceptions Logged</small>
+          </div>
+        </div>
+        <div style="max-height:260px;overflow:auto;border:1px solid #eceef4;border-radius:6px">
+          <table class="exception-report-table">
+            <thead>
+              <tr>
+                <th>PUPIL</th>
+                <th>TYPE</th>
+                <th>REASON</th>
+                <th>COLLECTOR</th>
+                <th>STAFF</th>
+                <th>TIMESTAMP</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rowsHtml}
+            </tbody>
+          </table>
+        </div>
+        <div class="modal-actions">
+          <button class="button button-outline" id="closeExceptionReport">Close</button>
+          <button class="button button-primary" id="viewInActivityLog">View in Activity Log</button>
+        </div>
+      `);
+      $('#closeExceptionReport').onclick = closeModal;
+      $('#viewInActivityLog').onclick = () => {
+        closeModal();
+        activityChoice = 'Manual entries';
+        const btn = $('#eventFilter');
+        if (btn) btn.innerHTML = `Exceptions (Manual cards) <span>⌄</span>`;
+        navigate('activity');
+      };
+    } catch (err) {
+      toast(`Failed to load exception report: ${err.message}`, '!');
+      closeModal();
+    }
+  }
   function openAddPupil(){openModal(`<h2 id="modalTitle">Add a pupil</h2><p class="modal-intro">Create a school profile. The guardian relationship still needs to be verified by the school.</p><form id="addPupilForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required placeholder="Pupil name"></div><div class="form-field"><label>Pupil ID</label><input name="id" placeholder="Auto-generated if blank"></div><div class="form-field"><label>Class</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div><div class="form-field full"><label>Guardian name</label><input name="guardian" required placeholder="Parent or guardian"></div><div class="form-field full"><div class="danger-note">Local MVP only: do not enter real pupil or guardian data. No guardian login or messaging is connected.</div></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAdd">Cancel</button><button class="button button-primary" type="submit">Create pupil</button></div></form>`);$('#cancelAdd').onclick=closeModal;$('#addPupilForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget),name=String(f.get('name')).trim();try{const res=await api('/api/pupils',{name,id:String(f.get('id')).trim(),className:f.get('className'),guardian:String(f.get('guardian')).trim()});acceptState(res.state);closeModal();render();toast(`${name} added to the directory.`)}catch(err){toast(err.message,'!')}};}
   async function renderUsers(){if(signedInUser?.role!=='admin')return;const body=$('#userRows');body.innerHTML='<tr><td colspan="5">Loading accounts…</td></tr>';try{const {users}=await api('/api/users');body.innerHTML=users.map(u=>`<tr><td><b>${escapeHtml(u.name)}</b></td><td>${escapeHtml(u.email)}</td><td><select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option><option value="manager" ${u.role==='manager'?'selected':''}>Manager</option><option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option></select></td><td>${badge(u.active?'Active':'Disabled',u.active?'status-approved':'status-neutral')}</td><td><button class="button button-outline user-toggle" data-user-active="${u.id}" data-active="${u.active?0:1}" ${u.id===signedInUser.id?'disabled':''}>${u.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5">No staff accounts.</td></tr>'}catch(err){body.innerHTML=`<tr><td colspan="5">${escapeHtml(err.message)}</td></tr>`}}
   function openAddUser(){openModal(`<h2 id="modalTitle">Create staff account</h2><p class="modal-intro">The staff member will use this temporary password at sign-in. Share it privately.</p><form id="addUserForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required maxlength="120"></div><div class="form-field full"><label>School email</label><input name="email" type="email" required maxlength="254"></div><div class="form-field full"><label>Role</label><select name="role"><option value="manager">Manager — manage pupils and gate operations</option><option value="viewer">View only — read school records</option><option value="admin">Admin — manage users and all operations</option></select></div><div class="form-field full"><label>Temporary password (at least 12 characters)</label><input name="password" type="password" minlength="12" required autocomplete="new-password"></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAddUser">Cancel</button><button class="button button-primary" type="submit">Create account</button></div></form>`);$('#cancelAddUser').onclick=closeModal;$('#addUserForm').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);try{await api('/api/users',{name:String(f.get('name')).trim(),email:String(f.get('email')).trim(),role:f.get('role'),password:f.get('password')});closeModal();toast('Staff account created. Share the temporary password privately.');renderUsers()}catch(err){toast(err.message,'!')}}}
@@ -768,7 +890,7 @@
     const modeBtn=e.target.closest('[data-mode]');if(modeBtn){mode=modeBtn.dataset.mode;$$('.mode-button').forEach(b=>b.classList.toggle('selected',b===modeBtn));$('.scan-start').textContent='Start camera scanner';$('.scan-frame h2').textContent=mode==='arrival'?'Scan pupil ID card':'Scan for departure';}
     const req=e.target.closest('[data-request]');if(req){const r=requests.find(x=>x.id===req.dataset.request);if(r)resolvePickupRequest(r,req.dataset.action);}
     const corr=e.target.closest('[data-correct-event]');if(corr){openCorrectionModal(corr.dataset.correctEvent);}
-    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openModal(`<h2 id="modalTitle">Pupil card</h2><p class="modal-intro">Demo school ID card. QR contains only a random lookup code in a production implementation.</p><div class="confirm-profile">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small></div></div><div style="display:grid;place-items:center;padding:20px;background:#fafbff;border:1px solid #eceef4;border-radius:8px"><div id="qrCanvas" style="font:700 14px monospace;color:#4c5ddd;border:8px solid white;background:white;padding:18px;letter-spacing:1px">▦ ${escapeHtml(qrValue(p))}</div><small class="card-tag" style="margin-top:8px">Demo QR reference (not scannable artwork)</small></div><div class="modal-actions"><button class="button button-outline" id="closeCard">Close</button></div>`);$('#closeCard').onclick=closeModal;}
+    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openModal(`<h2 id="modalTitle">Pupil card</h2><p class="modal-intro">Official PVC ID card record. Security policy: Do not photograph or duplicate QR codes.</p><div class="confirm-profile"><div class="photo-preview-large" style="width:44px;height:44px;font-size:22px">${escapeHtml(p.photo||p.initials)}</div><div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small></div></div><div style="display:grid;place-items:center;padding:20px;background:#fafbff;border:1px solid #eceef4;border-radius:8px"><div id="qrCanvas" style="font:700 14px monospace;color:#4c5ddd;border:8px solid white;background:white;padding:18px;letter-spacing:1px">▦ ${escapeHtml(qrValue(p))}</div><small class="card-tag" style="margin-top:8px">Card token reference: ${escapeHtml(p.id)}</small></div><div class="qr-security-warning" style="margin:12px 0 0"><span>Do not photograph or copy this QR code. If the physical card is unavailable, perform on-screen photo verification via manual search.</span></div><div class="modal-actions"><button class="button button-outline" id="closeCard">Close</button></div>`);$('#closeCard').onclick=closeModal;}
     if(e.target.id==='syncNowLink'||e.target.id==='syncNowBtn'){e.preventDefault();syncPendingQueue();}
     if(e.target.id==='reconcileFallbackBtn'){e.preventDefault();openReconcileModal();}
   });
@@ -1272,9 +1394,37 @@
   $('#uploadRosterBtn').onclick=()=>$('#rosterFile').click();$('#rosterFile').onchange=e=>previewRoster(e.target.files[0]);$('#addUserBtn').onclick=openAddUser;$('#userRows').addEventListener('change',async e=>{const select=e.target.closest('[data-user-role]');if(!select)return;try{await api(`/api/users/${select.dataset.userRole}`,{role:select.value});toast('User role updated.');renderUsers()}catch(err){toast(err.message,'!');renderUsers()}});$('#userRows').addEventListener('click',async e=>{const button=e.target.closest('[data-user-active]');if(!button)return;try{await api(`/api/users/${button.dataset.userActive}`,{active:Number(button.dataset.active)===1});toast('User status updated.');renderUsers()}catch(err){toast(err.message,'!')}});
   $('.main-nav').addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(b)navigate(b.dataset.page)});
   $('[data-goto="scan"]')?.addEventListener('click',()=>navigate('scan'));
-  $('#manualForm').addEventListener('submit',e=>{e.preventDefault();findAndScan($('#pupilIdInput').value, 'Manual entry');$('#pupilIdInput').value='';});$('#startCamera').onclick=startScanner;$('#cameraInput').onchange=async e=>{const file=e.target.files[0];if(!file)return;if(!('BarcodeDetector'in window)){toast('Image QR decoding is not supported here. Search the pupil instead.','!');return}try{const bitmap=await createImageBitmap(file);const detector=new BarcodeDetector({formats:['qr_code']});const result=await detector.detect(bitmap);if(result.length)findAndScan(result[0].rawValue.replace(/^GW:/,''),'Card image scan');else toast('No QR code detected in that image.','!')}catch{toast('Could not read that image. Search the pupil instead.','!')}e.target.value='';};$('#addPupilBtn').onclick=openAddPupil;$('#arrivalSearch').oninput=renderDashboard;$('#pupilSearch').oninput=renderPupils;$('#activitySearch').oninput=renderActivity;$('#pickupSearch').oninput=renderPickup;
-  $('#classFilter').onclick=()=>pickFilter($('#classFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderDashboard()});$('#directoryFilter').onclick=()=>pickFilter($('#directoryFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderPupils()});$('#pupilStatusFilter')?.addEventListener('click',()=>pickFilter($('#pupilStatusFilter'),['All statuses','On campus','Departed','Not arrived'],pupilStatusChoice,x=>{pupilStatusChoice=x;renderPupils()}));$('#eventFilter').onclick=()=>pickFilter($('#eventFilter'),['All events','Arrivals','Departures','Manual entries'],activityChoice,x=>{activityChoice=x;renderActivity()});$('#exportActivity').onclick=exportCsv;
-  $('#modalClose').onclick=closeModal;$('#modalBackdrop').onclick=e=>{if(e.target.id==='modalBackdrop')closeModal()};document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});$('#mobileMenu').onclick=()=>$('#sidebar').classList.toggle('open');$('#helpBtn').onclick=()=>{openModal(`<h2 id="modalTitle">Gate team quick guide</h2><p class="modal-intro">A safe, repeatable routine for every pupil movement.</p><ol class="confirm-info"><li>Scan the card or search the pupil by name/ID.</li><li>Compare the pupil with the profile photo on screen.</li><li>For departure, select only an approved collector and follow school ID-check policy.</li><li>Confirm the event and select a reason (e.g. card_missing or card_unreadable) for manual entries. Never release a child solely because a card was scanned.</li></ol><div class="danger-note">Do not photograph or copy a QR code as a workaround. Always use manual entry for missing or unreadable cards.</div><div class="modal-actions"><button class="button button-primary" id="guideDone">Got it</button></div>`);$('#guideDone').onclick=closeModal};$('#pickupHelp').onclick=()=>toast('Follow the school’s approved pickup verification policy.');$('#contactSupport').onclick=e=>{e.preventDefault();toast('Demo: contact your school administrator for support.','i')};$('#notificationsBtn').onclick=()=>toast('Message delivery is not configured in this local MVP.','!');$('.more-button').onclick=async()=>{try{await api('/api/logout',{});signedInUser=null;$('#authScreen').classList.remove('hidden');pupils=[];events=[];requests=[];$('#loginPassword').value='';$('#loginError').classList.add('hidden')}catch(err){toast(err.message,'!')}};
+  $('#manualForm').addEventListener('submit', e => {
+    e.preventDefault();
+    const reason = $('#manualReasonQuickSelect')?.value || 'card_missing';
+    findAndScan($('#pupilIdInput').value, 'Manual entry', reason);
+    $('#pupilIdInput').value = '';
+  });
+  $('#startCamera').onclick = startScanner;
+  $('#openExceptionReportBtn')?.addEventListener('click', openExceptionReport);
+  $('#viewExceptionsTabBtn')?.addEventListener('click', openExceptionReport);
+  $('#addPupilBtn').onclick=openAddPupil;
+  $('#arrivalSearch').oninput=renderDashboard;
+  $('#pupilSearch').oninput=renderPupils;
+  $('#activitySearch').oninput=renderActivity;
+  $('#pickupSearch').oninput=renderPickup;
+  $('#classFilter').onclick=()=>pickFilter($('#classFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderDashboard()});
+  $('#directoryFilter').onclick=()=>pickFilter($('#directoryFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderPupils()});
+  $('#pupilStatusFilter')?.addEventListener('click',()=>pickFilter($('#pupilStatusFilter'),['All statuses','On campus','Departed','Not arrived'],pupilStatusChoice,x=>{pupilStatusChoice=x;renderPupils()}));
+  $('#eventFilter').onclick=()=>pickFilter($('#eventFilter'),['All events','Arrivals','Departures','Manual entries','Exceptions (Manual cards)'],activityChoice,x=>{activityChoice=x;renderActivity()});
+  $('#exportActivity').onclick=exportCsv;
+  $('#modalClose').onclick=closeModal;
+  $('#modalBackdrop').onclick=e=>{if(e.target.id==='modalBackdrop')closeModal()};
+  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});
+  $('#mobileMenu').onclick=()=>$('#sidebar').classList.toggle('open');
+  $('#helpBtn').onclick=()=>{
+    openModal(`<h2 id="modalTitle">Gate team quick guide</h2><p class="modal-intro">A safe, repeatable routine for every pupil movement.</p><ol class="confirm-info"><li>Scan the card, or search the pupil by name or pupil number if card is missing or unreadable.</li><li>Compare the pupil with the profile photo displayed on screen.</li><li>For departure, select only an approved collector and follow school ID-check policy. Departure always requires collector verification.</li><li>Confirm the event and record reason (card_missing or card_unreadable). Event is visibly marked as manual entry in exception reports.</li></ol><div class="qr-security-warning"><strong>Security policy:</strong> Do not photograph, copy, or duplicate a QR code as a workaround. Always use manual entry with on-screen photo verification for missing or unreadable cards.</div><div class="modal-actions"><button class="button button-primary" id="guideDone">Got it</button></div>`);
+    $('#guideDone').onclick=closeModal;
+  };
+  $('#pickupHelp').onclick=()=>toast('Follow the school’s approved pickup verification policy.');
+  $('#contactSupport').onclick=e=>{e.preventDefault();toast('Demo: contact your school administrator for support.','i')};
+  $('#notificationsBtn').onclick=()=>toast('Message delivery is not configured in this local MVP.','!');
+  $('.more-button').onclick=async()=>{try{await api('/api/logout',{});signedInUser=null;$('#authScreen').classList.remove('hidden');pupils=[];events=[];requests=[];$('#loginPassword').value='';$('#loginError').classList.add('hidden')}catch(err){toast(err.message,'!')}};
   const now=new Date();$('#todayLabel').textContent=now.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'});$('#dateEyebrow').innerHTML=`${now.toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'}).toUpperCase()} <span class="live-label"><i></i> LIVE</span>`;
   $('#loginForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('.auth-submit');button.disabled=true;button.textContent='Signing in…';$('#loginError').classList.add('hidden');try{const result=await api('/api/login',{email:$('#loginEmail').value,password:$('#loginPassword').value});setSignedIn(result.user);acceptState(result.state);render()}catch(err){$('#loginError').textContent=err.message==='Failed to fetch'?'Cannot reach the app server. Start Node.js server with npm start and reload this page.':err.message;$('#loginError').classList.remove('hidden')}finally{button.disabled=false;button.innerHTML='Sign in <span>→</span>'}});
   api('/api/me').then(async({user})=>{if(user){setSignedIn(user);await refreshState()}}).catch(()=>{});
