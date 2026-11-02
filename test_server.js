@@ -657,3 +657,120 @@ test('Offline or delayed sync: device encryption/managed validation, idempotency
   assert.equal(reconciledEvent.source, 'Paper/voice manual fallback');
   assert.equal(reconciledEvent.reconciliationAuditReason, 'Internet outage drill - paper log sheet #12 verified by gate supervisor');
 });
+
+test('Missing card & unreadable QR: manual entry marking, reason recording, and departure collector verification', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Create test pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Elena Rostova',
+      id: 'NF-3301',
+      className: 'Grade 2B',
+      guardian: 'Olga Rostova'
+    });
+  const pupil = await Pupil.findOne({ id: 'NF-3301' });
+  pupil.collectors.push(
+    { id: 1, name: 'Olga Rostova', relation: 'Mother', until: 'Ongoing', active: true },
+    { id: 2, name: 'Dmitri Rostov', relation: 'Father', until: 'Ongoing', active: true }
+  );
+  await pupil.save();
+
+  // 2. Record arrival with reason 'card_missing'
+  const missingCardArrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-3301',
+      type: 'arrival',
+      source: 'Manual entry',
+      reason: 'card_missing',
+      campus: 'Primary campus',
+      gate: 'Main gate'
+    });
+  assert.equal(missingCardArrivalRes.status, 201);
+  assert.ok(missingCardArrivalRes.body.ok);
+
+  const arrEvent = await AttendanceEvent.findOne({ id: missingCardArrivalRes.body.eventId });
+  assert.ok(arrEvent);
+  assert.equal(arrEvent.manualEntry, true);
+  assert.equal(arrEvent.reason, 'card_missing');
+  assert.equal(arrEvent.source, 'Manual entry');
+
+  // Verify audit log has reason=card_missing and manual entry
+  const arrAudit = await AuditEntry.findOne({ action: 'record_arrival', objectId: missingCardArrivalRes.body.eventId });
+  assert.ok(arrAudit);
+  assert.ok(arrAudit.reason.includes('reason=card_missing'));
+  assert.ok(arrAudit.reason.includes('source=Manual entry'));
+
+  // 3. Departure still requires collector verification even on manual entry
+  // Attempt manual departure without collector -> must fail
+  const depNoCollectorRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-3301',
+      type: 'departure',
+      source: 'Manual entry',
+      reason: 'card_unreadable'
+    });
+  assert.equal(depNoCollectorRes.status, 400);
+  assert.ok(depNoCollectorRes.body.error.includes('collector'));
+
+  // Attempt manual departure with unapproved collector -> must fail
+  const depUnapprovedCollectorRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-3301',
+      type: 'departure',
+      source: 'Manual entry',
+      reason: 'card_unreadable',
+      collectorId: 9999
+    });
+  assert.equal(depUnapprovedCollectorRes.status, 400);
+  assert.ok(depUnapprovedCollectorRes.body.error.includes('Release is blocked'));
+
+  // Successful departure with approved collector and reason 'card_unreadable'
+  const depValidCollectorRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-3301',
+      type: 'departure',
+      source: 'Manual entry',
+      reason: 'card_unreadable',
+      collectorId: 2,
+      verification: 'Photo matched'
+    });
+  assert.equal(depValidCollectorRes.status, 201);
+
+  const depEvent = await AttendanceEvent.findOne({ id: depValidCollectorRes.body.eventId });
+  assert.ok(depEvent);
+  assert.equal(depEvent.manualEntry, true);
+  assert.equal(depEvent.reason, 'card_unreadable');
+  assert.equal(depEvent.collector, 'Dmitri Rostov');
+  assert.equal(depEvent.verification, 'Photo matched');
+
+  // 4. Verify Exception Reporting endpoint (/api/reports/exceptions)
+  const reportRes = await request
+    .get('/api/reports/exceptions')
+    .set('Cookie', adminCookie);
+  assert.equal(reportRes.status, 200);
+  assert.ok(reportRes.body.summary);
+  assert.ok(reportRes.body.summary.todayMissingCard >= 1);
+  assert.ok(reportRes.body.summary.todayUnreadableQr >= 1);
+  assert.ok(reportRes.body.summary.todayManualEntries >= 2);
+
+  const pupilExceptions = reportRes.body.exceptions.filter(e => e.pupilId === 'NF-3301');
+  assert.equal(pupilExceptions.length, 2);
+  const arrReport = pupilExceptions.find(e => e.type === 'arrival');
+  const depReport = pupilExceptions.find(e => e.type === 'departure');
+  assert.equal(arrReport.reason, 'card_missing');
+  assert.equal(arrReport.manualEntry, true);
+  assert.equal(depReport.reason, 'card_unreadable');
+  assert.equal(depReport.collector, 'Dmitri Rostov');
+  assert.equal(depReport.manualEntry, true);
+});
