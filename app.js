@@ -14,7 +14,7 @@
   const today = new Date().toLocaleDateString('en-CA');
   const localTime = (minsAgo=0) => {const d=new Date(Date.now()-minsAgo*60000);return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
   const load=(key,fallback)=>{try{const v=JSON.parse(localStorage.getItem('gatewise-'+key));return v??fallback}catch{return fallback}};
-  let pupils=[], events=[], requests=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
+  let pupils=[], events=[], requests=[], households=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses', lifecycleFilterChoice='All lifecycles';
   let isOfflineSimulated = false;
   let deviceManaged = true;
   let deviceEncrypted = true;
@@ -88,6 +88,7 @@
   }
   function acceptState(state){
     pupils=state.pupils||[];
+    households=state.households||[];
     const serverEvents = (state.events||[]).map(e=>({...e,createdAt:e.createdAt||Date.now()}));
 
     // Merge offline pending sync queue into events list for UI display
@@ -168,7 +169,12 @@
   const statusClass=s=>s==='On campus'?'status-present':s==='Departed'?'status-departed':s==='Approved'?'status-approved':s==='Pending'?'status-pending':'status-neutral';
   const badge=(label,cls)=>`<span class="status-pill ${cls}"><i></i>${escapeHtml(label)}</span>`;
   const avatar=(p)=>`<span class="avatar avatar-${p.color||'blue'}">${escapeHtml(p.initials||initials(p.name))}</span>`;
-  const pupilCell=p=>`<div class="pupil-cell">${avatar(p)}<span><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.guardian||'Guardian not set')}</small></span></div>`;
+  const pupilCell=p=>{
+    const hhCount = (p.households||[]).length;
+    const hhText = hhCount > 0 ? ` · ${hhCount} household${hhCount>1?'s':''}` : '';
+    const campusText = p.campus ? ` [${escapeHtml(p.campus)}]` : '';
+    return `<div class="pupil-cell">${avatar(p)}<span><strong>${escapeHtml(p.name)}${campusText}</strong><small>${escapeHtml(p.guardian||'Guardian not set')}${hhText}</small></span></div>`;
+  };
   function toast(msg,icon='✓'){const el=document.createElement('div');el.className='toast';el.innerHTML=`<i>${icon}</i><span>${escapeHtml(msg)}</span>`;$('#toastRegion').append(el);setTimeout(()=>el.remove(),3200);}
   function openModal(html){$('#modalContent').innerHTML=html;$('#modalBackdrop').classList.remove('hidden');setTimeout(()=>$('#modalContent input:not([type=hidden]), #modalContent select')?.focus(),30);}
   function closeModal(){$('#modalBackdrop').classList.add('hidden');$('#modalContent').innerHTML='';if(window._gwStream){window._gwStream.getTracks().forEach(t=>t.stop());window._gwStream=null;}}
@@ -230,7 +236,23 @@
 
   function renderDashboard(){const es=todayEvents(), arrivals=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival'), deps=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception'), present=pupils.filter(p=>statusFor(p)==='On campus').length;$('#presentCount').innerHTML=`${present} <small>/ 248</small>`;$('#presentProgress').style.width=`${Math.min(100,present/248*100)}%`;$('#arrivalsCount').textContent=arrivals.length;$('#departuresCount').textContent=deps.length;$('#lastArrival').textContent=arrivals.length?arrivals.sort((a,b)=>b.createdAt-a.createdAt)[0].time:'—';$('#alertsSent').textContent=es.filter(e=>e.alert==='Sent').length;$('#attentionCount').textContent=requests.length+1;const term=($('#arrivalSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>statusFor(p)==='On campus'&&(!term||`${p.name} ${p.className}`.toLowerCase().includes(term))&&(classChoice==='All classes'||p.className===classChoice));$('#arrivalRows').innerHTML=list.slice(0,7).map(p=>{const e=lastEvent(p.id);return `<tr><td>${pupilCell(p)}</td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td class="time-cell">${escapeHtml(e?.time||'—')}</td><td>${badge('On campus','status-present')}</td></tr>`}).join('');$('#emptyArrivals').classList.toggle('hidden',list.length>0);const recent=es.slice().sort((a,b)=>b.createdAt-a.createdAt).slice(0,5);$('#recentActivity').innerHTML=recent.map(activityItem).join('')||'<div class="empty-state">No events recorded yet.</div>';updateOfflineStatusUI();}
   function activityItem(e){const p=pupil(e.pupilId)||{name:'Unknown pupil'};let type=e.type;const isArrival=type==='arrival'||type==='manual_arrival';const isDep=type==='departure'||type==='manual_departure'||type==='authorized_exception';const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION</span>`:'';const pendingTag=isPendingSync?`<span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">PENDING SYNC (NOT NOTIFIED)</span>`:'';const alertText=isPendingSync?'Pending sync (parents NOT notified)':(e.alert||'Sent');return `<div class="activity-item"><div class="activity-icon ${isArrival?'arrival':isDep?'departure':'request'}">${isArrival?'↘':isDep?'↗':'◷'}</div><div class="activity-copy"><b>${isArrival?'Arrival recorded':isDep?'Departure recorded':'Activity'}</b> for ${escapeHtml(p.name)}${e.collector?` with ${escapeHtml(e.collector)}`:''} ${manualTag} ${corrTag} ${pendingTag}<small>${escapeHtml(e.time)} · ${escapeHtml(e.staff)} · Guardian alert: <b>${escapeHtml(alertText)}</b></small></div></div>`;}
-  function renderPupils(){const q=($('#pupilSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>{const st=statusFor(p);const matchStatus=pupilStatusChoice==='All statuses'||st===pupilStatusChoice;const matchQ=!q||`${p.name} ${p.id} ${p.className}`.toLowerCase().includes(q);const matchCls=classChoice==='All classes'||p.className===classChoice;return matchStatus&&matchQ&&matchCls;});$('#pupilResultCount').textContent=`${list.length} pupils`;$('#pupilRows').innerHTML=list.map(p=>`<tr><td>${pupilCell(p)}</td><td><span class="pupil-id">${escapeHtml(p.id)}</span></td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td>${p.collectors.length} approved</td><td>${badge(statusFor(p),statusClass(statusFor(p)))}</td><td><button class="row-menu" data-pupil-detail="${escapeHtml(p.id)}" aria-label="Pupil options">···</button></td></tr>`).join('');}
+  function renderPupils(){
+    const q=($('#pupilSearch')?.value||'').toLowerCase();
+    const list=pupils.filter(p=>{
+      const st=statusFor(p);
+      const matchStatus=pupilStatusChoice==='All statuses'||st===pupilStatusChoice;
+      const matchLifecycle=lifecycleFilterChoice==='All lifecycles'||p.status===lifecycleFilterChoice;
+      const matchQ=!q||`${p.name} ${p.id} ${p.className} ${p.campus||''} ${(p.card?.cardToken)||''}`.toLowerCase().includes(q);
+      const matchCls=classChoice==='All classes'||p.className===classChoice;
+      return matchStatus&&matchLifecycle&&matchQ&&matchCls;
+    });
+    $('#pupilResultCount').textContent=`${list.length} pupils`;
+    $('#pupilRows').innerHTML=list.map(p=>{
+      const lifecycleClass = p.status==='active'?'status-present':p.status==='withdrawn'?'status-departed':p.status==='transferred'?'status-pending':'status-neutral';
+      const cardInfo = p.card ? `<span class="card-badge ${p.card.status==='active'?'card-active':'card-revoked'}" title="Token: ${p.card.cardToken}">Card: ${p.card.status}</span>` : '<span class="card-badge card-none">No card</span>';
+      return `<tr><td>${pupilCell(p)}</td><td><span class="pupil-id">${escapeHtml(p.id)}</span><br>${cardInfo}</td><td><span class="class-pill">${escapeHtml(p.className)}</span><br><small style="color:#85899b;font-size:8px">${escapeHtml(p.campus||'Primary')}</small></td><td>${badge(p.status||'active', lifecycleClass)}</td><td>${badge(statusFor(p),statusClass(statusFor(p)))}</td><td><button class="row-menu" data-pupil-detail="${escapeHtml(p.id)}" aria-label="Pupil options">···</button></td></tr>`;
+    }).join('');
+  }
   function renderPickup(){const total=pupils.reduce((n,p)=>n+p.collectors.length,0);$('#pendingCount').textContent=requests.length;$('#approvedCount').textContent=total;$('#requestList').innerHTML=requests.length?requests.map(r=>{const p=pupil(r.pupilId)||{name:'Unknown pupil',initials:'?',color:'blue'};return `<div class="request-card"><div>${avatar(p)}</div><div class="request-details"><strong>${escapeHtml(r.name)} <span class="card-tag">· ${escapeHtml(r.relation)}</span></strong><p>Pickup for <b>${escapeHtml(p.name)}</b> · Requested by ${escapeHtml(r.requestedBy)}</p><small>${escapeHtml(r.time)} — ${escapeHtml(r.note)}</small></div>${signedInUser?.role==='viewer'?'':`<div class="request-actions"><button class="decline-button" data-request="${r.id}" data-action="decline">Decline</button><button class="approve-button" data-request="${r.id}" data-action="approve">✓ Approve</button></div>`}</div>`}).join(''):'<div class="empty-state">No pending pickup requests.</div>';const q=($('#pickupSearch')?.value||'').toLowerCase();const active=pupils.flatMap(p=>p.collectors.map(c=>({p,c}))).filter(x=>`${x.p.name} ${x.c.name} ${x.c.relation}`.toLowerCase().includes(q));$('#approvedRows').innerHTML=active.map(({p,c})=>`<tr><td>${pupilCell(p)}</td><td><b>${escapeHtml(c.name)}</b></td><td>${escapeHtml(c.relation)}</td><td>${escapeHtml(c.until||'Ongoing')}</td><td>${badge('Approved','status-approved')}</td></tr>`).join('');}
   function renderActivity(){const q=($('#activitySearch')?.value||'').toLowerCase();let es=todayEvents().slice().sort((a,b)=>b.createdAt-a.createdAt);if(activityChoice==='Arrivals')es=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival');else if(activityChoice==='Departures')es=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception');else if(activityChoice==='Manual entries')es=es.filter(e=>e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.source==='Paper/voice manual fallback'||e.reason);es=es.filter(e=>{const p=pupil(e.pupilId)||{};return `${p.name||''} ${e.type} ${e.source} ${e.staff} ${e.reason||''} ${e.alert||''}`.toLowerCase().includes(q)});$('#activityResultCount').textContent=`${es.length} events`;$('#activityRows').innerHTML=es.map(e=>{const p=pupil(e.pupilId)||{name:'Unknown pupil',guardian:'',initials:'?',color:'blue'};const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<br><span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<br><span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION (LINKED: ${escapeHtml(e.correctionLink)})</span>`:'';const offlineTag=e.source==='Offline queued'||isPendingSync?`<br><span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">OFFLINE QUEUED</span>`:'';const fallbackTag=e.source==='Paper/voice manual fallback'?`<br><span class="manual-tag" style="background:#f3e8ff;color:#6b21a8;font-weight:700">RECONCILED FALLBACK (${escapeHtml(e.reconciliationAuditReason||'Manual log')})</span>`:'';const canCorrect=(signedInUser?.role==='admin'||signedInUser?.role==='manager')&&!isPendingSync?`<button class="text-link" data-correct-event="${escapeHtml(e.id)}" style="margin-left:8px;font-size:11px">Correct</button>`:'';const alertBadge=isPendingSync?`<span class="status-pill status-pending" title="Parents have NOT been notified. Will sync upon reconnection."><i></i>Pending sync</span>`:badge(e.alert||'Sent',e.alert==='Sent'?'status-approved':'status-pending');return `<tr><td>${badge(e.type.includes('arrival')?'Arrival':e.type.includes('exception')?'Authorized Exception':'Departure',e.type.includes('arrival')?'status-present':'status-departed')}</td><td>${pupilCell(p)}</td><td>${escapeHtml(e.source||'Card scan')}${e.collector?`<small class="card-tag"> · ${escapeHtml(e.collector)}</small>`:''}${manualTag}${corrTag}${offlineTag}${fallbackTag}${canCorrect}</td><td>${escapeHtml(e.staff)}</td><td class="time-cell">${escapeHtml(e.time)}</td><td>${alertBadge}</td></tr>`}).join('');$('#emptyActivity').classList.toggle('hidden',es.length>0);updateOfflineStatusUI();}
   function showScanResult(isSuccess, message, details = '') {
@@ -717,12 +739,280 @@
   }
 
   function resolvePickupRequest(r,action){if(action==='approve'){const localToday=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);openModal(`<h2 id="modalTitle">Approve pickup</h2><p class="modal-intro">This adds ${escapeHtml(r.name)} to the approved collector list for ${escapeHtml(pupil(r.pupilId)?.name||'the pupil')}. Set the last valid pickup date.</p><form id="approvePickupForm"><div class="form-field"><label>Approval expires on</label><input name="validUntil" type="date" min="${localToday}" value="${localToday}" required></div><div class="danger-note" style="margin-top:12px">Staff must still verify this person’s identity at pickup. Confirm the expiry with the guardian before approving.</div><div class="modal-actions"><button type="button" class="button button-outline" id="cancelPickupApproval">Cancel</button><button class="button button-primary" type="submit">Approve collector</button></div></form>`);$('#cancelPickupApproval').onclick=closeModal;$('#approvePickupForm').onsubmit=async ev=>{ev.preventDefault();const validUntil=new FormData(ev.currentTarget).get('validUntil');try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action,validUntil});acceptState(res.state);closeModal();render();toast(`${r.name} approved until ${validUntil}.`)}catch(err){toast(err.message,'!')}};return}openModal(`<h2 id="modalTitle">Decline pickup request?</h2><p class="modal-intro">${escapeHtml(r.name)} will not be added to the approved collector list. Contact the guardian through the school’s usual process.</p><div class="modal-actions"><button class="button button-outline" id="cancelDecline">Keep request</button><button class="button button-dark" id="confirmDecline">Decline request</button></div>`);$('#cancelDecline').onclick=closeModal;$('#confirmDecline').onclick=async()=>{try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action});acceptState(res.state);closeModal();render();toast('Pickup request declined.')}catch(err){toast(err.message,'!')}}}
-  function findAndScan(term,source='Card scan'){const query=term.trim().toLowerCase();if(!query)return;const matches=pupils.filter(p=>p.id.toLowerCase()===query || p.name.toLowerCase().includes(query));if(!matches.length){toast('Pupil not found by ID or name. Search the directory.','!');return}if(matches.length===1){eventConfirm(matches[0], source!=='Card scan');return}const listHtml=matches.map(p=>`<div class="confirm-profile pupil-select-item" data-select-pupil="${escapeHtml(p.id)}" style="cursor:pointer">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)} · ${escapeHtml(p.guardian)}</small></div></div>`).join('');openModal(`<h2 id="modalTitle">Select pupil</h2><p class="modal-intro">Multiple pupils matched "${escapeHtml(term)}". Select the pupil to verify using their photo on screen.</p><div style="display:grid;gap:8px;max-height:280px;overflow:auto">${listHtml}</div><div class="modal-actions"><button class="button button-outline" id="cancelSelectPupil">Cancel</button></div>`);$('#cancelSelectPupil').onclick=closeModal;$$('[data-select-pupil]').forEach(el=>{el.onclick=()=>{const selected=pupil(el.dataset.selectPupil);if(selected)eventConfirm(selected, source!=='Card scan');};});}
-  function openAddPupil(){openModal(`<h2 id="modalTitle">Add a pupil</h2><p class="modal-intro">Create a school profile. The guardian relationship still needs to be verified by the school.</p><form id="addPupilForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required placeholder="Pupil name"></div><div class="form-field"><label>Pupil ID</label><input name="id" placeholder="Auto-generated if blank"></div><div class="form-field"><label>Class</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div><div class="form-field full"><label>Guardian name</label><input name="guardian" required placeholder="Parent or guardian"></div><div class="form-field full"><div class="danger-note">Local MVP only: do not enter real pupil or guardian data. No guardian login or messaging is connected.</div></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAdd">Cancel</button><button class="button button-primary" type="submit">Create pupil</button></div></form>`);$('#cancelAdd').onclick=closeModal;$('#addPupilForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget),name=String(f.get('name')).trim();try{const res=await api('/api/pupils',{name,id:String(f.get('id')).trim(),className:f.get('className'),guardian:String(f.get('guardian')).trim()});acceptState(res.state);closeModal();render();toast(`${name} added to the directory.`)}catch(err){toast(err.message,'!')}};}
+  async function findAndScan(term,source='Card scan'){
+    const query=term.trim();
+    if(!query)return;
+
+    // Check if term starts with or looks like a card token (GWC-... or GW:GWC-...)
+    const cleanToken = query.replace(/^GW:/i, '').trim();
+    if (cleanToken.startsWith('GWC-')) {
+      try {
+        const res = await api(`/api/cards/lookup/${encodeURIComponent(cleanToken)}`);
+        if (res.pupil) {
+          const p = pupil(res.pupil.id) || res.pupil;
+          eventConfirm(p, false);
+          return;
+        }
+      } catch (err) {
+        toast(err.message, '!');
+        return;
+      }
+    }
+
+    const qLower = query.toLowerCase();
+    const matches=pupils.filter(p=>p.id.toLowerCase()===qLower || p.name.toLowerCase().includes(qLower) || (p.card?.cardToken && p.card.cardToken.toLowerCase()===qLower));
+    if(!matches.length){toast('Pupil not found by ID, card token, or name. Search the directory.','!');return}
+    if(matches.length===1){
+      const p = matches[0];
+      if (p.status && p.status !== 'active') {
+        toast(`Pupil ${p.name} is ${p.status}. Gate operation restricted.`, '!');
+        return;
+      }
+      eventConfirm(p, source!=='Card scan');
+      return;
+    }
+    const listHtml=matches.map(p=>`<div class="confirm-profile pupil-select-item" data-select-pupil="${escapeHtml(p.id)}" style="cursor:pointer">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)} · ${escapeHtml(p.guardian)}</small></div></div>`).join('');
+    openModal(`<h2 id="modalTitle">Select pupil</h2><p class="modal-intro">Multiple pupils matched "${escapeHtml(term)}". Select the pupil to verify using their photo on screen.</p><div style="display:grid;gap:8px;max-height:280px;overflow:auto">${listHtml}</div><div class="modal-actions"><button class="button button-outline" id="cancelSelectPupil">Cancel</button></div>`);
+    $('#cancelSelectPupil').onclick=closeModal;
+    $$('[data-select-pupil]').forEach(el=>{el.onclick=()=>{const selected=pupil(el.dataset.selectPupil);if(selected)eventConfirm(selected, source!=='Card scan');};});
+  }
+  function openAddPupil(){
+    const householdOptions = households.map(h => `<option value="${escapeHtml(h.id)}">${escapeHtml(h.name)} (${escapeHtml(h.id)})</option>`).join('');
+    openModal(`
+      <h2 id="modalTitle">Add a pupil</h2>
+      <p class="modal-intro">Store pupil name, school-issued ID, class/year, campus, status, photograph, and linked household.</p>
+      <form id="addPupilForm" class="form-grid">
+        <div class="form-field full"><label>Full name *</label><input name="name" required placeholder="Pupil name"></div>
+        <div class="form-field"><label>School-issued ID</label><input name="id" placeholder="Auto-generated if blank (e.g. NF-1001)"></div>
+        <div class="form-field"><label>Class / Year *</label><select name="className"><option>Grade 1C</option><option>Grade 2B</option><option>Grade 3A</option><option>Grade 4A</option><option>Grade 5B</option></select></div>
+        <div class="form-field"><label>Campus *</label><select name="campus"><option value="Primary campus">Primary campus</option><option value="Secondary campus">Secondary campus</option><option value="North gate annex">North gate annex</option></select></div>
+        <div class="form-field"><label>Lifecycle Status</label><select name="status"><option value="active">Active</option><option value="withdrawn">Withdrawn</option><option value="transferred">Transferred</option><option value="archived">Archived</option></select></div>
+        <div class="form-field full"><label>Guardian name *</label><input name="guardian" required placeholder="Primary parent or guardian name"></div>
+        <div class="form-field full"><label>Linked Household (Optional)</label><select name="householdId"><option value="">-- No household linked yet --</option>${householdOptions}</select></div>
+        <div class="form-field full"><div class="danger-note">Note: A random, non-meaningful card token will be automatically generated. No PII is encoded.</div></div>
+        <div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAdd">Cancel</button><button class="button button-primary" type="submit">Create pupil</button></div>
+      </form>
+    `);
+    $('#cancelAdd').onclick=closeModal;
+    $('#addPupilForm').onsubmit=async e=>{
+      e.preventDefault();
+      const f=new FormData(e.currentTarget);
+      const name=String(f.get('name')).trim();
+      try{
+        const res=await api('/api/pupils',{
+          name,
+          id:String(f.get('id')).trim(),
+          className:f.get('className'),
+          campus:f.get('campus'),
+          status:f.get('status'),
+          guardian:String(f.get('guardian')).trim(),
+          householdId:f.get('householdId') || undefined
+        });
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast(`${name} added with random card token.`);
+      }catch(err){
+        toast(err.message,'!');
+      }
+    };
+  }
   async function renderUsers(){if(signedInUser?.role!=='admin')return;const body=$('#userRows');body.innerHTML='<tr><td colspan="5">Loading accounts…</td></tr>';try{const {users}=await api('/api/users');body.innerHTML=users.map(u=>`<tr><td><b>${escapeHtml(u.name)}</b></td><td>${escapeHtml(u.email)}</td><td><select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option><option value="manager" ${u.role==='manager'?'selected':''}>Manager</option><option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option></select></td><td>${badge(u.active?'Active':'Disabled',u.active?'status-approved':'status-neutral')}</td><td><button class="button button-outline user-toggle" data-user-active="${u.id}" data-active="${u.active?0:1}" ${u.id===signedInUser.id?'disabled':''}>${u.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5">No staff accounts.</td></tr>'}catch(err){body.innerHTML=`<tr><td colspan="5">${escapeHtml(err.message)}</td></tr>`}}
   function openAddUser(){openModal(`<h2 id="modalTitle">Create staff account</h2><p class="modal-intro">The staff member will use this temporary password at sign-in. Share it privately.</p><form id="addUserForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required maxlength="120"></div><div class="form-field full"><label>School email</label><input name="email" type="email" required maxlength="254"></div><div class="form-field full"><label>Role</label><select name="role"><option value="manager">Manager — manage pupils and gate operations</option><option value="viewer">View only — read school records</option><option value="admin">Admin — manage users and all operations</option></select></div><div class="form-field full"><label>Temporary password (at least 12 characters)</label><input name="password" type="password" minlength="12" required autocomplete="new-password"></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAddUser">Cancel</button><button class="button button-primary" type="submit">Create account</button></div></form>`);$('#cancelAddUser').onclick=closeModal;$('#addUserForm').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);try{await api('/api/users',{name:String(f.get('name')).trim(),email:String(f.get('email')).trim(),role:f.get('role'),password:f.get('password')});closeModal();toast('Staff account created. Share the temporary password privately.');renderUsers()}catch(err){toast(err.message,'!')}}}
   async function previewRoster(file){if(!file)return;if(file.size>8*1024*1024){toast('Roster files must be 8 MB or smaller.','!');return}if(!/\.(csv|xlsx)$/i.test(file.name)){toast('Choose a CSV or XLSX file.','!');return}try{const buffer=await file.arrayBuffer();let binary='';const bytes=new Uint8Array(buffer);for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const {preview,errors,errorCount,token}=await api('/api/import/preview',{filename:file.name,fileBase64:btoa(binary)});const rows=preview.map(p=>`<tr><td>${escapeHtml(p.pupil_id)}</td><td>${escapeHtml(p.pupil_name)}</td><td>${escapeHtml(p.class_name)}</td><td>${escapeHtml(p.guardian_name)}</td></tr>`).join('');openModal(`<h2 id="modalTitle">Review pupil roster</h2><p class="modal-intro">${errorCount?`${errorCount} issue(s) found. Correct the file and upload again; nothing has been imported.`:`${preview.length} pupil(s) ready. Review the sample, then import the entire file.`}</p>${preview.length?`<div class="import-preview-wrap"><table class="import-preview-table"><thead><tr><th>PUPIL ID</th><th>NAME</th><th>CLASS</th><th>GUARDIAN</th></tr></thead><tbody>${rows}</tbody></table></div>`:''}${errorCount?`<div class="import-errors">${errors.map(e=>`<div>Row ${e.row}${e.pupil_id?` · ${escapeHtml(e.pupil_id)}`:''}: ${escapeHtml(e.message)}</div>`).join('')}</div>`:''}<div class="modal-actions"><button class="button button-outline" id="cancelImport">Close</button>${token&&!errorCount?'<button class="button button-primary" id="commitImport">Import pupils</button>':''}</div>`);$('#cancelImport').onclick=closeModal;if(token&&!errorCount)$('#commitImport').onclick=async()=>{const button=$('#commitImport');button.disabled=true;button.textContent='Importing…';try{const result=await api('/api/import/commit',{token});acceptState(result.state);closeModal();render();toast(`${result.imported} pupil(s) imported.`)}catch(err){toast(err.message,'!');button.disabled=false;button.textContent='Import pupils'}}}catch(err){toast(err.message,'!')}finally{$('#rosterFile').value=''}}
-  function qrValue(p){return `GW:${p.id}`}
+  function qrValue(p){
+    // Random, non-meaningful token. Does not encode pupil name, birth date, phone, or other personal details.
+    if (p.card && p.card.cardToken) {
+      return `GW:${p.card.cardToken}`;
+    }
+    return `GW:GWC-${p.id}`;
+  }
+
+  function openPupilDetailModal(p) {
+    const card = p.card;
+    const cardStatus = card ? card.status : 'None';
+    const cardToken = card ? card.cardToken : 'No active card';
+    const guardiansList = (p.guardians || []).map(g => `<li><b>${escapeHtml(g.name)}</b> (${escapeHtml(g.relationship)}) ${g.isLegalGuardian ? '<span class="badge-legal">Legal Guardian</span>' : ''}</li>`).join('') || `<li>${escapeHtml(p.guardian)} (Primary contact)</li>`;
+    const householdsList = (p.households || []).map(h => `<li><b>${escapeHtml(h.name)}</b> ${h.isPrimary ? '<span class="badge-legal">Primary</span>' : ''} <small style="display:block;color:#64748b">${escapeHtml(h.address)}</small></li>`).join('') || '<li>No linked households.</li>';
+    const canManage = signedInUser?.role === 'admin' || signedInUser?.role === 'manager';
+
+    openModal(`
+      <h2 id="modalTitle">Pupil Profile: ${escapeHtml(p.name)}</h2>
+      <p class="modal-intro">School-issued ID: <b>${escapeHtml(p.id)}</b> · Class: <b>${escapeHtml(p.className)}</b> · Campus: <b>${escapeHtml(p.campus || 'Primary campus')}</b></p>
+      <div class="confirm-profile">
+        <div class="photo-preview-large">${escapeHtml(p.photo || p.initials)}</div>
+        <div style="flex:1">
+          <strong>${escapeHtml(p.name)}</strong>
+          <small style="color:#64748b;display:block">Lifecycle state: <b style="text-transform:uppercase">${escapeHtml(p.status || 'active')}</b></small>
+          <small style="margin-top:4px;display:block">Card Token: <code style="font-size:10px;background:#f1f5f9;padding:2px 4px;border-radius:3px">${escapeHtml(cardToken)}</code> (${escapeHtml(cardStatus)})</small>
+        </div>
+      </div>
+
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:12px 0">
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0;font-size:10px">
+          <strong style="color:#334155;display:block;margin-bottom:4px">Linked Guardians (${(p.guardians||[]).length})</strong>
+          <ul style="margin:0;padding-left:14px;line-height:1.4">${guardiansList}</ul>
+          ${canManage ? `<button class="text-link" id="addGuardianLinkBtn" style="margin-top:6px">+ Link another guardian</button>` : ''}
+        </div>
+        <div style="background:#f8fafc;padding:10px;border-radius:6px;border:1px solid #e2e8f0;font-size:10px">
+          <strong style="color:#334155;display:block;margin-bottom:4px">Linked Households (${(p.households||[]).length})</strong>
+          <ul style="margin:0;padding-left:14px;line-height:1.4">${householdsList}</ul>
+          ${canManage ? `<button class="text-link" id="addHouseholdLinkBtn" style="margin-top:6px">+ Link to household</button>` : ''}
+        </div>
+      </div>
+
+      <div style="margin:12px 0;background:#fafbff;border:1px solid #eceef4;border-radius:8px;padding:12px;text-align:center">
+        <strong style="display:block;font-size:11px;color:#4338ca;margin-bottom:6px">Non-Meaningful Card Token QR</strong>
+        <div id="qrCanvas" style="font:700 13px monospace;color:#4c5ddd;background:white;padding:10px;border:1px dashed #cbd5e1;display:inline-block;letter-spacing:1px">
+          ▦ ${escapeHtml(qrValue(p))}
+        </div>
+        <small style="display:block;color:#64748b;font-size:8px;margin-top:6px">Does not encode pupil name, birth date, phone number, or other personal details.</small>
+      </div>
+
+      ${canManage ? `
+        <div style="border-top:1px solid #f1f5f9;padding-top:10px;margin-top:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <button class="button button-outline button-small" id="revokeCardBtn" ${!card || card.status !== 'active' ? 'disabled' : ''}>Revoke Card</button>
+          <button class="button button-outline button-small" id="reissueCardBtn">Reissue Card (New Token)</button>
+          <button class="button button-outline button-small" id="changeLifecycleBtn">Lifecycle State</button>
+        </div>
+      ` : ''}
+
+      <div class="modal-actions">
+        <button class="button button-primary" id="closeDetailModal">Done</button>
+      </div>
+    `);
+
+    $('#closeDetailModal').onclick = closeModal;
+
+    $('#revokeCardBtn')?.addEventListener('click', async () => {
+      const reason = prompt('Enter revocation reason (e.g. Card lost / damaged):', 'Card lost or damaged');
+      if (reason === null) return;
+      try {
+        const res = await api(`/api/pupils/${p.id}/cards/revoke`, { reason });
+        acceptState(res.state);
+        toast(`Card revoked for ${p.name}. Historical attendance preserved.`);
+        closeModal();
+        render();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    });
+
+    $('#reissueCardBtn')?.addEventListener('click', async () => {
+      const reason = prompt('Enter reason for reissuing card:', 'Replacement PVC card requested');
+      if (reason === null) return;
+      try {
+        const res = await api(`/api/pupils/${p.id}/cards/reissue`, { reason });
+        acceptState(res.state);
+        toast(`New random token issued for ${p.name}. Old card revoked, historical attendance preserved.`);
+        closeModal();
+        render();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    });
+
+    $('#changeLifecycleBtn')?.addEventListener('click', () => {
+      openLifecycleModal(p);
+    });
+
+    $('#addHouseholdLinkBtn')?.addEventListener('click', () => {
+      openLinkHouseholdModal(p);
+    });
+
+    $('#addGuardianLinkBtn')?.addEventListener('click', () => {
+      openInviteGuardianModal();
+    });
+  }
+
+  function openLifecycleModal(p) {
+    openModal(`
+      <h2 id="modalTitle">Update Lifecycle State: ${escapeHtml(p.name)}</h2>
+      <p class="modal-intro">Maintain lifecycle states: active, withdrawn, transferred, archived. Transitions are recorded in the audit log.</p>
+      <form id="lifecycleForm" class="form-grid">
+        <div class="form-field full">
+          <label>Lifecycle State *</label>
+          <select name="status">
+            <option value="active" ${p.status==='active'?'selected':''}>Active — Enrolled & attending</option>
+            <option value="withdrawn" ${p.status==='withdrawn'?'selected':''}>Withdrawn — Departed school</option>
+            <option value="transferred" ${p.status==='transferred'?'selected':''}>Transferred — Moved to other school</option>
+            <option value="archived" ${p.status==='archived'?'selected':''}>Archived — Inactive historical record</option>
+          </select>
+        </div>
+        <div class="form-field full">
+          <label>Reason / Audit Note *</label>
+          <textarea name="reason" required placeholder="Reason for lifecycle transition..." style="width:100%;padding:8px;border-radius:6px;border:1px solid #d0d5dd;font:inherit;min-height:50px"></textarea>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelLifecycle">Cancel</button>
+          <button type="submit" class="button button-primary">Update Status</button>
+        </div>
+      </form>
+    `);
+    $('#cancelLifecycle').onclick = closeModal;
+    $('#lifecycleForm').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = new FormData(ev.currentTarget);
+      try {
+        const res = await api(`/api/pupils/${p.id}/status`, {
+          status: f.get('status'),
+          reason: f.get('reason')
+        });
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast(`Lifecycle state updated to ${f.get('status')}.`);
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  function openLinkHouseholdModal(p) {
+    const hhOpts = households.map(h => `<option value="${escapeHtml(h.id)}">${escapeHtml(h.name)} (${escapeHtml(h.id)})</option>`).join('');
+    openModal(`
+      <h2 id="modalTitle">Link ${escapeHtml(p.name)} to Household</h2>
+      <p class="modal-intro">Pupils may be linked to more than one household (e.g. dual-custody or extended family).</p>
+      <form id="linkHHForm" class="form-grid">
+        <div class="form-field full">
+          <label>Choose Household *</label>
+          <select name="householdId" required>${hhOpts}</select>
+        </div>
+        <div class="form-field full">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" name="isPrimary">
+            <span>Set as primary residence</span>
+          </label>
+        </div>
+        <div class="form-field full">
+          <label>Relationship Notes</label>
+          <input name="relationshipNotes" placeholder="e.g. Alternate weekend residence / Mother's address">
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelLinkHH">Cancel</button>
+          <button type="submit" class="button button-primary">Save Household Link</button>
+        </div>
+      </form>
+    `);
+    $('#cancelLinkHH').onclick = closeModal;
+    $('#linkHHForm').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = new FormData(ev.currentTarget);
+      try {
+        const res = await api(`/api/pupils/${p.id}/households`, {
+          householdId: f.get('householdId'),
+          isPrimary: f.get('isPrimary') !== null,
+          relationshipNotes: f.get('relationshipNotes')
+        });
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast(`Household linked for ${p.name}.`);
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
   async function startScanner(){if(!('BarcodeDetector'in window)){toast('Live QR scanning is not available in this browser. Enter the pupil ID below.','!');return}try{const detector=new BarcodeDetector({formats:['qr_code']});const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});window._gwStream=stream;openModal(`<h2 id="modalTitle">Scan pupil card</h2><p class="modal-intro">Hold the QR code in the frame. Confirm the pupil on the next screen.</p><video id="scanVideo" autoplay muted playsinline style="width:100%;border-radius:8px;background:#15182a;max-height:310px;object-fit:cover"></video><p class="scan-note">Camera access stays on this device during the scan.</p><div class="modal-actions"><button class="button button-outline" id="stopCamera">Cancel scan</button></div>`);const video=$('#scanVideo');video.srcObject=stream;video.onloadedmetadata=()=>video.play();$('#stopCamera').onclick=closeModal;const loop=async()=>{if(!window._gwStream||!video.isConnected)return;try{const codes=await detector.detect(video);if(codes.length){const val=codes[0].rawValue.replace(/^GW:/,'');closeModal();findAndScan(val, 'Card scan');return}}catch{}requestAnimationFrame(loop)};setTimeout(loop,600)}catch{toast('Camera permission was not granted. Enter the pupil ID instead.','!')}}
   async function exportCsv(){
     try {
@@ -768,7 +1058,7 @@
     const modeBtn=e.target.closest('[data-mode]');if(modeBtn){mode=modeBtn.dataset.mode;$$('.mode-button').forEach(b=>b.classList.toggle('selected',b===modeBtn));$('.scan-start').textContent='Start camera scanner';$('.scan-frame h2').textContent=mode==='arrival'?'Scan pupil ID card':'Scan for departure';}
     const req=e.target.closest('[data-request]');if(req){const r=requests.find(x=>x.id===req.dataset.request);if(r)resolvePickupRequest(r,req.dataset.action);}
     const corr=e.target.closest('[data-correct-event]');if(corr){openCorrectionModal(corr.dataset.correctEvent);}
-    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openModal(`<h2 id="modalTitle">Pupil card</h2><p class="modal-intro">Demo school ID card. QR contains only a random lookup code in a production implementation.</p><div class="confirm-profile">${avatar(p)}<div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small></div></div><div style="display:grid;place-items:center;padding:20px;background:#fafbff;border:1px solid #eceef4;border-radius:8px"><div id="qrCanvas" style="font:700 14px monospace;color:#4c5ddd;border:8px solid white;background:white;padding:18px;letter-spacing:1px">▦ ${escapeHtml(qrValue(p))}</div><small class="card-tag" style="margin-top:8px">Demo QR reference (not scannable artwork)</small></div><div class="modal-actions"><button class="button button-outline" id="closeCard">Close</button></div>`);$('#closeCard').onclick=closeModal;}
+    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openPupilDetailModal(p);}
     if(e.target.id==='syncNowLink'||e.target.id==='syncNowBtn'){e.preventDefault();syncPendingQueue();}
     if(e.target.id==='reconcileFallbackBtn'){e.preventDefault();openReconcileModal();}
   });
@@ -1273,7 +1563,11 @@
   $('.main-nav').addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(b)navigate(b.dataset.page)});
   $('[data-goto="scan"]')?.addEventListener('click',()=>navigate('scan'));
   $('#manualForm').addEventListener('submit',e=>{e.preventDefault();findAndScan($('#pupilIdInput').value, 'Manual entry');$('#pupilIdInput').value='';});$('#startCamera').onclick=startScanner;$('#cameraInput').onchange=async e=>{const file=e.target.files[0];if(!file)return;if(!('BarcodeDetector'in window)){toast('Image QR decoding is not supported here. Search the pupil instead.','!');return}try{const bitmap=await createImageBitmap(file);const detector=new BarcodeDetector({formats:['qr_code']});const result=await detector.detect(bitmap);if(result.length)findAndScan(result[0].rawValue.replace(/^GW:/,''),'Card image scan');else toast('No QR code detected in that image.','!')}catch{toast('Could not read that image. Search the pupil instead.','!')}e.target.value='';};$('#addPupilBtn').onclick=openAddPupil;$('#arrivalSearch').oninput=renderDashboard;$('#pupilSearch').oninput=renderPupils;$('#activitySearch').oninput=renderActivity;$('#pickupSearch').oninput=renderPickup;
-  $('#classFilter').onclick=()=>pickFilter($('#classFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderDashboard()});$('#directoryFilter').onclick=()=>pickFilter($('#directoryFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderPupils()});$('#pupilStatusFilter')?.addEventListener('click',()=>pickFilter($('#pupilStatusFilter'),['All statuses','On campus','Departed','Not arrived'],pupilStatusChoice,x=>{pupilStatusChoice=x;renderPupils()}));$('#eventFilter').onclick=()=>pickFilter($('#eventFilter'),['All events','Arrivals','Departures','Manual entries'],activityChoice,x=>{activityChoice=x;renderActivity()});$('#exportActivity').onclick=exportCsv;
+  $('#classFilter').onclick=()=>pickFilter($('#classFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderDashboard()});
+  $('#directoryFilter').onclick=()=>pickFilter($('#directoryFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderPupils()});
+  $('#pupilStatusFilter')?.addEventListener('click',()=>pickFilter($('#pupilStatusFilter'),['All statuses','On campus','Departed','Not arrived'],pupilStatusChoice,x=>{pupilStatusChoice=x;renderPupils()}));
+  $('#lifecycleFilter')?.addEventListener('click',()=>pickFilter($('#lifecycleFilter'),['All lifecycles','active','withdrawn','transferred','archived'],lifecycleFilterChoice,x=>{lifecycleFilterChoice=x;renderPupils()}));
+  $('#eventFilter').onclick=()=>pickFilter($('#eventFilter'),['All events','Arrivals','Departures','Manual entries'],activityChoice,x=>{activityChoice=x;renderActivity()});$('#exportActivity').onclick=exportCsv;
   $('#modalClose').onclick=closeModal;$('#modalBackdrop').onclick=e=>{if(e.target.id==='modalBackdrop')closeModal()};document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});$('#mobileMenu').onclick=()=>$('#sidebar').classList.toggle('open');$('#helpBtn').onclick=()=>{openModal(`<h2 id="modalTitle">Gate team quick guide</h2><p class="modal-intro">A safe, repeatable routine for every pupil movement.</p><ol class="confirm-info"><li>Scan the card or search the pupil by name/ID.</li><li>Compare the pupil with the profile photo on screen.</li><li>For departure, select only an approved collector and follow school ID-check policy.</li><li>Confirm the event and select a reason (e.g. card_missing or card_unreadable) for manual entries. Never release a child solely because a card was scanned.</li></ol><div class="danger-note">Do not photograph or copy a QR code as a workaround. Always use manual entry for missing or unreadable cards.</div><div class="modal-actions"><button class="button button-primary" id="guideDone">Got it</button></div>`);$('#guideDone').onclick=closeModal};$('#pickupHelp').onclick=()=>toast('Follow the school’s approved pickup verification policy.');$('#contactSupport').onclick=e=>{e.preventDefault();toast('Demo: contact your school administrator for support.','i')};$('#notificationsBtn').onclick=()=>toast('Message delivery is not configured in this local MVP.','!');$('.more-button').onclick=async()=>{try{await api('/api/logout',{});signedInUser=null;$('#authScreen').classList.remove('hidden');pupils=[];events=[];requests=[];$('#loginPassword').value='';$('#loginError').classList.add('hidden')}catch(err){toast(err.message,'!')}};
   const now=new Date();$('#todayLabel').textContent=now.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'});$('#dateEyebrow').innerHTML=`${now.toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'}).toUpperCase()} <span class="live-label"><i></i> LIVE</span>`;
   $('#loginForm').addEventListener('submit',async e=>{e.preventDefault();const button=$('.auth-submit');button.disabled=true;button.textContent='Signing in…';$('#loginError').classList.add('hidden');try{const result=await api('/api/login',{email:$('#loginEmail').value,password:$('#loginPassword').value});setSignedIn(result.user);acceptState(result.state);render()}catch(err){$('#loginError').textContent=err.message==='Failed to fetch'?'Cannot reach the app server. Start Node.js server with npm start and reload this page.':err.message;$('#loginError').classList.remove('hidden')}finally{button.disabled=false;button.innerHTML='Sign in <span>→</span>'}});

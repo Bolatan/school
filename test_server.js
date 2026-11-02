@@ -13,7 +13,10 @@ const {
   AuditEntry,
   Guardian,
   PupilGuardian,
-  CorrectionRequest
+  CorrectionRequest,
+  Household,
+  PupilHousehold,
+  Card
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD } = require('./authUtils');
 
@@ -887,4 +890,241 @@ test('Guardian onboarding: invitation, channel verification, consent acceptance,
   const legalAudit = await AuditEntry.findOne({ action: 'update_legal_guardian_status', objectId: `NF-4001:${invite.guardianId}` });
   assert.ok(legalAudit);
   assert.ok(legalAudit.reason.includes('Court custody determination decree'));
+});
+
+test('Pupil and household records: lifecycle states, multi-guardians, multi-households, and card token revocation/reissue', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Create pupil with school-issued ID, class/year, campus, status, photograph, and linked guardian
+  const pupilRes = await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Tariq Anderson',
+      id: 'NF-3001',
+      className: 'Grade 4B',
+      campus: 'Secondary campus',
+      status: 'active',
+      guardian: 'Fatima Anderson',
+      guardianPhone: '+1 555-0301',
+      guardianEmail: 'fatima.anderson@example.com',
+      photo: '👦🏽'
+    });
+  assert.equal(pupilRes.status, 201);
+  assert.ok(pupilRes.body.ok);
+
+  const createdPupil = await Pupil.findOne({ id: 'NF-3001' });
+  assert.ok(createdPupil);
+  assert.equal(createdPupil.name, 'Tariq Anderson');
+  assert.equal(createdPupil.id, 'NF-3001');
+  assert.equal(createdPupil.className, 'Grade 4B');
+  assert.equal(createdPupil.campus, 'Secondary campus');
+  assert.equal(createdPupil.status, 'active');
+  assert.equal(createdPupil.photo, '👦🏽');
+
+  // Verify random, non-meaningful card token was generated automatically
+  const activeCard = await Card.findOne({ pupilId: 'NF-3001', status: 'active' });
+  assert.ok(activeCard);
+  assert.ok(activeCard.cardToken.startsWith('GWC-'));
+  // Ensure token does not encode pupil name, birth date, phone number or personal details
+  assert.ok(!activeCard.cardToken.includes('Tariq'));
+  assert.ok(!activeCard.cardToken.includes('Anderson'));
+  assert.ok(!activeCard.cardToken.includes('3001'));
+  assert.ok(!activeCard.cardToken.includes('555'));
+
+  // 2. Support multiple guardians per pupil
+  // Create first guardian
+  const g1Res = await request
+    .post('/api/guardians/invite')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-3001',
+      name: 'Fatima Anderson',
+      relationship: 'Mother',
+      verifiedContactMethod: 'email',
+      email: 'fatima.anderson@example.com',
+      isLegalGuardian: true
+    });
+  assert.equal(g1Res.status, 201);
+
+  // Create second guardian
+  const g2Res = await request
+    .post('/api/guardians/invite')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-3001',
+      name: 'Rasheed Anderson',
+      relationship: 'Father',
+      verifiedContactMethod: 'sms',
+      phone: '+1 555-0302',
+      isLegalGuardian: true
+    });
+  assert.equal(g2Res.status, 201);
+
+  const guardianLinks = await PupilGuardian.find({ pupilId: 'NF-3001' });
+  assert.equal(guardianLinks.length, 2);
+
+  // 3. Support pupils linked to more than one household
+  // Create two households
+  const h1Res = await request
+    .post('/api/households')
+    .set('Cookie', adminCookie)
+    .send({
+      id: 'HH-301',
+      name: 'Anderson Primary Residence',
+      address: '45 Elm Street, Northfield',
+      phone: '+1 555-0301'
+    });
+  assert.equal(h1Res.status, 201);
+
+  const h2Res = await request
+    .post('/api/households')
+    .set('Cookie', adminCookie)
+    .send({
+      id: 'HH-302',
+      name: 'Anderson Co-Parent Residence',
+      address: '12 Riverbank Way, Northfield',
+      phone: '+1 555-0302'
+    });
+  assert.equal(h2Res.status, 201);
+
+  // Link pupil to both households
+  const linkH1 = await request
+    .post('/api/pupils/NF-3001/households')
+    .set('Cookie', adminCookie)
+    .send({
+      householdId: 'HH-301',
+      isPrimary: true,
+      relationshipNotes: 'Main residence during school week'
+    });
+  assert.equal(linkH1.status, 201);
+
+  const linkH2 = await request
+    .post('/api/pupils/NF-3001/households')
+    .set('Cookie', adminCookie)
+    .send({
+      householdId: 'HH-302',
+      isPrimary: false,
+      relationshipNotes: 'Alternate weekend residence'
+    });
+  assert.equal(linkH2.status, 201);
+
+  const pupilHouseholds = await PupilHousehold.find({ pupilId: 'NF-3001' });
+  assert.equal(pupilHouseholds.length, 2);
+
+  // Check state serialization contains both households and guardians for NF-3001
+  const stateCheckRes = await request.get('/api/state').set('Cookie', adminCookie);
+  assert.equal(stateCheckRes.status, 200);
+  const foundInState = stateCheckRes.body.pupils.find(p => p.id === 'NF-3001');
+  assert.equal(foundInState.households.length, 2);
+  assert.equal(foundInState.guardians.length, 2);
+  assert.equal(foundInState.status, 'active');
+  assert.equal(foundInState.campus, 'Secondary campus');
+
+  // 4. Record attendance with valid random card token
+  const initialToken = activeCard.cardToken;
+  const scanLookupRes = await request
+    .get(`/api/cards/lookup/${initialToken}`)
+    .set('Cookie', adminCookie);
+  assert.equal(scanLookupRes.status, 200);
+  assert.equal(scanLookupRes.body.pupil.id, 'NF-3001');
+
+  // Record arrival using the card token
+  const arrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      cardToken: initialToken,
+      type: 'arrival',
+      source: 'Card scan'
+    });
+  assert.equal(arrivalRes.status, 201);
+  const initialArrivalEventId = arrivalRes.body.eventId;
+
+  // 5. Allow card revocation and reissue without changing the pupil's historical attendance record
+  const originalAttendanceCount = await AttendanceEvent.countDocuments({ pupilId: 'NF-3001' });
+  assert.equal(originalAttendanceCount, 1);
+
+  // Revoke card
+  const revokeRes = await request
+    .post('/api/pupils/NF-3001/cards/revoke')
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Card reported stolen in park' });
+  assert.equal(revokeRes.status, 200);
+  assert.equal(revokeRes.body.revokedCard.status, 'revoked');
+
+  // Attempting lookup or scanning with revoked card is blocked
+  const revokedLookupRes = await request
+    .get(`/api/cards/lookup/${initialToken}`)
+    .set('Cookie', adminCookie);
+  assert.equal(revokedLookupRes.status, 400);
+  assert.ok(revokedLookupRes.body.error.includes('revoked'));
+
+  const revokedScanAttempt = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      cardToken: initialToken,
+      type: 'departure',
+      source: 'Card scan'
+    });
+  assert.equal(revokedScanAttempt.status, 400);
+  assert.ok(revokedScanAttempt.body.error.includes('REVOKED'));
+
+  // Reissue card: issues fresh random token without changing pupil's historical attendance record
+  const reissueRes = await request
+    .post('/api/pupils/NF-3001/cards/reissue')
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Replacement physical card printed' });
+  assert.equal(reissueRes.status, 201);
+  const newToken = reissueRes.body.card.cardToken;
+  assert.notEqual(newToken, initialToken);
+  assert.ok(newToken.startsWith('GWC-'));
+  // Ensure new token also does not encode personal info
+  assert.ok(!newToken.includes('Tariq'));
+
+  // Verify historical attendance record is intact and unchanged
+  const attendanceAfterReissue = await AttendanceEvent.find({ pupilId: 'NF-3001' });
+  assert.equal(attendanceAfterReissue.length, originalAttendanceCount);
+  assert.equal(attendanceAfterReissue[0].id, initialArrivalEventId);
+  assert.equal(attendanceAfterReissue[0].pupilId, 'NF-3001');
+
+  // 6. Maintain lifecycle states: active, withdrawn, transferred, archived
+  const statesToTest = ['withdrawn', 'transferred', 'archived', 'active'];
+  for (const st of statesToTest) {
+    const statusUpdateRes = await request
+      .post('/api/pupils/NF-3001/status')
+      .set('Cookie', adminCookie)
+      .send({
+        status: st,
+        reason: `Testing state transition to ${st}`
+      });
+    assert.equal(statusUpdateRes.status, 200);
+    assert.equal(statusUpdateRes.body.pupil.status, st);
+
+    const doc = await Pupil.findOne({ id: 'NF-3001' });
+    assert.equal(doc.status, st);
+    assert.equal(doc.active, st === 'active');
+
+    // Audit entry check
+    const statusAudit = await AuditEntry.findOne({ action: 'update_pupil_status', objectId: 'NF-3001' }).sort({ createdAt: -1 });
+    assert.ok(statusAudit);
+    assert.ok(statusAudit.reason.includes(`to ${st}`));
+  }
+
+  // When pupil status is withdrawn, check-in operations are blocked
+  await request
+    .post('/api/pupils/NF-3001/status')
+    .set('Cookie', adminCookie)
+    .send({ status: 'withdrawn', reason: 'Family relocated' });
+
+  const blockedWithdrawCheckin = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      cardToken: newToken,
+      type: 'arrival'
+    });
+  assert.equal(blockedWithdrawCheckin.status, 400);
+  assert.ok(blockedWithdrawCheckin.body.error.includes('withdrawn'));
 });

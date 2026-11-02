@@ -22,6 +22,8 @@ const pupilSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true, uppercase: true, trim: true },
   name: { type: String, required: true, trim: true },
   className: { type: String, required: true, trim: true },
+  campus: { type: String, default: 'Primary campus', trim: true },
+  status: { type: String, enum: ['active', 'withdrawn', 'transferred', 'archived'], default: 'active' },
   guardian: { type: String, required: true, trim: true },
   guardianPhone: { type: String, default: '+1 555-0100' },
   guardianEmail: { type: String, default: '' },
@@ -106,6 +108,40 @@ const Notification = mongoose.model('Notification', notificationSchema);
 const AuditEntry = mongoose.model('AuditEntry', auditEntrySchema);
 const Session = mongoose.model('Session', sessionSchema);
 
+const householdSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, uppercase: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  address: { type: String, default: '', trim: true },
+  phone: { type: String, default: '', trim: true },
+  notes: { type: String, default: '', trim: true },
+  active: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const pupilHouseholdSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  pupilId: { type: String, required: true, ref: 'Pupil', index: true },
+  householdId: { type: String, required: true, ref: 'Household', index: true },
+  isPrimary: { type: Boolean, default: false },
+  relationshipNotes: { type: String, default: '' }
+}, { timestamps: true });
+
+const cardSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  pupilId: { type: String, required: true, ref: 'Pupil', index: true },
+  cardToken: { type: String, required: true, unique: true, index: true }, // random non-meaningful token string e.g. "GWC-..."
+  tokenHash: { type: String, required: true, index: true },
+  status: { type: String, enum: ['active', 'revoked'], default: 'active' },
+  issuedAt: { type: Date, default: Date.now },
+  issuedBy: { type: String, default: 'School Office' },
+  revokedAt: { type: Date, default: null },
+  revokedBy: { type: String, default: null },
+  revocationReason: { type: String, default: '' }
+}, { timestamps: true });
+
+const Household = mongoose.model('Household', householdSchema);
+const PupilHousehold = mongoose.model('PupilHousehold', pupilHouseholdSchema);
+const Card = mongoose.model('Card', cardSchema);
+
 const schoolSettingSchema = new mongoose.Schema({
   key: { type: String, required: true, unique: true },
   val: { type: mongoose.Schema.Types.Mixed, required: true }
@@ -173,5 +209,8 @@ module.exports = {
   SchoolSetting,
   Guardian,
   PupilGuardian,
-  CorrectionRequest
+  CorrectionRequest,
+  Household,
+  PupilHousehold,
+  Card
 };
