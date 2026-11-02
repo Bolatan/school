@@ -14,7 +14,7 @@
   const today = new Date().toLocaleDateString('en-CA');
   const localTime = (minsAgo=0) => {const d=new Date(Date.now()-minsAgo*60000);return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
   const load=(key,fallback)=>{try{const v=JSON.parse(localStorage.getItem('gatewise-'+key));return v??fallback}catch{return fallback}};
-  let pupils=[], events=[], requests=[], schoolSettings={}, signedInUser=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
+  let pupils=[], events=[], requests=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
   let isOfflineSimulated = false;
   let deviceManaged = true;
   let deviceEncrypted = true;
@@ -132,7 +132,33 @@
     acceptState(state);
     render();
   }
-  function setSignedIn(user){signedInUser=user;$('#authScreen').classList.add('hidden');$('.profile strong').textContent=user.name;$('.profile small').textContent=({admin:'School administrator',manager:'School manager',viewer:'View only'})[user.role]||'School staff';$('#userNav').classList.toggle('hidden',user.role!=='admin');$('#addPupilBtn').classList.toggle('hidden',user.role==='viewer');$('#uploadRosterBtn').classList.toggle('hidden',user.role==='viewer');$('[data-page="scan"]').classList.toggle('hidden',user.role==='viewer');$('[data-goto="scan"]').classList.toggle('hidden',user.role==='viewer');}
+  function setSignedIn(user){
+    signedInUser=user;
+    $('#authScreen').classList.add('hidden');
+    $('.profile strong').textContent=user.name;
+    const roleLabels = { admin: 'School administrator', manager: 'School manager', viewer: 'View only', guardian: 'Parent / Guardian' };
+    $('.profile small').textContent=roleLabels[user.role]||'School staff';
+    $('#userNav').classList.toggle('hidden',user.role!=='admin');
+    $('#addPupilBtn').classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
+    $('#uploadRosterBtn').classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
+    $('#inviteGuardianBtn')?.classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
+    $('[data-page="scan"]').classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
+    $('[data-goto="scan"]')?.classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
+    $('#guardianPortalNav').classList.toggle('hidden', user.role !== 'guardian');
+
+    if (user.role === 'guardian') {
+      $('[data-page="dashboard"]').classList.add('hidden');
+      $('[data-page="pupils"]').classList.add('hidden');
+      $('[data-page="pickup"]').classList.add('hidden');
+      $('[data-page="activity"]').classList.add('hidden');
+      navigate('guardianPortal');
+    } else {
+      $('[data-page="dashboard"]').classList.remove('hidden');
+      $('[data-page="pupils"]').classList.remove('hidden');
+      $('[data-page="pickup"]').classList.remove('hidden');
+      $('[data-page="activity"]').classList.remove('hidden');
+    }
+  }
   const escapeHtml=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const initials=s=>s.split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase();
   const pupil=id=>pupils.find(p=>p.id.toLowerCase()===String(id).toLowerCase());
@@ -146,8 +172,19 @@
   function toast(msg,icon='✓'){const el=document.createElement('div');el.className='toast';el.innerHTML=`<i>${icon}</i><span>${escapeHtml(msg)}</span>`;$('#toastRegion').append(el);setTimeout(()=>el.remove(),3200);}
   function openModal(html){$('#modalContent').innerHTML=html;$('#modalBackdrop').classList.remove('hidden');setTimeout(()=>$('#modalContent input:not([type=hidden]), #modalContent select')?.focus(),30);}
   function closeModal(){$('#modalBackdrop').classList.add('hidden');$('#modalContent').innerHTML='';if(window._gwStream){window._gwStream.getTracks().forEach(t=>t.stop());window._gwStream=null;}}
-  function navigate(page){if(page==='users'&&signedInUser?.role!=='admin'){toast('Only an administrator can manage staff accounts.','!');return}if(page==='scan'&&signedInUser?.role==='viewer'){toast('Your account is view-only.','!');return}$$('.page').forEach(p=>p.classList.toggle('active',p.id===`page-${page}`));$$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===page));$('#crumbPage').textContent=({dashboard:'Overview',scan:'Scan & log',pupils:'Pupils',pickup:'Pickup approvals',activity:'Activity log',users:'User management'})[page]||'Overview';$('#sidebar').classList.remove('open');window.scrollTo(0,0);if(page==='users')renderUsers();}
-  function render(){renderDashboard();renderPupils();renderPickup();renderActivity();}
+  function navigate(page){
+    if(page==='users'&&signedInUser?.role!=='admin'){toast('Only an administrator can manage staff accounts.','!');return}
+    if(page==='scan'&&(signedInUser?.role==='viewer'||signedInUser?.role==='guardian')){toast('Access restricted.','!');return}
+    $$('.page').forEach(p=>p.classList.toggle('active',p.id===`page-${page}`));
+    $$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
+    $('#crumbPage').textContent=({dashboard:'Overview',scan:'Scan & log',pupils:'Pupils',pickup:'Pickup approvals',activity:'Activity log',users:'User management',guardianPortal:'My Children'})[page]||'Overview';
+    $('#sidebar').classList.remove('open');
+    window.scrollTo(0,0);
+    if(page==='users')renderUsers();
+    if(page==='guardianPortal')loadGuardianPortal();
+    if(page==='pickup')loadAdminCorrections();
+  }
+  function render(){renderDashboard();renderPupils();renderPickup();renderActivity();if(signedInUser?.role==='guardian')loadGuardianPortal();}
   function updateOfflineStatusUI() {
     const queue = getLocalQueue();
     const isOnline = isDeviceOnline();
@@ -796,6 +833,441 @@
     updateOfflineStatusUI();
     toast('Network connection lost. Offline mode activated.', '!');
   });
+
+  // --------------------------------------------------------------------------
+  // Guardian Onboarding & Portal Functions
+  // --------------------------------------------------------------------------
+
+  // School invites a guardian
+  function openInviteGuardianModal() {
+    const pupilOptions = pupils.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)} - ${escapeHtml(p.className)})</option>`).join('');
+    openModal(`
+      <h2 id="modalTitle">Invite Guardian (Verified Contact)</h2>
+      <p class="modal-intro">The school invites each guardian using a verified contact method. The guardian must prove control of the contact channel and accept the privacy notice and consent terms before accessing pupil records.</p>
+      <form id="inviteGuardianForm" class="form-grid">
+        <div class="form-field full">
+          <label>Select Pupil *</label>
+          <select name="pupilId" required>${pupilOptions}</select>
+        </div>
+        <div class="form-field full">
+          <label>Guardian Full Name *</label>
+          <input name="name" required placeholder="e.g. Kendra Davis">
+        </div>
+        <div class="form-field">
+          <label>Verified Contact Method *</label>
+          <select name="verifiedContactMethod" id="inviteMethodSelect">
+            <option value="sms">SMS Text Message</option>
+            <option value="email">Email</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Relationship *</label>
+          <select name="relationship">
+            <option value="Mother">Mother</option>
+            <option value="Father">Father</option>
+            <option value="Legal Guardian">Legal Guardian</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="form-field full">
+          <label>Guardian Mobile Phone (for SMS)</label>
+          <input name="phone" id="invitePhoneInput" placeholder="+1 555-0199" value="+1 555-0199">
+        </div>
+        <div class="form-field full">
+          <label>Guardian Email (for Email invitations)</label>
+          <input name="email" id="inviteEmailInput" type="email" placeholder="guardian@example.com">
+        </div>
+        <div class="form-field full">
+          <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
+            <input type="checkbox" name="isLegalGuardian" checked>
+            <span>School certifies legal guardian status (school authority required)</span>
+          </label>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelInvite">Cancel</button>
+          <button type="submit" class="button button-primary">Send Invitation</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelInvite').onclick = closeModal;
+    $('#inviteGuardianForm').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = new FormData(ev.currentTarget);
+      const payload = {
+        pupilId: f.get('pupilId'),
+        name: f.get('name'),
+        verifiedContactMethod: f.get('verifiedContactMethod'),
+        relationship: f.get('relationship'),
+        phone: f.get('phone'),
+        email: f.get('email'),
+        isLegalGuardian: f.get('isLegalGuardian') !== null
+      };
+
+      try {
+        const res = await api('/api/guardians/invite', payload);
+        closeModal();
+        openInviteSentSuccessModal(res.invite);
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  function openInviteSentSuccessModal(invite) {
+    openModal(`
+      <h2 id="modalTitle">Invitation Issued</h2>
+      <p class="modal-intro">An onboarding invitation was dispatched via <b>${escapeHtml(invite.verifiedContactMethod.toUpperCase())}</b> to <b>${escapeHtml(invite.targetContact)}</b>.</p>
+      <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin:12px 0;font-size:11px;color:#166534">
+        <div><strong>Channel Verification Code (OTP):</strong> <code style="font-size:14px;font-weight:700">${escapeHtml(invite.verificationCode)}</code></div>
+        <div style="margin-top:6px;font-size:10px;color:#15803d">Share or verify this 6-digit code to prove control of the contact channel.</div>
+        <div style="margin-top:8px"><strong>Invite Token:</strong> <code style="font-size:9px;word-break:break-all">${escapeHtml(invite.inviteToken)}</code></div>
+      </div>
+      <div class="modal-actions">
+        <button class="button button-outline" id="closeInviteModal">Close</button>
+        <button class="button button-primary" id="launchOnboardingBtn">Open Guardian Onboarding Flow ↗</button>
+      </div>
+    `);
+    $('#closeInviteModal').onclick = closeModal;
+    $('#launchOnboardingBtn').onclick = () => {
+      openGuardianOnboardingFlow(invite.inviteToken, invite.verificationCode);
+    };
+  }
+
+  // Guardian proves control and accepts privacy notice & statutory consent
+  function openGuardianOnboardingFlow(inviteToken = '', presetCode = '') {
+    openModal(`
+      <h2 id="modalTitle">Guardian Onboarding & Verification</h2>
+      <p class="modal-intro">Step 1: Prove control of contact channel. Step 2: Review and accept the School Privacy Notice and Notification Consent Agreement.</p>
+      <form id="guardianOnboardingForm" class="form-grid">
+        <div class="form-field full">
+          <label>Invitation Token *</label>
+          <input name="inviteToken" id="obInviteToken" required value="${escapeHtml(inviteToken)}" placeholder="Paste invitation token">
+        </div>
+        <div class="form-field full">
+          <label>Verification Code sent to your phone/email (OTP) *</label>
+          <div style="display:flex;gap:8px">
+            <input name="verificationCode" id="obVerificationCode" required value="${escapeHtml(presetCode)}" placeholder="6-digit code">
+            <button type="button" class="button button-outline" id="verifyChannelBtn">Prove Control ✓</button>
+          </div>
+          <small id="verifyStatusMsg" style="font-size:10px;color:#059669;margin-top:4px"></small>
+        </div>
+        <div class="form-field full" style="margin-top:6px">
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px;max-height:120px;overflow-y:auto;font-size:9px;color:#475569;line-height:1.5">
+            <b>Northfield Academy Privacy Notice (v2026.1):</b><br>
+            We process pupil arrival and departure logs, parent/guardian contact credentials, and verified collector records to safeguard child safety. Attendance records are processed pursuant to statutory educational obligations and stored in managed, encrypted repositories. Data is shared strictly with approved gate staff and authorized collectors.
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:10px;margin-top:6px;cursor:pointer">
+            <input type="checkbox" name="acceptPrivacyNotice" id="obPrivacy" required>
+            <span>I have read and accept the Northfield Academy Privacy Notice</span>
+          </label>
+        </div>
+        <div class="form-field full">
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:10px;max-height:100px;overflow-y:auto;font-size:9px;color:#475569;line-height:1.5">
+            <b>Statutory Consent & Handover Acknowledgment:</b><br>
+            I consent to receiving automated arrival and dismissal notifications via my configured channels. I understand and agree that <b>the school—not the guardian app—approves changes to legal guardian status and pickup permissions</b>.
+          </div>
+          <label style="display:flex;align-items:center;gap:6px;font-size:10px;margin-top:6px;cursor:pointer">
+            <input type="checkbox" name="acceptConsent" id="obConsent" required>
+            <span>I agree to the Consent & Dismissal Handover Terms</span>
+          </label>
+        </div>
+        <div class="form-field full">
+          <label>Create Portal Password (at least 8 characters) *</label>
+          <input name="password" type="password" required minlength="8" placeholder="Enter secure password">
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelOnboarding">Cancel</button>
+          <button type="submit" class="button button-primary">Complete Onboarding & Enter Portal <span>→</span></button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelOnboarding').onclick = closeModal;
+
+    let isChannelVerified = false;
+    $('#verifyChannelBtn').onclick = async () => {
+      const token = $('#obInviteToken').value.trim();
+      const code = $('#obVerificationCode').value.trim();
+      if (!token || !code) {
+        toast('Enter invitation token and verification code.', '!');
+        return;
+      }
+      try {
+        const res = await api('/api/guardian/verify-channel', { inviteToken: token, verificationCode: code });
+        isChannelVerified = true;
+        $('#verifyStatusMsg').textContent = `✓ ${res.message}`;
+        toast('Channel control proven successfully.');
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+
+    $('#guardianOnboardingForm').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const f = new FormData(ev.currentTarget);
+      const token = f.get('inviteToken');
+      const password = f.get('password');
+      const acceptPrivacy = f.get('acceptPrivacyNotice') !== null;
+      const acceptConsent = f.get('acceptConsent') !== null;
+
+      if (!isChannelVerified) {
+        // Attempt verifying channel first if not explicitly clicked
+        try {
+          await api('/api/guardian/verify-channel', { inviteToken: token, verificationCode: f.get('verificationCode') });
+          isChannelVerified = true;
+        } catch (e) {
+          toast(e.message, '!');
+          return;
+        }
+      }
+
+      try {
+        const res = await api('/api/guardian/accept-consent', {
+          inviteToken: token,
+          acceptPrivacyNotice: acceptPrivacy,
+          acceptConsent: acceptConsent,
+          password
+        });
+        closeModal();
+        setSignedIn(res.user);
+        toast('Onboarding completed! Welcome to your Guardian Portal.');
+        navigate('guardianPortal');
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  // Load Guardian Portal view
+  async function loadGuardianPortal() {
+    try {
+      const data = await api('/api/guardian/me');
+      guardianPortalData = data;
+      renderGuardianPortalUI(data);
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  }
+
+  function renderGuardianPortalUI(data) {
+    $('#guardianPortalTitle').textContent = `Welcome, ${data.guardian.name}`;
+
+    // 1. Linked Pupils
+    const pupilsContainer = $('#guardianPupilsList');
+    if (pupilsContainer) {
+      if (!data.pupils.length) {
+        pupilsContainer.innerHTML = '<div class="empty-state">No linked pupils found for this account. Contact school office.</div>';
+      } else {
+        pupilsContainer.innerHTML = data.pupils.map(p => `
+          <div class="guardian-pupil-card">
+            <span class="avatar avatar-${p.color || 'blue'}">${escapeHtml(p.photo || p.initials)}</span>
+            <div class="guardian-pupil-meta">
+              <strong>${escapeHtml(p.name)} <small style="display:inline;color:#64748b">(${escapeHtml(p.className)})</small></strong>
+              <small>Pupil ID: <b>${escapeHtml(p.id)}</b> · Relationship: ${escapeHtml(p.relationship)}</small>
+              <div style="margin-top:4px">
+                <span class="${p.isLegalGuardian ? 'badge-legal' : 'badge-nonlegal'}">
+                  ${p.isLegalGuardian ? '✓ Certified Legal Guardian' : 'Authorized Contact'}
+                </span>
+                <span style="font-size:9px;color:#64748b;margin-left:6px">${p.collectors.length} approved collector(s)</span>
+              </div>
+            </div>
+          </div>
+        `).join('');
+      }
+    }
+
+    // 2. Notification Preferences
+    const form = $('#guardianPrefsForm');
+    if (form) {
+      const current = data.guardian.preferredChannels || ['sms'];
+      $$('input[name="prefChannels"]', form).forEach(cb => {
+        cb.checked = current.includes(cb.value);
+      });
+      form.onsubmit = async (e) => {
+        e.preventDefault();
+        const selected = $$('input[name="prefChannels"]:checked', form).map(cb => cb.value);
+        if (!selected.length) {
+          toast('Select at least one notification channel.', '!');
+          return;
+        }
+        try {
+          const res = await api('/api/guardian/preferences', { channels: selected });
+          toast(res.message);
+          loadGuardianPortal();
+        } catch (err) {
+          toast(err.message, '!');
+        }
+      };
+    }
+
+    // 3. Timeline
+    const timeline = $('#guardianTimelineList');
+    if (timeline) {
+      if (!data.events.length) {
+        timeline.innerHTML = '<div class="empty-state">No recent activity recorded for your linked children.</div>';
+      } else {
+        timeline.innerHTML = data.events.map(e => {
+          const p = data.pupils.find(x => x.id === e.pupilId) || { name: 'Linked Child' };
+          const isArr = e.type.includes('arrival');
+          return `
+            <div class="activity-item">
+              <div class="activity-icon ${isArr ? 'arrival' : 'departure'}">${isArr ? '↘' : '↗'}</div>
+              <div class="activity-copy">
+                <b>${isArr ? 'Safe Arrival' : 'Dismissal Handover'}</b> for ${escapeHtml(p.name)} ${e.collector ? ` with ${escapeHtml(e.collector)}` : ''}
+                <small>${escapeHtml(e.date)} at ${escapeHtml(e.time)} · Verification: ${escapeHtml(e.verification || 'Standard Gate Check')}</small>
+              </div>
+            </div>
+          `;
+        }).join('');
+      }
+    }
+
+    // 4. Correction Requests History
+    const reqHistory = $('#guardianRequestsHistory');
+    if (reqHistory) {
+      if (!data.correctionRequests.length) {
+        reqHistory.innerHTML = '<div class="empty-state">No requests submitted yet. Use the button above to request record updates or contact the school.</div>';
+      } else {
+        reqHistory.innerHTML = data.correctionRequests.map(r => `
+          <div class="correction-item">
+            <div class="correction-header">
+              <strong style="font-size:11px">${escapeHtml(r.subject)} <small style="color:#64748b">(${escapeHtml(r.type.replace(/_/g, ' '))})</small></strong>
+              <span class="correction-status ${r.status}">${r.status}</span>
+            </div>
+            <p style="margin:4px 0;font-size:10px;color:#334155">${escapeHtml(r.message)}</p>
+            ${r.reviewNote ? `<small style="display:block;margin-top:4px;color:#0369a1;background:#f0f9ff;padding:4px 6px;border-radius:4px">School Response: ${escapeHtml(r.reviewNote)}</small>` : ''}
+          </div>
+        `).join('');
+      }
+    }
+  }
+
+  // Guardian submits record correction or contact inquiry
+  function openGuardianCorrectionModal() {
+    if (!guardianPortalData || !guardianPortalData.pupils.length) {
+      toast('No linked pupils available.', '!');
+      return;
+    }
+
+    const pupilOptions = guardianPortalData.pupils.map(p => `
+      <option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>
+    `).join('');
+
+    openModal(`
+      <h2 id="modalTitle">Request Record Correction / Contact School</h2>
+      <p class="modal-intro">
+        Submit changes or questions to Northfield Academy. <b>The school—not the guardian app—approves changes to legal guardian status and pickup permissions.</b>
+      </p>
+      <form id="correctionReqForm" class="form-grid">
+        <div class="form-field full">
+          <label>Select Child *</label>
+          <select name="pupilId" required>${pupilOptions}</select>
+        </div>
+        <div class="form-field full">
+          <label>Request Category *</label>
+          <select name="type" id="correctionTypeSelect">
+            <option value="record_correction">Pupil Record Correction (e.g. spelling, DOB, medical notes)</option>
+            <option value="pickup_permission_request">Request New Pickup Permission (requires school approval)</option>
+            <option value="legal_status_request">Update Legal Guardian Status (requires school certification)</option>
+            <option value="contact_school">General Inquiry / Message School Office</option>
+          </select>
+        </div>
+        <div class="form-field full">
+          <label>Subject *</label>
+          <input name="subject" required placeholder="Brief summary of request">
+        </div>
+        <div class="form-field full">
+          <label>Details / Message *</label>
+          <textarea name="message" required placeholder="Provide full details. If proposing a new pickup collector, include full legal name, relationship, and contact details..." style="width:100%;padding:8px;border-radius:6px;border:1px solid #d0d5dd;font:inherit;min-height:60px"></textarea>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelCorrReq">Cancel</button>
+          <button type="submit" class="button button-primary">Submit Request to School</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelCorrReq').onclick = closeModal;
+    $('#correctionReqForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.currentTarget);
+      const payload = {
+        pupilId: f.get('pupilId'),
+        type: f.get('type'),
+        subject: f.get('subject'),
+        message: f.get('message')
+      };
+
+      try {
+        const res = await api('/api/guardian/correction-request', payload);
+        closeModal();
+        toast('Request submitted to school administration.');
+        loadGuardianPortal();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  // School administration review of guardian correction requests
+  async function loadAdminCorrections() {
+    if (signedInUser?.role === 'viewer' || signedInUser?.role === 'guardian') return;
+    try {
+      const res = await api('/api/admin/corrections');
+      adminCorrections = res.requests || [];
+      renderAdminCorrectionsUI();
+    } catch {}
+  }
+
+  function renderAdminCorrectionsUI() {
+    const list = $('#correctionList');
+    if (!list) return;
+    const pending = adminCorrections.filter(c => c.status === 'pending');
+    const badgeEl = $('#guardianRequestBadge');
+    if (badgeEl) badgeEl.textContent = `${requests.length + pending.length} NEW`;
+
+    if (!pending.length) {
+      list.innerHTML = '<div style="font-size:10px;color:#94a3b8;padding:8px 0">No pending guardian record correction requests.</div>';
+      return;
+    }
+
+    list.innerHTML = `
+      <h3 style="font:700 11px Manrope;color:#475569;margin:12px 0 6px">Record Correction & Legal Status Requests</h3>
+      ${pending.map(c => `
+        <div class="request-card" style="border-top:1px dashed #e2e8f0;padding:10px 0">
+          <div class="request-details">
+            <strong>${escapeHtml(c.subject)} <span class="card-tag">· ${escapeHtml(c.type.replace(/_/g, ' '))}</span></strong>
+            <p>Pupil: <b>${escapeHtml(c.pupilId)}</b> · Guardian: ${escapeHtml(c.guardianId)}</p>
+            <small>${escapeHtml(c.message)}</small>
+          </div>
+          <div class="request-actions">
+            <button class="decline-button" data-correction-id="${c.id}" data-action="reject">Reject</button>
+            <button class="approve-button" data-correction-id="${c.id}" data-action="approve">✓ Approve</button>
+          </div>
+        </div>
+      `).join('')}
+    `;
+
+    $$('[data-correction-id]').forEach(btn => {
+      btn.onclick = async () => {
+        const cid = btn.dataset.correctionId;
+        const action = btn.dataset.action;
+        const note = prompt(`Enter review note / reason for ${action}:`, action === 'approve' ? 'Approved by school office' : 'Declined per school policy');
+        if (note === null) return;
+        try {
+          await api(`/api/admin/corrections/${cid}`, { action, reviewNote: note });
+          toast(`Request ${action}d.`);
+          loadAdminCorrections();
+        } catch (e) {
+          toast(e.message, '!');
+        }
+      };
+    });
+  }
+
+  $('#inviteGuardianBtn')?.addEventListener('click', openInviteGuardianModal);
+  $('#openCorrectionBtn')?.addEventListener('click', openGuardianCorrectionModal);
 
   $('#uploadRosterBtn').onclick=()=>$('#rosterFile').click();$('#rosterFile').onchange=e=>previewRoster(e.target.files[0]);$('#addUserBtn').onclick=openAddUser;$('#userRows').addEventListener('change',async e=>{const select=e.target.closest('[data-user-role]');if(!select)return;try{await api(`/api/users/${select.dataset.userRole}`,{role:select.value});toast('User role updated.');renderUsers()}catch(err){toast(err.message,'!');renderUsers()}});$('#userRows').addEventListener('click',async e=>{const button=e.target.closest('[data-user-active]');if(!button)return;try{await api(`/api/users/${button.dataset.userActive}`,{active:Number(button.dataset.active)===1});toast('User status updated.');renderUsers()}catch(err){toast(err.message,'!')}});
   $('.main-nav').addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(b)navigate(b.dataset.page)});

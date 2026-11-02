@@ -3,10 +3,11 @@ const mongoose = require('mongoose');
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   name: { type: String, required: true, trim: true },
-  role: { type: String, required: true, enum: ['admin', 'manager', 'viewer'], default: 'viewer' },
+  role: { type: String, required: true, enum: ['admin', 'manager', 'viewer', 'guardian'], default: 'viewer' },
   salt: { type: String, required: true },
   passwordHash: { type: String, required: true },
-  active: { type: Boolean, default: true }
+  active: { type: Boolean, default: true },
+  guardianId: { type: String, default: null } // Optional link to Guardian document
 }, { timestamps: true });
 
 const collectorSchema = new mongoose.Schema({
@@ -110,6 +111,55 @@ const schoolSettingSchema = new mongoose.Schema({
   val: { type: mongoose.Schema.Types.Mixed, required: true }
 }, { timestamps: true });
 
+const guardianSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  name: { type: String, required: true, trim: true },
+  email: { type: String, lowercase: true, trim: true, default: '' },
+  phone: { type: String, trim: true, default: '' },
+  verifiedContactMethod: { type: String, enum: ['sms', 'email'], required: true },
+  verificationCode: { type: String, default: null }, // e.g. 6-digit OTP proving channel control
+  inviteToken: { type: String, default: null, index: true },
+  channelVerified: { type: Boolean, default: false },
+  channelVerifiedAt: { type: Date, default: null },
+  privacyNoticeAccepted: { type: Boolean, default: false },
+  privacyNoticeVersion: { type: String, default: '2026.1' },
+  privacyAcceptedAt: { type: Date, default: null },
+  consentAccepted: { type: Boolean, default: false },
+  consentAcceptedAt: { type: Date, default: null },
+  status: { type: String, enum: ['invited', 'active', 'suspended'], default: 'invited' },
+  preferredChannels: [{ type: String, enum: ['sms', 'whatsapp', 'push', 'email'] }],
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+}, { timestamps: true });
+
+const pupilGuardianSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  pupilId: { type: String, required: true, ref: 'Pupil', index: true },
+  guardianId: { type: String, required: true, ref: 'Guardian', index: true },
+  relationship: { type: String, required: true, default: 'Parent' },
+  isLegalGuardian: { type: Boolean, default: true },
+  status: { type: String, enum: ['pending_verification', 'active', 'revoked'], default: 'pending_verification' },
+  legalStatusApprovedBySchool: { type: Boolean, default: true },
+  approvedBySchoolAt: { type: Date, default: Date.now },
+  approvedByStaff: { type: String, default: 'School Office' }
+}, { timestamps: true });
+
+const correctionRequestSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  guardianId: { type: String, required: true, ref: 'Guardian' },
+  pupilId: { type: String, required: true, ref: 'Pupil' },
+  type: { type: String, enum: ['record_correction', 'pickup_permission_request', 'legal_status_request', 'contact_school'], default: 'record_correction' },
+  subject: { type: String, required: true },
+  message: { type: String, required: true },
+  proposedChanges: { type: mongoose.Schema.Types.Mixed, default: {} },
+  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  reviewedBy: { type: String, default: null },
+  reviewNote: { type: String, default: '' },
+  reviewedAt: { type: Date, default: null }
+}, { timestamps: true });
+
+const Guardian = mongoose.model('Guardian', guardianSchema);
+const PupilGuardian = mongoose.model('PupilGuardian', pupilGuardianSchema);
+const CorrectionRequest = mongoose.model('CorrectionRequest', correctionRequestSchema);
 const SchoolSetting = mongoose.model('SchoolSetting', schoolSettingSchema);
 
 module.exports = {
@@ -120,5 +170,8 @@ module.exports = {
   Notification,
   AuditEntry,
   Session,
-  SchoolSetting
+  SchoolSetting,
+  Guardian,
+  PupilGuardian,
+  CorrectionRequest
 };

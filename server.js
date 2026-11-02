@@ -7,7 +7,19 @@ const path = require('path');
 const { parse } = require('csv-parse/sync');
 const XLSX = require('xlsx');
 
-const { User, Pupil, PickupRequest, AttendanceEvent, Notification, AuditEntry, Session, SchoolSetting } = require('./models');
+const {
+  User,
+  Pupil,
+  PickupRequest,
+  AttendanceEvent,
+  Notification,
+  AuditEntry,
+  Session,
+  SchoolSetting,
+  Guardian,
+  PupilGuardian,
+  CorrectionRequest
+} = require('./models');
 const {
   DEMO_EMAIL,
   DEMO_PASSWORD,
@@ -212,13 +224,22 @@ function getUsersJson(userDocs) {
 app.get('/api/me', async (req, res) => {
   try {
     const user = await getSessionUser(req);
+    if (!user) {
+      return res.json({ user: null });
+    }
+    let guardianData = null;
+    if (user.role === 'guardian' && user.guardianId) {
+      guardianData = await Guardian.findOne({ id: user.guardianId });
+    }
     res.json({
-      user: user ? {
+      user: {
         id: user._id.toString(),
         email: user.email,
         name: user.name,
-        role: user.role
-      } : null
+        role: user.role,
+        guardianId: user.guardianId || null,
+        guardianStatus: guardianData ? guardianData.status : null
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -254,13 +275,14 @@ app.post('/api/login', async (req, res) => {
       sameSite: 'strict'
     });
 
-    const state = await getStateJson();
+    const state = user.role === 'guardian' ? null : await getStateJson();
     res.json({
       user: {
         id: user._id.toString(),
         email: user.email,
         name: user.name,
-        role: user.role
+        role: user.role,
+        guardianId: user.guardianId || null
       },
       state
     });
@@ -421,18 +443,73 @@ app.post('/api/pupils', requireAuth(['admin', 'manager']), async (req, res) => {
 
     const colors = ["rose", "mint", "sand", "blue", "violet"];
     const initials = name.split(/\s+/).slice(0, 2).map(x => x[0]).join('').toUpperCase();
+    const guardianEmail = String(req.body.guardianEmail || '').trim().toLowerCase();
+    const guardianPhone = String(req.body.guardianPhone || '+1 555-0100').trim();
+    const preferredChannel = String(req.body.preferredChannel || 'sms').toLowerCase();
 
     await Pupil.create({
       id: pid,
       name,
       className,
       guardian,
+      guardianPhone,
+      guardianEmail,
+      preferredChannel: ['sms', 'whatsapp', 'push', 'email'].includes(preferredChannel) ? preferredChannel : 'sms',
       initials,
       color: colors[Math.floor(Date.now() / 1000) % colors.length],
       photo: '♙',
       active: true,
       collectors: []
     });
+
+    // Optionally auto-invite or link guardian if inviteGuardian flag is present
+    let inviteData = null;
+    if (req.body.inviteGuardian) {
+      const verifiedContactMethod = req.body.verifiedContactMethod === 'email' ? 'email' : 'sms';
+      const guardianId = 'GD-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+      const inviteToken = crypto.randomBytes(24).toString('base64url');
+      const verificationCode = String(Math.floor(100000 + Math.random() * 900000)); // 6-digit OTP
+
+      const newGuardian = await Guardian.create({
+        id: guardianId,
+        name: guardian,
+        email: guardianEmail,
+        phone: guardianPhone,
+        verifiedContactMethod,
+        verificationCode,
+        inviteToken,
+        status: 'invited',
+        preferredChannels: [preferredChannel]
+      });
+
+      await PupilGuardian.create({
+        id: 'PG-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+        pupilId: pid,
+        guardianId: guardianId,
+        relationship: req.body.relationship || 'Parent',
+        isLegalGuardian: req.body.isLegalGuardian !== undefined ? Boolean(req.body.isLegalGuardian) : true,
+        status: 'pending_verification',
+        legalStatusApprovedBySchool: true,
+        approvedBySchoolAt: new Date(),
+        approvedByStaff: req.user.name
+      });
+
+      await AuditEntry.create({
+        userId: req.user._id,
+        action: 'invite_guardian',
+        objectType: 'guardian',
+        objectId: guardianId,
+        reason: `Invited via ${verifiedContactMethod} for pupil ${pid}`,
+        createdAt: new Date()
+      });
+
+      inviteData = {
+        guardianId,
+        inviteToken,
+        verificationCode,
+        verifiedContactMethod
+      };
+    }
 
     await AuditEntry.create({
       userId: req.user._id,
@@ -443,7 +520,86 @@ app.post('/api/pupils', requireAuth(['admin', 'manager']), async (req, res) => {
     });
 
     const state = await getStateJson();
-    res.status(201).json({ ok: true, state });
+    res.status(201).json({ ok: true, state, invite: inviteData });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Explicit Guardian Invite by School Staff
+app.post('/api/guardians/invite', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pupilId = String(req.body.pupilId || '').trim().toUpperCase();
+    const name = String(req.body.name || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const phone = String(req.body.phone || '').trim();
+    const verifiedContactMethod = req.body.verifiedContactMethod === 'email' ? 'email' : 'sms';
+    const relationship = String(req.body.relationship || 'Parent').trim();
+    const isLegalGuardian = req.body.isLegalGuardian !== undefined ? Boolean(req.body.isLegalGuardian) : true;
+
+    if (!pupilId || !name) {
+      return res.status(400).json({ error: 'Pupil ID and guardian name are required.' });
+    }
+    if (verifiedContactMethod === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: 'Valid email required for email contact method.' });
+    }
+    if (verifiedContactMethod === 'sms' && !phone) {
+      return res.status(400).json({ error: 'Phone number required for SMS contact method.' });
+    }
+
+    const pupil = await Pupil.findOne({ id: pupilId, active: true });
+    if (!pupil) {
+      return res.status(404).json({ error: 'Pupil not found.' });
+    }
+
+    const guardianId = 'GD-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+    const inviteToken = crypto.randomBytes(24).toString('base64url');
+    const verificationCode = String(Math.floor(100000 + Math.random() * 900000));
+
+    const guardianDoc = await Guardian.create({
+      id: guardianId,
+      name,
+      email,
+      phone,
+      verifiedContactMethod,
+      verificationCode,
+      inviteToken,
+      status: 'invited',
+      preferredChannels: [verifiedContactMethod]
+    });
+
+    const linkDoc = await PupilGuardian.create({
+      id: 'PG-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+      pupilId,
+      guardianId,
+      relationship,
+      isLegalGuardian,
+      status: 'pending_verification',
+      legalStatusApprovedBySchool: true,
+      approvedBySchoolAt: new Date(),
+      approvedByStaff: req.user.name
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'invite_guardian',
+      objectType: 'guardian',
+      objectId: guardianId,
+      reason: `Method=${verifiedContactMethod}; Pupil=${pupilId}; LegalGuardian=${isLegalGuardian}`,
+      createdAt: new Date()
+    });
+
+    res.status(201).json({
+      ok: true,
+      invite: {
+        guardianId: guardianDoc.id,
+        inviteToken,
+        verificationCode,
+        verifiedContactMethod,
+        targetContact: verifiedContactMethod === 'email' ? email : phone,
+        pupilId
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -997,6 +1153,497 @@ app.post('/api/import/commit', requireAuth(['admin', 'manager']), async (req, re
     if (err.code === 11000) {
       return res.status(409).json({ error: 'A pupil ID now exists in Gatewise. Preview the roster again and resolve duplicate IDs.' });
     }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// Guardian Onboarding & Portal Endpoints
+// -------------------------------------------------------------
+
+// 1. Guardian proves control of contact channel (e.g. OTP verification code)
+app.post('/api/guardian/verify-channel', async (req, res) => {
+  try {
+    const inviteToken = String(req.body.inviteToken || '').trim();
+    const verificationCode = String(req.body.verificationCode || '').trim();
+
+    if (!inviteToken || !verificationCode) {
+      return res.status(400).json({ error: 'Invite token and verification code are required.' });
+    }
+
+    const guardian = await Guardian.findOne({ inviteToken });
+    if (!guardian) {
+      return res.status(404).json({ error: 'Invalid or expired invitation token.' });
+    }
+
+    if (guardian.verificationCode !== verificationCode) {
+      return res.status(400).json({ error: 'Invalid verification code. Please check your contact channel.' });
+    }
+
+    guardian.channelVerified = true;
+    guardian.channelVerifiedAt = new Date();
+    await guardian.save();
+
+    await AuditEntry.create({
+      action: 'guardian_verify_channel',
+      objectType: 'guardian',
+      objectId: guardian.id,
+      reason: `Channel verified via ${guardian.verifiedContactMethod}`,
+      createdAt: new Date()
+    });
+
+    res.json({
+      ok: true,
+      message: `Control of ${guardian.verifiedContactMethod.toUpperCase()} successfully proven.`,
+      guardian: {
+        id: guardian.id,
+        name: guardian.name,
+        verifiedContactMethod: guardian.verifiedContactMethod,
+        channelVerified: true,
+        privacyNoticeAccepted: guardian.privacyNoticeAccepted,
+        consentAccepted: guardian.consentAccepted
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. Guardian accepts privacy notice & consent/acknowledgment flow and sets password
+app.post('/api/guardian/accept-consent', async (req, res) => {
+  try {
+    const inviteToken = String(req.body.inviteToken || '').trim();
+    const acceptPrivacyNotice = Boolean(req.body.acceptPrivacyNotice);
+    const acceptConsent = Boolean(req.body.acceptConsent);
+    const password = String(req.body.password || '');
+    const preferredChannels = Array.isArray(req.body.preferredChannels) && req.body.preferredChannels.length > 0
+      ? req.body.preferredChannels
+      : ['sms'];
+
+    if (!inviteToken) {
+      return res.status(400).json({ error: 'Invite token is required.' });
+    }
+    if (!acceptPrivacyNotice) {
+      return res.status(400).json({ error: "You must accept the school's privacy notice to proceed." });
+    }
+    if (!acceptConsent) {
+      return res.status(400).json({ error: 'You must provide statutory consent/acknowledgment for school arrival & dismissal notifications.' });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+
+    const guardian = await Guardian.findOne({ inviteToken });
+    if (!guardian) {
+      return res.status(404).json({ error: 'Invalid invitation token.' });
+    }
+    if (!guardian.channelVerified) {
+      return res.status(400).json({ error: 'You must prove control of your contact channel before completing onboarding.' });
+    }
+
+    guardian.privacyNoticeAccepted = true;
+    guardian.privacyNoticeVersion = '2026.1';
+    guardian.privacyAcceptedAt = new Date();
+    guardian.consentAccepted = true;
+    guardian.consentAcceptedAt = new Date();
+    guardian.status = 'active';
+    guardian.preferredChannels = preferredChannels;
+
+    // Create User record for guardian sign-in
+    const userEmail = guardian.email || `${guardian.id.toLowerCase()}@guardian.northfield.school`;
+    let user = await User.findOne({ email: userEmail });
+    const { salt, hash } = passwordHash(password);
+
+    if (user) {
+      user.name = guardian.name;
+      user.role = 'guardian';
+      user.salt = salt;
+      user.passwordHash = hash;
+      user.active = true;
+      user.guardianId = guardian.id;
+      await user.save();
+    } else {
+      user = await User.create({
+        email: userEmail,
+        name: guardian.name,
+        role: 'guardian',
+        salt,
+        passwordHash: hash,
+        active: true,
+        guardianId: guardian.id
+      });
+    }
+
+    guardian.userId = user._id;
+    await guardian.save();
+
+    // Activate linked pupil-guardian relations
+    await PupilGuardian.updateMany(
+      { guardianId: guardian.id, status: 'pending_verification' },
+      { $set: { status: 'active' } }
+    );
+
+    // Create session cookie so guardian is immediately signed in
+    const token = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expiry = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
+
+    await Session.create({
+      tokenHash,
+      userId: user._id,
+      expiresAt: expiry,
+      createdAt: Math.floor(Date.now() / 1000)
+    });
+
+    res.cookie('gw_session', token, {
+      path: '/',
+      maxAge: SESSION_SECONDS * 1000,
+      httpOnly: true,
+      sameSite: 'strict'
+    });
+
+    await AuditEntry.create({
+      userId: user._id,
+      action: 'guardian_consent_accepted',
+      objectType: 'guardian',
+      objectId: guardian.id,
+      reason: 'Accepted privacy notice v2026.1 & notification consent; account activated',
+      createdAt: new Date()
+    });
+
+    res.json({
+      ok: true,
+      message: 'Onboarding complete. Welcome to the Northfield Guardian Portal.',
+      guardian: {
+        id: guardian.id,
+        name: guardian.name,
+        status: guardian.status,
+        preferredChannels: guardian.preferredChannels
+      },
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        guardianId: guardian.id
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Helper to get guardian-scoped data
+async function getGuardianPortalData(guardianId) {
+  const guardian = await Guardian.findOne({ id: guardianId });
+  if (!guardian) throw new Error('Guardian profile not found.');
+
+  // Find ONLY pupils linked to this guardian
+  const links = await PupilGuardian.find({ guardianId, status: { $ne: 'revoked' } });
+  const linkedPupilIds = links.map(l => l.pupilId);
+
+  const pupilDocs = await Pupil.find({ id: { $in: linkedPupilIds }, active: true });
+  const pupils = pupilDocs.map(p => {
+    const link = links.find(l => l.pupilId === p.id);
+    const activeCollectors = (p.collectors || [])
+      .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
+      .map(c => ({ id: c.id, name: c.name, relation: c.relation, until: c.until }));
+
+    return {
+      id: p.id,
+      name: p.name,
+      className: p.className,
+      photo: p.photo,
+      initials: p.initials,
+      color: p.color,
+      relationship: link ? link.relationship : 'Parent',
+      isLegalGuardian: link ? Boolean(link.isLegalGuardian) : true,
+      legalStatusApprovedBySchool: link ? Boolean(link.legalStatusApprovedBySchool) : true,
+      collectors: activeCollectors
+    };
+  });
+
+  // Recent attendance events ONLY for linked pupils
+  const events = await AttendanceEvent.find({ pupilId: { $in: linkedPupilIds } })
+    .sort({ createdAt: -1 })
+    .limit(50);
+
+  // Correction / contact requests submitted by this guardian
+  const correctionRequests = await CorrectionRequest.find({ guardianId }).sort({ createdAt: -1 });
+
+  return {
+    guardian: {
+      id: guardian.id,
+      name: guardian.name,
+      email: guardian.email,
+      phone: guardian.phone,
+      verifiedContactMethod: guardian.verifiedContactMethod,
+      preferredChannels: guardian.preferredChannels || ['sms'],
+      status: guardian.status
+    },
+    pupils,
+    events: events.map(e => ({
+      id: e.id,
+      pupilId: e.pupilId,
+      type: e.type,
+      time: e.time,
+      date: e.date,
+      collector: e.collector,
+      verification: e.verification
+    })),
+    correctionRequests: correctionRequests.map(c => ({
+      id: c.id,
+      pupilId: c.pupilId,
+      type: c.type,
+      subject: c.subject,
+      message: c.message,
+      status: c.status,
+      reviewNote: c.reviewNote,
+      createdAt: c.createdAt
+    }))
+  };
+}
+
+// 3. Guardian portal: Guardian sees ONLY linked pupils and timeline
+app.get('/api/guardian/me', requireAuth(['guardian', 'admin']), async (req, res) => {
+  try {
+    let guardianId = req.user.guardianId;
+    if (!guardianId && req.user.role === 'admin' && req.query.guardianId) {
+      guardianId = String(req.query.guardianId);
+    }
+    if (!guardianId) {
+      return res.status(403).json({ error: 'No guardian profile associated with this account.' });
+    }
+
+    const portalData = await getGuardianPortalData(guardianId);
+    res.json(portalData);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. Guardian sets notification preferences
+app.put('/api/guardian/preferences', requireAuth(['guardian']), async (req, res) => {
+  try {
+    const guardianId = req.user.guardianId;
+    const channels = Array.isArray(req.body.channels) ? req.body.channels : [];
+    const validChannels = ['sms', 'whatsapp', 'push', 'email'];
+    const filtered = channels.filter(c => validChannels.includes(String(c).toLowerCase()));
+
+    if (filtered.length === 0) {
+      return res.status(400).json({ error: 'Select at least one notification channel (SMS, WhatsApp, Push, or Email).' });
+    }
+
+    const guardian = await Guardian.findOne({ id: guardianId });
+    if (!guardian) {
+      return res.status(404).json({ error: 'Guardian profile not found.' });
+    }
+
+    guardian.preferredChannels = filtered;
+    await guardian.save();
+
+    // Also synchronize pupil preferredChannel for linked pupils
+    const links = await PupilGuardian.find({ guardianId });
+    const pupilIds = links.map(l => l.pupilId);
+    if (pupilIds.length > 0) {
+      await Pupil.updateMany(
+        { id: { $in: pupilIds } },
+        { $set: { preferredChannel: filtered[0].toLowerCase() } }
+      );
+    }
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_notification_preferences',
+      objectType: 'guardian',
+      objectId: guardianId,
+      reason: `Channels=${filtered.join(',')}`,
+      createdAt: new Date()
+    });
+
+    res.json({
+      ok: true,
+      message: 'Notification preferences updated successfully.',
+      preferredChannels: guardian.preferredChannels
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. Guardian requests corrections or contacts the school
+// Note: Guardian app CANNOT edit legal guardian status or pickup permissions directly.
+// Such requests are submitted as requests for school approval.
+app.post('/api/guardian/correction-request', requireAuth(['guardian']), async (req, res) => {
+  try {
+    const guardianId = req.user.guardianId;
+    const pupilId = String(req.body.pupilId || '').trim().toUpperCase();
+    const type = String(req.body.type || 'record_correction');
+    const subject = String(req.body.subject || '').trim();
+    const message = String(req.body.message || '').trim();
+    const proposedChanges = req.body.proposedChanges || {};
+
+    if (!pupilId || !subject || !message) {
+      return res.status(400).json({ error: 'Pupil, subject, and message are required.' });
+    }
+
+    // Verify guardian is linked to this pupil
+    const link = await PupilGuardian.findOne({ guardianId, pupilId, status: { $ne: 'revoked' } });
+    if (!link) {
+      return res.status(403).json({ error: 'You are only authorized to request corrections for your linked pupil(s).' });
+    }
+
+    const reqId = 'CR-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+    const newRequest = await CorrectionRequest.create({
+      id: reqId,
+      guardianId,
+      pupilId,
+      type: ['record_correction', 'pickup_permission_request', 'legal_status_request', 'contact_school'].includes(type) ? type : 'record_correction',
+      subject,
+      message,
+      proposedChanges,
+      status: 'pending'
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'submit_correction_request',
+      objectType: 'correction_request',
+      objectId: reqId,
+      reason: `Type=${newRequest.type}; Pupil=${pupilId}; Subject=${subject}`,
+      createdAt: new Date()
+    });
+
+    res.status(201).json({
+      ok: true,
+      message: 'Request submitted to school administration for review and approval.',
+      request: newRequest
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Block guardian from attempting direct modification of legal guardian status or pickup permissions
+app.all(['/api/guardian/legal-status', '/api/guardian/pickup-permissions'], (req, res) => {
+  res.status(403).json({
+    error: 'The school—not the guardian app—approves changes to legal guardian status and pickup permissions. Please submit a correction or contact request.'
+  });
+});
+
+// 6. School Admin reviews correction requests and manages legal guardian status
+app.get('/api/admin/corrections', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const requests = await CorrectionRequest.find().sort({ createdAt: -1 });
+    res.json({ requests });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/corrections/:id', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const id = req.params.id;
+    const action = req.body.action; // 'approve' or 'reject'
+    const reviewNote = String(req.body.reviewNote || '').trim();
+
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ error: 'Choose approve or reject.' });
+    }
+
+    const correctionReq = await CorrectionRequest.findOne({ id, status: 'pending' });
+    if (!correctionReq) {
+      return res.status(404).json({ error: 'Correction request not found or already processed.' });
+    }
+
+    correctionReq.status = action === 'approve' ? 'approved' : 'rejected';
+    correctionReq.reviewedBy = req.user.name;
+    correctionReq.reviewNote = reviewNote;
+    correctionReq.reviewedAt = new Date();
+    await correctionReq.save();
+
+    // If approved and includes proposed legal guardian status change
+    if (action === 'approve' && correctionReq.type === 'legal_status_request') {
+      const isLegal = Boolean(correctionReq.proposedChanges?.isLegalGuardian);
+      await PupilGuardian.updateOne(
+        { pupilId: correctionReq.pupilId, guardianId: correctionReq.guardianId },
+        {
+          $set: {
+            isLegalGuardian: isLegal,
+            legalStatusApprovedBySchool: true,
+            approvedBySchoolAt: new Date(),
+            approvedByStaff: req.user.name
+          }
+        }
+      );
+    }
+
+    // If approved and includes pickup permission change
+    if (action === 'approve' && correctionReq.type === 'pickup_permission_request' && correctionReq.proposedChanges?.collectorName) {
+      const pupil = await Pupil.findOne({ id: correctionReq.pupilId });
+      if (pupil) {
+        const nextId = await getNextCollectorId(pupil);
+        pupil.collectors.push({
+          id: nextId,
+          name: correctionReq.proposedChanges.collectorName,
+          relation: correctionReq.proposedChanges.relation || 'Approved Contact',
+          until: correctionReq.proposedChanges.until || 'Ongoing',
+          active: true
+        });
+        await pupil.save();
+      }
+    }
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: `review_correction_${action}`,
+      objectType: 'correction_request',
+      objectId: id,
+      reason: `Staff=${req.user.name}; Note=${reviewNote}`,
+      createdAt: new Date()
+    });
+
+    res.json({ ok: true, request: correctionReq });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// School explicitly updates legal guardian status
+app.post('/api/pupils/:pupilId/guardians/:guardianId/legal-status', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { pupilId, guardianId } = req.params;
+    const { isLegalGuardian, reason } = req.body;
+
+    if (isLegalGuardian === undefined || typeof isLegalGuardian !== 'boolean') {
+      return res.status(400).json({ error: 'isLegalGuardian must be a boolean.' });
+    }
+    if (!reason) {
+      return res.status(400).json({ error: 'A preserved audit reason is required when modifying legal guardian status.' });
+    }
+
+    const link = await PupilGuardian.findOne({ pupilId: pupilId.toUpperCase(), guardianId: guardianId.toUpperCase() });
+    if (!link) {
+      return res.status(404).json({ error: 'Pupil-guardian link not found.' });
+    }
+
+    link.isLegalGuardian = isLegalGuardian;
+    link.legalStatusApprovedBySchool = true;
+    link.approvedBySchoolAt = new Date();
+    link.approvedByStaff = req.user.name;
+    await link.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_legal_guardian_status',
+      objectType: 'pupil_guardian',
+      objectId: `${pupilId}:${guardianId}`,
+      reason: `LegalGuardian=${isLegalGuardian}; Staff=${req.user.name}; Reason=${reason}`,
+      createdAt: new Date()
+    });
+
+    res.json({ ok: true, link });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
