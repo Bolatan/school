@@ -397,6 +397,62 @@ class Handler(BaseHTTPRequestHandler):
         if path=="/api/state":
             if not self.require_user(): return
             with db() as c: return self.send_json(200,state_json(c))
+        if path=="/api/reports/exceptions":
+            if not self.require_user(): return
+            today_str = now_local().date().isoformat()
+            with db() as c:
+                rows = c.execute("""
+                    SELECT e.*, p.name AS pupil_name, p.class_name
+                    FROM events e
+                    LEFT JOIN pupils p ON e.pupil_id = p.id
+                    WHERE e.manual_entry = 1 OR e.reason IN ('card_missing', 'card_unreadable') OR e.source IN ('Manual entry', 'Manual ID lookup') OR e.type = 'authorized_exception'
+                    ORDER BY e.created_ms DESC
+                """).fetchall()
+                report_items = []
+                today_missing = 0
+                today_unreadable = 0
+                today_manual = 0
+                today_authorized = 0
+                for r in rows:
+                    is_today = r["event_date"] == today_str
+                    reason = r["reason"] if "reason" in r.keys() else ""
+                    m_entry = bool(r["manual_entry"]) or reason in ("card_missing", "card_unreadable") or r["source"] in ("Manual entry", "Manual ID lookup")
+                    if is_today:
+                        if reason == "card_missing": today_missing += 1
+                        elif reason == "card_unreadable": today_unreadable += 1
+                        if m_entry: today_manual += 1
+                        if r["type"] == "authorized_exception": today_authorized += 1
+                    report_items.append({
+                        "id": r["id"],
+                        "pupilId": r["pupil_id"],
+                        "pupilName": r["pupil_name"] or "Unknown pupil",
+                        "className": r["class_name"] or "",
+                        "type": r["type"],
+                        "time": r["event_time"],
+                        "date": r["event_date"],
+                        "createdAt": r["created_ms"],
+                        "staff": r["staff"],
+                        "source": r["source"],
+                        "reason": reason,
+                        "manualEntry": m_entry,
+                        "collector": r["collector"],
+                        "verification": r["verification"],
+                        "device": r["device"] if "device" in r.keys() else "Primary Gate Terminal",
+                        "campus": r["campus"] if "campus" in r.keys() else "Primary campus",
+                        "gate": r["gate"] if "gate" in r.keys() else "Main gate",
+                        "syncStatus": r["sync_status"] if "sync_status" in r.keys() else "synced"
+                    })
+                return self.send_json(200, {
+                    "summary": {
+                        "totalExceptions": len(report_items),
+                        "todayExceptions": len([e for e in report_items if e["date"] == today_str]),
+                        "todayMissingCard": today_missing,
+                        "todayUnreadableQr": today_unreadable,
+                        "todayManualEntries": today_manual,
+                        "todayAuthorizedExceptions": today_authorized
+                    },
+                    "exceptions": report_items
+                })
         if path=="/api/users":
             if not self.require_user(("admin",)):return
             with db() as c:return self.send_json(200,{"users":users_json(c)})

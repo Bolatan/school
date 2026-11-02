@@ -27,3 +27,10 @@
 .offline-toolbar{display:flex;align-items:center;gap:14px;background:#fdfcf9;border:1px solid #f3ede2;border-radius:8px;padding:8px 12px;margin-bottom:14px;font-size:10px;color:#555a6e}
 .offline-toolbar-item{display:flex;align-items:center;gap:6px;cursor:pointer;font-weight:600}
 .offline-warning-box{background:#fef2f2!important;border:1px solid #fecaca!important}
+
+.qr-security-warning{background:#fdf2f2;border:1px solid #fbd5d5;border-left:4px solid #e02424;border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:10px;color:#9b1c1c;line-height:1.4;display:flex;align-items:center;gap:8px}
+.qr-security-warning strong{color:#771d1d}
+.manual-entry-badge{background:#fff3cd;color:#856404;border:1px solid #ffeeba;font-weight:700;padding:2px 6px;border-radius:4px;font-size:8px;display:inline-block;letter-spacing:.3px}
+.exception-report-table{width:100%;border-collapse:collapse;margin-top:10px;font-size:9px}
+.exception-report-table th{background:#fafbfe;border-bottom:1px solid #eceef4;padding:8px;text-align:left;color:#7e8395}
+.exception-report-table td{border-bottom:1px solid #f2f4f8;padding:8px;color:#4f5367}
