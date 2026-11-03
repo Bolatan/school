@@ -160,11 +160,26 @@ const correctionRequestSchema = new mongoose.Schema({
 const Guardian = mongoose.model('Guardian', guardianSchema);
 const PupilGuardian = mongoose.model('PupilGuardian', pupilGuardianSchema);
 const CorrectionRequest = mongoose.model('CorrectionRequest', correctionRequestSchema);
+const cardSchema = new mongoose.Schema({
+  cardId: { type: String, required: true, unique: true },
+  pupilId: { type: String, required: true, ref: 'Pupil', index: true },
+  cardToken: { type: String, required: true, unique: true, index: true },
+  tokenHash: { type: String, required: true, index: true },
+  status: { type: String, enum: ['active', 'revoked'], default: 'active' },
+  issuedAt: { type: Date, default: Date.now },
+  revokedAt: { type: Date, default: null },
+  issuedBy: { type: String, default: 'Amara Okafor' },
+  revokedBy: { type: String, default: null },
+  revokeReason: { type: String, default: '' }
+}, { timestamps: true });
+
+const Card = mongoose.model('Card', cardSchema);
 const SchoolSetting = mongoose.model('SchoolSetting', schoolSettingSchema);
 
 module.exports = {
   User,
   Pupil,
+  Card,
   PickupRequest,
   AttendanceEvent,
   Notification,

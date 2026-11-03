@@ -10,6 +10,7 @@ const XLSX = require('xlsx');
 const {
   User,
   Pupil,
+  Card,
   PickupRequest,
   AttendanceEvent,
   Notification,
@@ -120,10 +121,15 @@ async function getStateJson() {
   settingsDocs.forEach(s => { schoolSettingsMap[s.key] = s.val; });
 
   const pupilDocs = await Pupil.find({ active: true }).sort({ name: 1 });
+  const activeCards = await Card.find({ status: 'active' });
+  const cardMap = {};
+  activeCards.forEach(c => { cardMap[c.pupilId] = c; });
+
   const pupils = pupilDocs.map(p => {
     const activeCollectors = (p.collectors || [])
       .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
       .map(c => ({ id: c.id, name: c.name, relation: c.relation, until: c.until }));
+    const pCard = cardMap[p.id];
     return {
       id: p.id,
       name: p.name,
@@ -135,6 +141,8 @@ async function getStateJson() {
       initials: p.initials,
       color: p.color,
       photo: p.photo,
+      cardToken: pCard ? pCard.cardToken : null,
+      cardId: pCard ? pCard.cardId : null,
       collectors: activeCollectors
     };
   });
@@ -206,6 +214,17 @@ async function getStateJson() {
       allowOfflineStalePickupPolicy: schoolSettingsMap.allowOfflineStalePickupPolicy !== undefined ? Boolean(schoolSettingsMap.allowOfflineStalePickupPolicy) : false,
       totalPupils: 248
     },
+    cards: (await Card.find().sort({ createdAt: -1 })).map(c => ({
+      cardId: c.cardId,
+      pupilId: c.pupilId,
+      cardToken: c.cardToken,
+      status: c.status,
+      issuedAt: c.issuedAt,
+      revokedAt: c.revokedAt,
+      issuedBy: c.issuedBy,
+      revokedBy: c.revokedBy,
+      revokeReason: c.revokeReason
+    })),
     notificationsStatus: "active"
   };
 }
@@ -510,6 +529,19 @@ app.post('/api/pupils', requireAuth(['admin', 'manager']), async (req, res) => {
         verifiedContactMethod
       };
     }
+
+    // Create an active card for newly created pupil
+    const rawToken = 'GW-' + crypto.randomBytes(12).toString('hex').toUpperCase();
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    await Card.create({
+      cardId: `CARD-${pid}`,
+      pupilId: pid,
+      cardToken: rawToken,
+      tokenHash,
+      status: 'active',
+      issuedAt: new Date(),
+      issuedBy: req.user.name
+    });
 
     await AuditEntry.create({
       userId: req.user._id,
@@ -1136,6 +1168,18 @@ app.post('/api/import/commit', requireAuth(['admin', 'manager']), async (req, re
         active: true,
         collectors: []
       });
+
+      const rawToken = 'GW-' + crypto.randomBytes(12).toString('hex').toUpperCase();
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      await Card.create({
+        cardId: `CARD-${r.pupil_id}`,
+        pupilId: r.pupil_id,
+        cardToken: rawToken,
+        tokenHash,
+        status: 'active',
+        issuedAt: new Date(),
+        issuedBy: req.user.name
+      });
     }
 
     await AuditEntry.create({
@@ -1643,6 +1687,318 @@ app.post('/api/pupils/:pupilId/guardians/:guardianId/legal-status', requireAuth(
     });
 
     res.json({ ok: true, link });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// Card Scanning & Card Lifecycle (Reissue, Revoke, Artwork)
+// -------------------------------------------------------------
+
+// POST /api/cards/scan: Validate scanned QR code and return unambiguous result
+app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const rawQr = String(req.body.code || req.body.cardToken || '').trim();
+    const mode = String(req.body.mode || 'arrival').toLowerCase(); // 'arrival' or 'departure'
+    const session = String(req.body.session || '').trim(); // e.g., 'Morning Arrival', 'Afternoon Dismissal'
+
+    if (!rawQr) {
+      return res.status(400).json({
+        result: 'unknown_code',
+        message: 'No scan code provided.'
+      });
+    }
+
+    // Clean prefix if provided (e.g., 'GW:' or 'GW-')
+    const token = rawQr.replace(/^GW:/i, '').trim();
+
+    // Check if token matches a Card (active or revoked) or legacy fallback to pupil ID
+    let cardDoc = await Card.findOne({ cardToken: token });
+    let pupil = null;
+
+    if (cardDoc) {
+      pupil = await Pupil.findOne({ id: cardDoc.pupilId, active: true });
+    } else {
+      // Check if raw token is directly a pupil ID for backward compatibility
+      pupil = await Pupil.findOne({ id: token.toUpperCase(), active: true });
+      if (pupil) {
+        cardDoc = await Card.findOne({ pupilId: pupil.id, status: 'active' });
+      }
+    }
+
+    if (!pupil && !cardDoc) {
+      return res.status(404).json({
+        result: 'unknown_code',
+        message: 'QR code was not recognized. Code is unknown in the school database.'
+      });
+    }
+
+    // Check if card is revoked
+    if (cardDoc && cardDoc.status === 'revoked') {
+      return res.status(403).json({
+        result: 'revoked_card',
+        message: `This card was revoked on ${cardDoc.revokedAt ? formatDate(new Date(cardDoc.revokedAt)) : 'record'} (${cardDoc.revokeReason || 'Revoked by school administrator'}). Please reissue a replacement card.`,
+        cardId: cardDoc.cardId,
+        pupilId: cardDoc.pupilId
+      });
+    }
+
+    if (!pupil) {
+      return res.status(404).json({
+        result: 'unknown_code',
+        message: 'Pupil record associated with this card is inactive or not found.'
+      });
+    }
+
+    // Session validation:
+    // If session is provided, verify mode matches session expectation:
+    // E.g., 'Morning Arrival' only allows arrival, 'Afternoon Dismissal' only allows departure.
+    if (session) {
+      const sLower = session.toLowerCase();
+      if (sLower.includes('arrival') && mode === 'departure') {
+        return res.status(400).json({
+          result: 'wrong_session',
+          message: `Wrong session: Current session is set to "${session}", which does not accept departure scans.`,
+          currentSession: session,
+          expectedMode: 'arrival'
+        });
+      }
+      if (sLower.includes('dismissal') && mode === 'arrival') {
+        return res.status(400).json({
+          result: 'wrong_session',
+          message: `Wrong session: Current session is set to "${session}", which does not accept arrival scans.`,
+          currentSession: session,
+          expectedMode: 'departure'
+        });
+      }
+    }
+
+    // Check already recorded status for today
+    const todayStr = formatDate(nowLocal());
+    const prevEvent = await AttendanceEvent.findOne({ pupilId: pupil.id, date: todayStr }).sort({ createdAt: -1 });
+
+    if (mode === 'arrival' && prevEvent && (prevEvent.type === 'arrival' || prevEvent.type === 'manual_arrival')) {
+      return res.status(409).json({
+        result: 'already_recorded',
+        message: `${pupil.name} already has an arrival recorded today at ${prevEvent.time}.`,
+        event: prevEvent,
+        pupil: {
+          id: pupil.id,
+          name: pupil.name,
+          className: pupil.className,
+          photo: pupil.photo,
+          initials: pupil.initials
+        }
+      });
+    }
+
+    if (mode === 'departure' && prevEvent && (prevEvent.type === 'departure' || prevEvent.type === 'manual_departure' || prevEvent.type === 'authorized_exception')) {
+      return res.status(409).json({
+        result: 'already_recorded',
+        message: `${pupil.name} already has a departure recorded today at ${prevEvent.time}.`,
+        event: prevEvent,
+        pupil: {
+          id: pupil.id,
+          name: pupil.name,
+          className: pupil.className,
+          photo: pupil.photo,
+          initials: pupil.initials
+        }
+      });
+    }
+
+    // Valid pupil scan ready for staff confirmation
+    const activeCollectors = (pupil.collectors || [])
+      .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
+      .map(c => ({ id: c.id, name: c.name, relation: c.relation, until: c.until }));
+
+    return res.json({
+      result: 'valid_pupil',
+      message: `Card verified for ${pupil.name}. Confirm identity before logging.`,
+      pupil: {
+        id: pupil.id,
+        name: pupil.name,
+        className: pupil.className,
+        guardian: pupil.guardian,
+        guardianPhone: pupil.guardianPhone,
+        preferredChannel: pupil.preferredChannel,
+        photo: pupil.photo,
+        initials: pupil.initials,
+        color: pupil.color,
+        cardId: cardDoc ? cardDoc.cardId : null,
+        cardToken: cardDoc ? cardDoc.cardToken : null,
+        collectors: activeCollectors
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/cards/reissue (Admin only): Reissues a new card with a fresh token; revokes prior card without mutating historical attendance records
+app.post('/api/cards/reissue', requireAuth(['admin']), async (req, res) => {
+  try {
+    const pupilId = String(req.body.pupilId || '').trim().toUpperCase();
+    const reason = String(req.body.reason || 'Card reissued by administrator').trim();
+
+    if (!pupilId) {
+      return res.status(400).json({ error: 'Pupil ID is required.' });
+    }
+
+    const pupil = await Pupil.findOne({ id: pupilId, active: true });
+    if (!pupil) {
+      return res.status(404).json({ error: 'Pupil not found.' });
+    }
+
+    // Revoke previous active card(s) without mutating historical attendance records
+    const previousCards = await Card.find({ pupilId, status: 'active' });
+    const now = new Date();
+    for (const oldCard of previousCards) {
+      oldCard.status = 'revoked';
+      oldCard.revokedAt = now;
+      oldCard.revokedBy = req.user.name;
+      oldCard.revokeReason = `Superseded by reissue: ${reason}`;
+      await oldCard.save();
+    }
+
+    // Generate fresh random non-PII token
+    const rawToken = 'GW-' + crypto.randomBytes(12).toString('hex').toUpperCase();
+    const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const newCardId = `CARD-${pupilId}-${Date.now().toString(36).toUpperCase()}`;
+
+    const newCard = await Card.create({
+      cardId: newCardId,
+      pupilId,
+      cardToken: rawToken,
+      tokenHash,
+      status: 'active',
+      issuedAt: now,
+      issuedBy: req.user.name
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'reissue_card',
+      objectType: 'card',
+      objectId: newCard.cardId,
+      reason: `Pupil=${pupilId}; PreviousRevoked=${previousCards.length}; Reason=${reason}`,
+      createdAt: now
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({
+      ok: true,
+      card: {
+        cardId: newCard.cardId,
+        pupilId: newCard.pupilId,
+        cardToken: newCard.cardToken,
+        status: newCard.status,
+        issuedAt: newCard.issuedAt,
+        issuedBy: newCard.issuedBy
+      },
+      state
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/cards/revoke (Admin only): Revokes a card token
+app.post('/api/cards/revoke', requireAuth(['admin']), async (req, res) => {
+  try {
+    const cardId = String(req.body.cardId || '').trim();
+    const pupilId = req.body.pupilId ? String(req.body.pupilId).trim().toUpperCase() : null;
+    const reason = String(req.body.reason || 'Card reported lost / stolen').trim();
+
+    let query = {};
+    if (cardId) query.cardId = cardId;
+    else if (pupilId) query = { pupilId, status: 'active' };
+    else return res.status(400).json({ error: 'Card ID or Pupil ID is required.' });
+
+    const card = await Card.findOne(query);
+    if (!card) {
+      return res.status(404).json({ error: 'Active card not found.' });
+    }
+
+    card.status = 'revoked';
+    card.revokedAt = new Date();
+    card.revokedBy = req.user.name;
+    card.revokeReason = reason;
+    await card.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'revoke_card',
+      objectType: 'card',
+      objectId: card.cardId,
+      reason: `Pupil=${card.pupilId}; Reason=${reason}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.json({
+      ok: true,
+      card: {
+        cardId: card.cardId,
+        pupilId: card.pupilId,
+        status: 'revoked',
+        revokedAt: card.revokedAt,
+        revokedBy: card.revokedBy,
+        revokeReason: card.revokeReason
+      },
+      state
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/cards/:pupilId/artwork: Generates printable / exportable PVC card artwork metadata & HTML
+app.get('/api/cards/:pupilId/artwork', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pupilId = String(req.params.pupilId).trim().toUpperCase();
+    const pupil = await Pupil.findOne({ id: pupilId, active: true });
+    if (!pupil) {
+      return res.status(404).json({ error: 'Pupil not found.' });
+    }
+
+    let card = await Card.findOne({ pupilId, status: 'active' });
+    if (!card) {
+      // Automatically issue one if none exists
+      const rawToken = 'GW-' + crypto.randomBytes(12).toString('hex').toUpperCase();
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      card = await Card.create({
+        cardId: `CARD-${pupilId}`,
+        pupilId,
+        cardToken: rawToken,
+        tokenHash,
+        status: 'active',
+        issuedAt: new Date(),
+        issuedBy: req.user.name
+      });
+    }
+
+    res.json({
+      ok: true,
+      artwork: {
+        schoolName: "Northfield Academy",
+        cardStandard: "CR80 PVC (85.6mm x 53.98mm)",
+        pupilId: pupil.id,
+        pupilName: pupil.name,
+        className: pupil.className,
+        photo: pupil.photo,
+        initials: pupil.initials,
+        color: pupil.color,
+        cardId: card.cardId,
+        cardToken: card.cardToken,
+        qrPayload: `GW:${card.cardToken}`,
+        status: card.status,
+        issuedAt: card.issuedAt,
+        issuedBy: card.issuedBy,
+        securityNotice: "Do not photograph, replicate, or copy QR code. Random revocable card token contains NO student PII."
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

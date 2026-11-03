@@ -8,6 +8,7 @@ const { app, seedInitialData } = require('./server');
 const {
   User,
   Pupil,
+  Card,
   PickupRequest,
   AttendanceEvent,
   AuditEntry,
@@ -1027,4 +1028,175 @@ test('Missing card & unreadable QR: manual entry marking, reason recording, and 
   assert.equal(depReport.reason, 'card_unreadable');
   assert.equal(depReport.collector, 'Dmitri Rostov');
   assert.equal(depReport.manualEntry, true);
+});
+
+test('Card scanning, unambiguous results, duplicate event prevention, card reissue, revoke, and artwork export', async () => {
+  const loginRes = await request
+    .post('/api/login')
+    .send({ email: DEMO_EMAIL, password: DEMO_PASSWORD });
+  const adminCookie = loginRes.headers['set-cookie'];
+
+  // 1. Create a dedicated pupil for testing card scanning
+  const createPupilRes = await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      id: 'NF-5501',
+      name: 'Elena Rostova',
+      className: 'Grade 4B',
+      guardian: 'Natalia Rostova',
+      guardianPhone: '+1 555-5501',
+      preferredChannel: 'sms',
+      collectors: [
+        { name: 'Natalia Rostova', relation: 'Mother', until: 'Ongoing' }
+      ]
+    });
+  assert.equal(createPupilRes.status, 201);
+
+  // Check that an active card was automatically created
+  const cardDoc = await Card.findOne({ pupilId: 'NF-5501', status: 'active' });
+  assert.ok(cardDoc);
+  assert.ok(cardDoc.cardToken.startsWith('GW-'));
+  const cardToken = cardDoc.cardToken;
+
+  // 2. Scan QR: Valid pupil in matching session
+  const validScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: `GW:${cardToken}`,
+      mode: 'arrival',
+      session: 'Morning Arrival'
+    });
+  assert.equal(validScanRes.status, 200);
+  assert.equal(validScanRes.body.result, 'valid_pupil');
+  assert.equal(validScanRes.body.pupil.id, 'NF-5501');
+  assert.equal(validScanRes.body.pupil.name, 'Elena Rostova');
+  assert.ok(validScanRes.body.pupil.photo);
+
+  // 3. Scan QR: Wrong session check
+  const wrongSessionRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: `GW:${cardToken}`,
+      mode: 'departure',
+      session: 'Morning Arrival (07:30 - 08:30)'
+    });
+  assert.equal(wrongSessionRes.status, 400);
+  assert.equal(wrongSessionRes.body.result, 'wrong_session');
+
+  // 4. Record Arrival and test Duplicate / Network retry prevention
+  const clientEventId = 'test_evt_5501_' + Date.now();
+  const arr1 = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      clientEventId,
+      pupilId: 'NF-5501',
+      type: 'arrival',
+      source: 'Card scan'
+    });
+  assert.equal(arr1.status, 201);
+  assert.equal(arr1.body.isDuplicate, false);
+
+  // Repeated tap / network retry with same clientEventId
+  const arrRetry = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      clientEventId,
+      pupilId: 'NF-5501',
+      type: 'arrival',
+      source: 'Card scan'
+    });
+  assert.equal(arrRetry.status, 200);
+  assert.equal(arrRetry.body.isDuplicate, true);
+  assert.equal(arrRetry.body.eventId, arr1.body.eventId);
+
+  // 5. Scan QR: Already recorded check
+  const alreadyRecRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: `GW:${cardToken}`,
+      mode: 'arrival',
+      session: 'Standard Day'
+    });
+  assert.equal(alreadyRecRes.status, 409);
+  assert.equal(alreadyRecRes.body.result, 'already_recorded');
+
+  // 6. Scan QR: Unknown code check
+  const unknownCodeRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: 'GW:NON_EXISTENT_TOKEN_99999',
+      mode: 'arrival'
+    });
+  assert.equal(unknownCodeRes.status, 404);
+  assert.equal(unknownCodeRes.body.result, 'unknown_code');
+
+  // 7. Card Artwork export / print metadata check
+  const artworkRes = await request
+    .get('/api/cards/NF-5501/artwork')
+    .set('Cookie', adminCookie);
+  assert.equal(artworkRes.status, 200);
+  assert.ok(artworkRes.body.ok);
+  assert.equal(artworkRes.body.artwork.pupilId, 'NF-5501');
+  assert.equal(artworkRes.body.artwork.pupilName, 'Elena Rostova');
+  assert.equal(artworkRes.body.artwork.cardToken, cardToken);
+  assert.ok(artworkRes.body.artwork.qrPayload.includes(cardToken));
+
+  // 8. Administrator Reissue Card
+  const reissueRes = await request
+    .post('/api/cards/reissue')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-5501',
+      reason: 'Physical card damaged'
+    });
+  assert.equal(reissueRes.status, 201);
+  assert.ok(reissueRes.body.card);
+  const newCardToken = reissueRes.body.card.cardToken;
+  assert.notEqual(newCardToken, cardToken);
+
+  // Verify prior card was revoked
+  const oldCard = await Card.findOne({ cardToken });
+  assert.equal(oldCard.status, 'revoked');
+  assert.ok(oldCard.revokedAt);
+
+  // Verify historical attendance event was NOT mutated
+  const existingArrEvent = await AttendanceEvent.findOne({ id: arr1.body.eventId });
+  assert.ok(existingArrEvent);
+  assert.equal(existingArrEvent.pupilId, 'NF-5501');
+
+  // 9. Scan with revoked card token -> returns revoked_card
+  const revokedScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: `GW:${cardToken}`,
+      mode: 'departure',
+      session: 'Afternoon Dismissal'
+    });
+  assert.equal(revokedScanRes.status, 403);
+  assert.equal(revokedScanRes.body.result, 'revoked_card');
+
+  // 10. Administrator Revoke Card
+  const revokeRes = await request
+    .post('/api/cards/revoke')
+    .set('Cookie', adminCookie)
+    .send({
+      cardId: reissueRes.body.card.cardId,
+      reason: 'Card reported stolen'
+    });
+  assert.equal(revokeRes.status, 200);
+  assert.equal(revokeRes.body.card.status, 'revoked');
+
+  // Verify audit log has reissue_card and revoke_card actions
+  const reissueAudit = await AuditEntry.findOne({ action: 'reissue_card', objectId: reissueRes.body.card.cardId });
+  assert.ok(reissueAudit);
+  const revokeAudit = await AuditEntry.findOne({ action: 'revoke_card', objectId: reissueRes.body.card.cardId });
+  assert.ok(revokeAudit);
 });

@@ -47,3 +47,16 @@
 .correction-status.pending{background:#fef3c7;color:#92400e}
 .correction-status.approved{background:#dcfce7;color:#15803d}
 .correction-status.rejected{background:#fee2e2;color:#b91c1c}
+
+.card-artwork-box{background:linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);color:white;border-radius:12px;padding:16px;box-shadow:0 10px 25px -5px rgba(0,0,0,0.3);position:relative;margin:12px 0}
+.card-artwork-box .card-header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid rgba(255,255,255,0.15);padding-bottom:10px;margin-bottom:12px}
+.card-artwork-box .card-body{display:flex;gap:14px;align-items:center}
+.card-artwork-box .card-footer{margin-top:12px;padding-top:8px;border-top:1px dashed rgba(255,255,255,0.15);font-size:8px;color:#cbd5e1;display:flex;justify-content:space-between;align-items:center}
+.card-qr-display{background:white;color:#1e1b4b;padding:8px 10px;border-radius:6px;font:700 13px monospace;letter-spacing:1px;text-align:center}
+@media print{
+  body * { visibility: hidden !important; }
+  .modal-backdrop, .modal, .card-artwork-box, .card-artwork-box * { visibility: visible !important; }
+  .modal-backdrop { position: absolute; left: 0; top: 0; background: none; }
+  .modal { box-shadow: none; border: none; padding: 0; width: 100%; }
+  .modal-actions, .modal-close, .modal-intro, h2 { display: none !important; }
+}

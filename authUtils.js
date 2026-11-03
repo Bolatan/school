@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { User, Pupil, PickupRequest, AttendanceEvent, Guardian, PupilGuardian, CorrectionRequest } = require('./models');
+const { User, Pupil, Card, PickupRequest, AttendanceEvent, Guardian, PupilGuardian, CorrectionRequest } = require('./models');
 
 const DEMO_EMAIL = 'admin@northfield.school';
 const DEMO_PASSWORD = 'GatewiseDemo!26';
@@ -117,6 +117,19 @@ async function seedInitialData() {
         photo,
         active: true,
         collectors: collectorsMap[id] || []
+      });
+
+      // Seed active PVC card with random, non-PII token
+      const rawToken = 'GW-' + crypto.randomBytes(12).toString('hex').toUpperCase();
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      await Card.create({
+        cardId: `CARD-${id}`,
+        pupilId: id,
+        cardToken: rawToken,
+        tokenHash,
+        status: 'active',
+        issuedAt: new Date(),
+        issuedBy: 'Amara Okafor'
       });
     }
 
