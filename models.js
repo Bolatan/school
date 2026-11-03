@@ -162,6 +162,18 @@ const correctionRequestSchema = new mongoose.Schema({
   reviewedAt: { type: Date, default: null }
 }, { timestamps: true });
 
+const cardSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  pupilId: { type: String, required: true, ref: 'Pupil', index: true },
+  cardToken: { type: String, required: true, unique: true, index: true }, // Random, non-meaningful token (no PII)
+  status: { type: String, enum: ['active', 'revoked', 'replaced'], default: 'active' },
+  issuedAt: { type: Date, default: Date.now },
+  revokedAt: { type: Date, default: null },
+  revokedReason: { type: String, default: '' },
+  issuedBy: { type: String, default: 'School Administration' }
+}, { timestamps: true });
+
+const Card = mongoose.model('Card', cardSchema);
 const Guardian = mongoose.model('Guardian', guardianSchema);
 const PupilGuardian = mongoose.model('PupilGuardian', pupilGuardianSchema);
 const CorrectionRequest = mongoose.model('CorrectionRequest', correctionRequestSchema);
@@ -178,5 +190,6 @@ module.exports = {
   SchoolSetting,
   Guardian,
   PupilGuardian,
-  CorrectionRequest
+  CorrectionRequest,
+  Card
 };

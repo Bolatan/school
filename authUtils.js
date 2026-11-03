@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { User, Pupil, PickupRequest, AttendanceEvent, Guardian, PupilGuardian, CorrectionRequest } = require('./models');
+const { User, Pupil, PickupRequest, AttendanceEvent, Guardian, PupilGuardian, CorrectionRequest, Card } = require('./models');
 
 const DEMO_EMAIL = 'admin@northfield.school';
 const DEMO_PASSWORD = 'GatewiseDemo!26';
@@ -143,6 +143,17 @@ async function seedInitialData() {
         photo,
         active: true,
         collectors: collectorsMap[id] || []
+      });
+
+      // Generate random non-meaningful token for card QR (no PII)
+      const cardToken = 'gw_tok_' + crypto.randomBytes(12).toString('hex');
+      await Card.create({
+        id: `card-${id}-1`,
+        pupilId: id,
+        cardToken,
+        status: 'active',
+        issuedAt: new Date(),
+        issuedBy: 'School Office'
       });
     }
 
