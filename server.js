@@ -28,6 +28,8 @@ const {
   nowLocal,
   formatTime,
   formatDate,
+  formatTimeInTimezone,
+  formatDateInTimezone,
   seedInitialData,
   getNextCollectorId
 } = require('./authUtils');
@@ -152,23 +154,44 @@ async function getStateJson() {
     sentAt: n.sentAt
   }));
 
+  const defaultSessions = [
+    { id: "morning", name: "Morning Arrival", startTime: "07:30", endTime: "08:30", defaultMode: "arrival" },
+    { id: "standard", name: "Standard Day", startTime: "08:30", endTime: "14:30", defaultMode: "arrival" },
+    { id: "afternoon", name: "Afternoon Dismissal", startTime: "14:30", endTime: "15:30", defaultMode: "departure" }
+  ];
+  const configuredSessions = schoolSettingsMap.operatingSessions || defaultSessions;
+  const sessionNames = configuredSessions.map(s => s.name || s);
+
+  const defaultCampusTimezones = {
+    "Primary campus": "Europe/London",
+    "Secondary campus": "Europe/London",
+    "North gate annex": "Europe/London"
+  };
+  const campusTimezones = schoolSettingsMap.campusTimezones || defaultCampusTimezones;
+  const schoolTimezone = schoolSettingsMap.timezone || "Europe/London";
+
   const eventDocs = await AttendanceEvent.find().sort({ createdAt: -1 }).limit(150);
   const events = eventDocs.map(e => ({
     id: e.id,
     pupilId: e.pupilId,
     type: e.type,
+    timestamp: e.timestamp ? e.timestamp.toISOString() : (e.utcTimestamp || new Date(e.createdAt).toISOString()),
+    utcTimestamp: e.utcTimestamp || (e.timestamp ? e.timestamp.toISOString() : new Date(e.createdAt).toISOString()),
     time: e.time,
     date: e.date,
     createdAt: e.createdAt,
     staff: e.staff,
+    actorId: e.actorId ? e.actorId.toString() : null,
     source: e.source,
     collector: e.collector,
     verification: e.verification,
     device: e.device || 'Primary Gate Terminal',
     campus: e.campus || 'Primary campus',
     gate: e.gate || 'Main gate',
+    session: e.session || 'Morning Arrival',
     alert: e.alert,
     reason: e.reason || '',
+    correctionReason: e.correctionReason || e.reason || '',
     manualEntry: Boolean(e.manualEntry),
     correctionLink: e.correctionLink || null,
     clientEventId: e.clientEventId || null,
@@ -200,7 +223,10 @@ async function getStateJson() {
       campus: "Primary campus",
       campuses: ["Primary campus", "Secondary campus", "North gate annex"],
       gates: ["Main gate", "East pedestrian gate", "Bus drop-off gate"],
-      sessions: ["Morning Arrival (07:30 - 08:30)", "Standard Day", "Afternoon Dismissal (14:30 - 15:30)"],
+      timezone: schoolTimezone,
+      campusTimezones,
+      operatingSessions: configuredSessions,
+      sessions: sessionNames,
       devices: ["Primary Gate Terminal", "East Gate Handheld", "Bus Loop Scanner", "Admin Front Desk"],
       discloseCollectorName: schoolSettingsMap.discloseCollectorName !== undefined ? Boolean(schoolSettingsMap.discloseCollectorName) : true,
       allowOfflineStalePickupPolicy: schoolSettingsMap.allowOfflineStalePickupPolicy !== undefined ? Boolean(schoolSettingsMap.allowOfflineStalePickupPolicy) : false,
@@ -607,10 +633,10 @@ app.post('/api/guardians/invite', requireAuth(['admin', 'manager']), async (req,
 
 async function processEventRecord(user, eventData) {
   const pid = String(eventData.pupilId || '').trim().toUpperCase().slice(0, 30);
-  const typ = String(eventData.type || '');
+  let typ = String(eventData.type || '').trim();
   let source = String(eventData.source || 'Card scan').slice(0, 50);
-  const reason = String(eventData.reason || '').trim().slice(0, 200);
-  const correctionLink = eventData.correctionLink ? String(eventData.correctionLink) : null;
+  const reason = String(eventData.reason || eventData.correctionReason || '').trim().slice(0, 200);
+  const correctionLink = eventData.correctionLink ? String(eventData.correctionLink).trim() : null;
   const clientEventId = eventData.clientEventId ? String(eventData.clientEventId).trim() : null;
   const isOfflineSync = Boolean(eventData.offlineQueued);
   const isReconciled = Boolean(eventData.manualFallbackReconciled);
@@ -655,8 +681,15 @@ async function processEventRecord(user, eventData) {
     throw new Error('Manual paper/voice fallback reconciliation requires an explicit audit reason.');
   }
 
+  // Normalize source names (e.g. 'scan', 'search', 'offline')
+  if (source.toLowerCase() === 'scan') source = 'Card scan';
+  else if (source.toLowerCase() === 'search') source = 'Manual entry';
+  else if (source.toLowerCase() === 'offline') source = 'Offline queued';
+
   let manualEntry = Boolean(
     eventData.manualEntry ||
+    typ === 'manual_arrival' ||
+    typ === 'manual_departure' ||
     reason === 'card_missing' ||
     reason === 'card_unreadable' ||
     source === 'Manual entry' ||
@@ -667,7 +700,7 @@ async function processEventRecord(user, eventData) {
     typ === 'correction'
   );
 
-  if (manualEntry && source !== 'Manual entry' && source !== 'Manual ID lookup' && source !== 'Authorized exception' && source !== 'Non-destructive correction' && source !== 'Paper/voice manual fallback') {
+  if (manualEntry && source !== 'Manual entry' && source !== 'Manual ID lookup' && source !== 'Authorized exception' && source !== 'Non-destructive correction' && source !== 'Paper/voice manual fallback' && source !== 'Offline queued') {
     source = isReconciled ? 'Paper/voice manual fallback' : 'Manual entry';
   }
 
@@ -680,23 +713,84 @@ async function processEventRecord(user, eventData) {
     throw new Error('Pupil ID not found.');
   }
 
-  const todayStr = formatDate(nowLocal());
-  const prevEvent = await AttendanceEvent.findOne({ pupilId: pid, date: todayStr }).sort({ createdAt: -1 });
+  const device = String(eventData.device || 'Primary Gate Terminal').slice(0, 80);
+  const campus = String(eventData.campus || 'Primary campus').slice(0, 50);
+  const gate = String(eventData.gate || 'Main gate').slice(0, 50);
+  const session = String(eventData.session || 'Morning Arrival').slice(0, 80);
 
-  if (typ === 'arrival' && prevEvent && (prevEvent.type === 'arrival' || prevEvent.type === 'manual_arrival')) {
+  // Timezone resolution: render in campus timezone
+  const settingsDocs = await SchoolSetting.find();
+  const schoolSettingsMap = {};
+  settingsDocs.forEach(s => { schoolSettingsMap[s.key] = s.val; });
+
+  const defaultCampusTimezones = {
+    "Primary campus": "Europe/London",
+    "Secondary campus": "Europe/London",
+    "North gate annex": "Europe/London"
+  };
+  const campusTimezones = schoolSettingsMap.campusTimezones || defaultCampusTimezones;
+  const campusTz = campusTimezones[campus] || schoolSettingsMap.timezone || 'Europe/London';
+
+  const serverReceivedAt = Date.now();
+  const deviceCapturedAt = eventData.deviceCapturedAt ? Number(eventData.deviceCapturedAt) : serverReceivedAt;
+  const utcDate = new Date(deviceCapturedAt);
+
+  const eventTime = eventData.time ? String(eventData.time) : formatTimeInTimezone(utcDate, campusTz);
+  const eventDate = eventData.date ? String(eventData.date) : formatDateInTimezone(utcDate, campusTz);
+
+  // Operating session checks & accidental mode error safeguards
+  const defaultSessions = [
+    { id: "morning", name: "Morning Arrival", startTime: "07:30", endTime: "08:30", defaultMode: "arrival" },
+    { id: "standard", name: "Standard Day", startTime: "08:30", endTime: "14:30", defaultMode: "arrival" },
+    { id: "afternoon", name: "Afternoon Dismissal", startTime: "14:30", endTime: "15:30", defaultMode: "departure" }
+  ];
+  const configuredSessions = schoolSettingsMap.operatingSessions || defaultSessions;
+  const sessionConfig = configuredSessions.find(s => s.name === session || s.id === session);
+
+  const isArrival = typ === 'arrival' || typ === 'manual_arrival';
+  const isDeparture = typ === 'departure' || typ === 'manual_departure' || typ === 'authorized_exception';
+
+  if (sessionConfig && sessionConfig.defaultMode && sessionConfig.defaultMode !== 'both') {
+    const isModeMismatch = (sessionConfig.defaultMode === 'arrival' && isDeparture) ||
+                           (sessionConfig.defaultMode === 'departure' && isArrival);
+    if (isModeMismatch && eventData.confirmModeMismatch === false) {
+      throw new Error(`Accidental mode error safeguard: Session '${sessionConfig.name}' defaults to ${sessionConfig.defaultMode} mode. Confirmation prompt required.`);
+    }
+  }
+
+  // Check previous events today
+  const prevEvent = await AttendanceEvent.findOne({ pupilId: pid, date: eventDate }).sort({ createdAt: -1 });
+
+  if (isArrival && prevEvent && (prevEvent.type === 'arrival' || prevEvent.type === 'manual_arrival')) {
     throw new Error(`${pupil.name} already has an arrival recorded today.`);
   }
-  if ((typ === 'departure' || typ === 'authorized_exception') && (!prevEvent || (prevEvent.type !== 'arrival' && prevEvent.type !== 'manual_arrival'))) {
+  if ((typ === 'departure' || typ === 'manual_departure') && prevEvent && (prevEvent.type === 'departure' || prevEvent.type === 'manual_departure' || prevEvent.type === 'authorized_exception')) {
+    throw new Error(`${pupil.name} has already departed today.`);
+  }
+  if (isDeparture && (!prevEvent || (prevEvent.type !== 'arrival' && prevEvent.type !== 'manual_arrival'))) {
     throw new Error(`Record and verify ${pupil.name}'s arrival before departure.`);
+  }
+
+  // Non-destructive correction validation
+  let originalEvent = null;
+  if (typ === 'correction') {
+    if (!reason) {
+      throw new Error('A correction reason is required when recording an event correction.');
+    }
+    if (!correctionLink) {
+      throw new Error('Original event reference (correctionLink) is required for corrections.');
+    }
+    originalEvent = await AttendanceEvent.findOne({ id: correctionLink });
+    if (!originalEvent) {
+      throw new Error('Original event to correct not found.');
+    }
+    // Original event is preserved intact (non-destructive edit)
   }
 
   let collector = null;
   let verification = null;
-  const device = String(eventData.device || 'Primary Gate Terminal').slice(0, 80);
-  const campus = String(eventData.campus || 'Primary campus').slice(0, 50);
-  const gate = String(eventData.gate || 'Main gate').slice(0, 50);
 
-  if (typ === 'departure') {
+  if (typ === 'departure' || typ === 'manual_departure') {
     // If departure occurred offline, check school offline stale pickup policy
     if (isOfflineSync) {
       const settingDoc = await SchoolSetting.findOne({ key: 'allowOfflineStalePickupPolicy' });
@@ -742,12 +836,7 @@ async function processEventRecord(user, eventData) {
     verification = String(eventData.verification || 'Admin Exception: ID checked').slice(0, 60);
   }
 
-  const now = nowLocal();
   const eid = clientEventId || crypto.randomBytes(9).toString('base64url');
-  const serverReceivedAt = Date.now();
-  const deviceCapturedAt = eventData.deviceCapturedAt ? Number(eventData.deviceCapturedAt) : serverReceivedAt;
-  const eventTime = eventData.time ? String(eventData.time) : formatTime(now);
-  const eventDate = eventData.date ? String(eventData.date) : formatDate(now);
 
   // Retrieve school disclosure configuration
   const settingDoc = await SchoolSetting.findOne({ key: 'discloseCollectorName' });
@@ -756,11 +845,12 @@ async function processEventRecord(user, eventData) {
   // Format guardian notification alert details
   const channel = (pupil.preferredChannel || 'sms').toLowerCase();
   const recipient = channel === 'email' ? (pupil.guardianEmail || `${pupil.guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`) : (pupil.guardianPhone || '+1 555-0100');
-  const isArrival = typ === 'arrival' || typ === 'manual_arrival';
   const collectorDisplay = discloseCollectorName ? (collector || 'authorized contact') : 'an authorized contact';
   const alertMsg = isArrival
     ? `Gatewise Alert: ${pupil.name} has arrived safely at ${campus} (${gate}) at ${eventTime}.`
-    : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collectorDisplay} at ${eventTime}.`;
+    : (typ === 'correction'
+      ? `Gatewise Alert: An attendance record correction was logged for ${pupil.name} at ${eventTime}.`
+      : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collectorDisplay} at ${eventTime}.`);
 
   const nid = crypto.randomBytes(9).toString('base64url');
   await Notification.create({
@@ -772,7 +862,7 @@ async function processEventRecord(user, eventData) {
     recipient,
     message: alertMsg,
     status: 'Sent',
-    sentAt: formatTime(now)
+    sentAt: eventTime
   });
 
   const syncStatus = isReconciled ? 'reconciled_fallback' : (isOfflineSync ? 'synced' : 'synced');
@@ -781,18 +871,23 @@ async function processEventRecord(user, eventData) {
     id: eid,
     pupilId: pid,
     type: typ,
+    timestamp: utcDate,
+    utcTimestamp: utcDate.toISOString(),
     time: eventTime,
     date: eventDate,
     createdAt: deviceCapturedAt,
     staff: user.name,
+    actorId: user._id,
     source: isReconciled ? 'Paper/voice manual fallback' : (isOfflineSync ? 'Offline synced queue' : source),
     collector,
     verification,
     device,
     campus,
     gate,
+    session,
     alert: 'Sent',
     reason,
+    correctionReason: typ === 'correction' ? reason : (eventData.correctionReason || ''),
     manualEntry,
     correctionLink,
     clientEventId,
@@ -803,14 +898,14 @@ async function processEventRecord(user, eventData) {
     reconciliationAuditReason
   });
 
-  const actionName = isReconciled ? 'reconcile_manual_fallback' : (isOfflineSync ? 'sync_offline_event' : `record_${typ}`);
+  const actionName = isReconciled ? 'reconcile_manual_fallback' : (isOfflineSync ? 'sync_offline_event' : (typ === 'correction' ? 'correct_event' : `record_${typ}`));
   await AuditEntry.create({
     userId: user._id,
     action: actionName,
     objectType: 'event',
     objectId: eid,
-    reason: `campus=${campus}; gate=${gate}; device=${device}; source=${createdEvent.source}; client_id=${clientEventId || 'none'}; collector=${collector || 'none'}; verification=${verification || 'none'}; reason=${reason}; offline_queued=${isOfflineSync}; reconciliation_audit_reason=${reconciliationAuditReason}; alert_channel=${channel.toUpperCase()}`,
-    createdAt: now
+    reason: `campus=${campus}; gate=${gate}; session=${session}; device=${device}; source=${createdEvent.source}; client_id=${clientEventId || 'none'}; collector=${collector || 'none'}; verification=${verification || 'none'}; reason=${reason}; correction_link=${correctionLink || 'none'}; offline_queued=${isOfflineSync}; reconciliation_audit_reason=${reconciliationAuditReason}; alert_channel=${channel.toUpperCase()}; utc=${utcDate.toISOString()}`,
+    createdAt: utcDate
   });
 
   return {
@@ -1648,9 +1743,95 @@ app.post('/api/pupils/:pupilId/guardians/:guardianId/legal-status', requireAuth(
   }
 });
 
+app.get('/api/sessions', requireAuth(), async (req, res) => {
+  try {
+    const setting = await SchoolSetting.findOne({ key: 'operatingSessions' });
+    const defaultSessions = [
+      { id: "morning", name: "Morning Arrival", startTime: "07:30", endTime: "08:30", defaultMode: "arrival" },
+      { id: "standard", name: "Standard Day", startTime: "08:30", endTime: "14:30", defaultMode: "arrival" },
+      { id: "afternoon", name: "Afternoon Dismissal", startTime: "14:30", endTime: "15:30", defaultMode: "departure" }
+    ];
+    const sessions = setting ? setting.val : defaultSessions;
+    res.json({ sessions });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/sessions', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { id, name, startTime, endTime, defaultMode } = req.body;
+    if (!name || !defaultMode) {
+      return res.status(400).json({ error: 'Session name and defaultMode (arrival, departure, or both) are required.' });
+    }
+    const sessionId = id || name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const setting = await SchoolSetting.findOne({ key: 'operatingSessions' });
+    const defaultSessions = [
+      { id: "morning", name: "Morning Arrival", startTime: "07:30", endTime: "08:30", defaultMode: "arrival" },
+      { id: "standard", name: "Standard Day", startTime: "08:30", endTime: "14:30", defaultMode: "arrival" },
+      { id: "afternoon", name: "Afternoon Dismissal", startTime: "14:30", endTime: "15:30", defaultMode: "departure" }
+    ];
+    let sessions = setting ? [...setting.val] : [...defaultSessions];
+    const existingIdx = sessions.findIndex(s => s.id === sessionId || s.name.toLowerCase() === name.toLowerCase());
+    const newSession = {
+      id: sessionId,
+      name: String(name).trim(),
+      startTime: String(startTime || '07:30').trim(),
+      endTime: String(endTime || '15:30').trim(),
+      defaultMode: ['arrival', 'departure', 'both'].includes(defaultMode) ? defaultMode : 'arrival'
+    };
+    if (existingIdx >= 0) {
+      sessions[existingIdx] = newSession;
+    } else {
+      sessions.push(newSession);
+    }
+    await SchoolSetting.findOneAndUpdate(
+      { key: 'operatingSessions' },
+      { key: 'operatingSessions', val: sessions },
+      { upsert: true, new: true }
+    );
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'configure_operating_sessions',
+      objectType: 'school_setting',
+      objectId: 'operatingSessions',
+      reason: `Configured session: ${newSession.name} (${newSession.defaultMode})`,
+      createdAt: new Date()
+    });
+    res.status(201).json({ ok: true, session: newSession, sessions });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/sessions', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { sessions } = req.body;
+    if (!Array.isArray(sessions) || sessions.length === 0) {
+      return res.status(400).json({ error: 'Sessions must be a non-empty array.' });
+    }
+    await SchoolSetting.findOneAndUpdate(
+      { key: 'operatingSessions' },
+      { key: 'operatingSessions', val: sessions },
+      { upsert: true, new: true }
+    );
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_operating_sessions',
+      objectType: 'school_setting',
+      objectId: 'operatingSessions',
+      reason: `Updated ${sessions.length} operating sessions`,
+      createdAt: new Date()
+    });
+    res.json({ ok: true, sessions });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/settings', requireAuth(['admin']), async (req, res) => {
   try {
-    const { discloseCollectorName, allowOfflineStalePickupPolicy } = req.body;
+    const { discloseCollectorName, allowOfflineStalePickupPolicy, timezone, campusTimezones, operatingSessions } = req.body;
     if (discloseCollectorName !== undefined) {
       await SchoolSetting.findOneAndUpdate(
         { key: 'discloseCollectorName' },
@@ -1678,6 +1859,51 @@ app.post('/api/settings', requireAuth(['admin']), async (req, res) => {
         objectType: 'school_setting',
         objectId: 'allowOfflineStalePickupPolicy',
         reason: `allowOfflineStalePickupPolicy set to ${Boolean(allowOfflineStalePickupPolicy)}`,
+        createdAt: new Date()
+      });
+    }
+    if (timezone !== undefined) {
+      await SchoolSetting.findOneAndUpdate(
+        { key: 'timezone' },
+        { key: 'timezone', val: String(timezone).trim() },
+        { upsert: true, new: true }
+      );
+      await AuditEntry.create({
+        userId: req.user._id,
+        action: 'update_school_settings',
+        objectType: 'school_setting',
+        objectId: 'timezone',
+        reason: `timezone set to ${timezone}`,
+        createdAt: new Date()
+      });
+    }
+    if (campusTimezones !== undefined && typeof campusTimezones === 'object') {
+      await SchoolSetting.findOneAndUpdate(
+        { key: 'campusTimezones' },
+        { key: 'campusTimezones', val: campusTimezones },
+        { upsert: true, new: true }
+      );
+      await AuditEntry.create({
+        userId: req.user._id,
+        action: 'update_school_settings',
+        objectType: 'school_setting',
+        objectId: 'campusTimezones',
+        reason: 'Updated campus timezones map',
+        createdAt: new Date()
+      });
+    }
+    if (Array.isArray(operatingSessions) && operatingSessions.length > 0) {
+      await SchoolSetting.findOneAndUpdate(
+        { key: 'operatingSessions' },
+        { key: 'operatingSessions', val: operatingSessions },
+        { upsert: true, new: true }
+      );
+      await AuditEntry.create({
+        userId: req.user._id,
+        action: 'update_school_settings',
+        objectType: 'school_setting',
+        objectId: 'operatingSessions',
+        reason: `Updated ${operatingSessions.length} operating sessions via settings`,
         createdAt: new Date()
       });
     }

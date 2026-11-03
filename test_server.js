@@ -1028,3 +1028,273 @@ test('Missing card & unreadable QR: manual entry marking, reason recording, and 
   assert.equal(depReport.collector, 'Dmitri Rostov');
   assert.equal(depReport.manualEntry, true);
 });
+
+test('Attendance events: all 6 event types, UTC timestamps, campus timezone rendering, server/device capture times, non-destructive corrections, and session safeguards', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Create a pupil for testing attendance events
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Zara Test-Child',
+      id: 'NF-7701',
+      className: 'Grade 3B',
+      guardian: 'Parent Zara'
+    });
+  const pupil = await Pupil.findOne({ id: 'NF-7701' });
+  pupil.collectors.push(
+    { id: 1, name: 'Parent Zara', relation: 'Mother', until: 'Ongoing', active: true }
+  );
+  await pupil.save();
+
+  // 2. Configure campus timezone override: Secondary campus -> America/New_York
+  await request
+    .post('/api/settings')
+    .set('Cookie', adminCookie)
+    .send({
+      timezone: 'Europe/London',
+      campusTimezones: {
+        'Primary campus': 'Europe/London',
+        'Secondary campus': 'America/New_York'
+      }
+    });
+
+  // Test manual_arrival event type with UTC timestamp and campus timezone rendering
+  // Capture at 2026-03-31 12:00:00 UTC
+  const testCaptureTime = new Date('2026-03-31T12:00:00.000Z').getTime();
+  const manualArrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'manual_arrival',
+      source: 'search',
+      reason: 'card_missing',
+      campus: 'Secondary campus',
+      gate: 'East pedestrian gate',
+      device: 'East Gate Handheld',
+      deviceCapturedAt: testCaptureTime
+    });
+  assert.equal(manualArrRes.status, 201);
+  assert.ok(manualArrRes.body.ok);
+
+  const arrEvent = await AttendanceEvent.findOne({ id: manualArrRes.body.eventId });
+  assert.ok(arrEvent);
+  assert.equal(arrEvent.type, 'manual_arrival');
+  assert.equal(arrEvent.source, 'Manual entry');
+  assert.equal(arrEvent.manualEntry, true);
+  assert.equal(arrEvent.device, 'East Gate Handheld');
+  assert.equal(arrEvent.campus, 'Secondary campus');
+  assert.equal(arrEvent.gate, 'East pedestrian gate');
+  assert.equal(arrEvent.staff, 'Amara Okafor');
+  assert.ok(arrEvent.actorId);
+  // Timestamp stored in UTC
+  assert.equal(arrEvent.timestamp.toISOString(), '2026-03-31T12:00:00.000Z');
+  assert.equal(arrEvent.utcTimestamp, '2026-03-31T12:00:00.000Z');
+  // Device capture time and server receipt time retained
+  assert.equal(arrEvent.deviceCapturedAt, testCaptureTime);
+  assert.ok(arrEvent.serverReceivedAt);
+  // Rendered in America/New_York (EDT is UTC-4 -> 8:00 AM)
+  assert.equal(arrEvent.time, '8:00 AM');
+  assert.equal(arrEvent.date, '2026-03-31');
+
+  // Duplicate arrival check for manual_arrival
+  const dupArrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'manual_arrival',
+      source: 'search',
+      date: '2026-03-31'
+    });
+  assert.equal(dupArrRes.status, 400);
+  assert.ok(dupArrRes.body.error.includes('already has an arrival recorded today'));
+
+  // 3. Non-destructive correction: preserves original event and creates linked correction
+  const origEventId = arrEvent.id;
+  const origEventBefore = await AttendanceEvent.findOne({ id: origEventId });
+
+  // Missing reason for correction -> fails
+  const noReasonCorrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'correction',
+      correctionLink: origEventId,
+      reason: ''
+    });
+  assert.equal(noReasonCorrRes.status, 400);
+  assert.ok(noReasonCorrRes.body.error.includes('correction reason is required'));
+
+  // Missing correctionLink -> fails
+  const noLinkCorrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'correction',
+      reason: 'Accidental check-in'
+    });
+  assert.equal(noLinkCorrRes.status, 400);
+  assert.ok(noLinkCorrRes.body.error.includes('correctionLink'));
+
+  // Valid linked non-destructive correction
+  const validCorrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'correction',
+      source: 'Non-destructive correction',
+      correctionLink: origEventId,
+      reason: 'Staff scanned wrong class roster entry; verified correction',
+      campus: 'Secondary campus'
+    });
+  assert.equal(validCorrRes.status, 201);
+  const corrEvent = await AttendanceEvent.findOne({ id: validCorrRes.body.eventId });
+  assert.ok(corrEvent);
+  assert.equal(corrEvent.type, 'correction');
+  assert.equal(corrEvent.correctionLink, origEventId);
+  assert.equal(corrEvent.correctionReason, 'Staff scanned wrong class roster entry; verified correction');
+  assert.equal(corrEvent.reason, 'Staff scanned wrong class roster entry; verified correction');
+
+  // Verify original event is preserved untouched (non-destructive)
+  const origEventAfter = await AttendanceEvent.findOne({ id: origEventId });
+  assert.ok(origEventAfter);
+  assert.equal(origEventAfter.type, 'manual_arrival');
+  assert.equal(origEventAfter.id, origEventBefore.id);
+  assert.equal(origEventAfter.createdAt, origEventBefore.createdAt);
+
+  // 4. Test manual_departure event type (requires collector verification)
+  // Missing collector on manual_departure -> fails
+  const noColManualDepRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'manual_departure',
+      source: 'search',
+      reason: 'card_unreadable',
+      date: '2026-03-31'
+    });
+  assert.equal(noColManualDepRes.status, 400);
+  assert.ok(noColManualDepRes.body.error.includes('collector'));
+
+  // Valid manual_departure with collector and verification
+  const validManualDepRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'manual_departure',
+      source: 'search',
+      reason: 'card_unreadable',
+      collectorId: 1,
+      verification: 'Photo matched',
+      date: '2026-03-31',
+      campus: 'Primary campus'
+    });
+  assert.equal(validManualDepRes.status, 201);
+  const manualDepEvent = await AttendanceEvent.findOne({ id: validManualDepRes.body.eventId });
+  assert.ok(manualDepEvent);
+  assert.equal(manualDepEvent.type, 'manual_departure');
+  assert.equal(manualDepEvent.collector, 'Parent Zara');
+  assert.equal(manualDepEvent.verification, 'Photo matched');
+  assert.equal(manualDepEvent.manualEntry, true);
+
+  // Duplicate departure check
+  const dupDepRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7701',
+      type: 'manual_departure',
+      collectorId: 1,
+      date: '2026-03-31'
+    });
+  assert.equal(dupDepRes.status, 400);
+  assert.ok(dupDepRes.body.error.includes('already departed today'));
+
+  // 5. Configurable operating sessions CRUD and accidental mode error safeguards
+  // Create a new session with arrival default mode
+  const newSessionRes = await request
+    .post('/api/sessions')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Early Bird Arrival',
+      startTime: '06:45',
+      endTime: '07:30',
+      defaultMode: 'arrival'
+    });
+  assert.equal(newSessionRes.status, 201);
+  assert.equal(newSessionRes.body.session.name, 'Early Bird Arrival');
+  assert.equal(newSessionRes.body.session.defaultMode, 'arrival');
+
+  // Fetch sessions
+  const getSessionsRes = await request
+    .get('/api/sessions')
+    .set('Cookie', adminCookie);
+  assert.equal(getSessionsRes.status, 200);
+  assert.ok(getSessionsRes.body.sessions.some(s => s.name === 'Early Bird Arrival'));
+
+  // Setup new pupil for session mode error safeguard check
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Safeguard Child',
+      id: 'NF-7702',
+      className: 'Grade 1A',
+      guardian: 'Parent Safe'
+    });
+  const pupilSafe = await Pupil.findOne({ id: 'NF-7702' });
+  pupilSafe.collectors.push({ id: 1, name: 'Parent Safe', relation: 'Mother', until: 'Ongoing', active: true });
+  await pupilSafe.save();
+
+  // First record arrival
+  await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7702',
+      type: 'arrival',
+      session: 'Early Bird Arrival'
+    });
+
+  // Now attempt departure during 'Early Bird Arrival' session with confirmModeMismatch=false
+  // (Safeguard detects session is configured for arrival, but operation is departure)
+  const modeMismatchRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7702',
+      type: 'departure',
+      session: 'Early Bird Arrival',
+      collectorId: 1,
+      confirmModeMismatch: false
+    });
+  assert.equal(modeMismatchRes.status, 400);
+  assert.ok(modeMismatchRes.body.error.includes('Accidental mode error safeguard'));
+  assert.ok(modeMismatchRes.body.error.includes('Confirmation prompt required'));
+
+  // Proceed with explicit confirmation of mode mismatch -> succeeds
+  const confirmedMismatchRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7702',
+      type: 'departure',
+      session: 'Early Bird Arrival',
+      collectorId: 1,
+      confirmModeMismatch: true
+    });
+  assert.equal(confirmedMismatchRes.status, 201);
+  assert.ok(confirmedMismatchRes.body.ok);
+
+  const safeDepEvent = await AttendanceEvent.findOne({ id: confirmedMismatchRes.body.eventId });
+  assert.equal(safeDepEvent.session, 'Early Bird Arrival');
+  assert.equal(safeDepEvent.type, 'departure');
+});

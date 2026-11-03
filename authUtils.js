@@ -43,6 +43,32 @@ function formatDate(d) {
   return `${year}-${month}-${day}`;
 }
 
+function formatTimeInTimezone(d, timeZone = 'Europe/London') {
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+      timeZone
+    }).format(d);
+  } catch {
+    return formatTime(d);
+  }
+}
+
+function formatDateInTimezone(d, timeZone = 'Europe/London') {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone
+    }).format(d);
+  } catch {
+    return formatDate(d);
+  }
+}
+
 async function seedInitialData() {
   const userCount = await User.countDocuments();
   if (userCount === 0) {
@@ -135,11 +161,14 @@ async function seedInitialData() {
         id: `seed-${i}`,
         pupilId: pid,
         type: 'arrival',
-        time: formatTime(t),
-        date: formatDate(t),
+        timestamp: t,
+        utcTimestamp: t.toISOString(),
+        time: formatTimeInTimezone(t, 'Europe/London'),
+        date: formatDateInTimezone(t, 'Europe/London'),
         createdAt: t.getTime(),
         staff,
         source: 'Card scan',
+        session: 'Morning Arrival',
         alert: 'Demo only',
         reason: '',
         manualEntry: false
@@ -233,6 +262,8 @@ module.exports = {
   nowLocal,
   formatTime,
   formatDate,
+  formatTimeInTimezone,
+  formatDateInTimezone,
   seedInitialData,
   getNextCollectorId
 };

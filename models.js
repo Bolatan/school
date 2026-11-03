@@ -60,18 +60,23 @@ const attendanceEventSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
   pupilId: { type: String, required: true, ref: 'Pupil' },
   type: { type: String, required: true, enum: ['arrival', 'departure', 'manual_arrival', 'manual_departure', 'correction', 'authorized_exception'] },
-  time: { type: String, required: true },
-  date: { type: String, required: true },
+  timestamp: { type: Date, default: Date.now }, // Stored in UTC
+  utcTimestamp: { type: String, default: () => new Date().toISOString() }, // Canonical UTC ISO string
+  time: { type: String, required: true }, // Rendered in campus timezone
+  date: { type: String, required: true }, // Rendered in campus timezone
   createdAt: { type: Number, required: true },
   staff: { type: String, required: true },
+  actorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   source: { type: String, required: true, default: 'Card scan' },
   collector: { type: String, default: null },
   verification: { type: String, default: null },
   device: { type: String, default: 'Primary Gate Terminal' },
   campus: { type: String, default: 'Primary campus' },
   gate: { type: String, default: 'Main gate' },
+  session: { type: String, default: 'Morning Arrival' },
   alert: { type: String, default: 'Demo only' },
   reason: { type: String, default: '' },
+  correctionReason: { type: String, default: '' },
   manualEntry: { type: Boolean, default: false },
   correctionLink: { type: String, default: null },
   clientEventId: { type: String, default: null, index: true },
