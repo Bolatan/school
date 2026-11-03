@@ -14,7 +14,7 @@
   const today = new Date().toLocaleDateString('en-CA');
   const localTime = (minsAgo=0) => {const d=new Date(Date.now()-minsAgo*60000);return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
   const load=(key,fallback)=>{try{const v=JSON.parse(localStorage.getItem('gatewise-'+key));return v??fallback}catch{return fallback}};
-  let pupils=[], events=[], requests=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
+  let pupils=[], events=[], requests=[], cards=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
   let isOfflineSimulated = false;
   let deviceManaged = true;
   let deviceEncrypted = true;
@@ -115,6 +115,7 @@
     events = [...pendingQueue, ...serverEvents];
     requests=state.requests||[];
     schoolSettings=state.school||{};
+    cards=state.cards||cards;
     if($('#disclosureToggle')){
       $('#disclosureToggle').checked=schoolSettings.discloseCollectorName!==false;
     }
@@ -253,6 +254,7 @@
 
     const isOnline = isDeviceOnline();
     const allowStalePickup = Boolean(schoolSettings.allowOfflineStalePickupPolicy);
+    const sessionName = $('#sessionSelect')?.value || 'Morning Arrival';
 
     // Offline stale pickup warning banner
     let offlinePickupWarningHtml = '';
@@ -372,7 +374,7 @@
     openModal(`
       <h2 id="modalTitle">Confirm ${mode === 'arrival' ? 'Arrival' : 'Departure & Release'}</h2>
       <p class="modal-intro">
-        Staff verifies pupil against official photograph before recording handover. Device: <b>${escapeHtml(device)}</b> · Location: <b>${escapeHtml(campus)} (${escapeHtml(gate)})</b>.
+        Staff verifies pupil against official photograph before recording handover. Session: <b>${escapeHtml(sessionName)}</b> · Location: <b>${escapeHtml(campus)} (${escapeHtml(gate)})</b>.
       </p>
       <div class="confirm-profile">
         <div class="photo-preview-large">${escapeHtml(p.photo||p.initials)}</div>
@@ -380,6 +382,7 @@
           <strong style="font-size:14px">${escapeHtml(p.name)}</strong>
           <small style="font-size:11px;color:#6f7487">${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small>
           <small style="display:block;margin-top:4px">Guardian: ${escapeHtml(p.guardian)} <span class="channel-badge">${escapeHtml(channelLabel)} ALERT READY</span></small>
+          ${p.cardId ? `<small style="display:block;margin-top:2px;color:#8f94a5">Card ID: ${escapeHtml(p.cardId)} (Active)</small>` : ''}
         </div>
       </div>
       ${manualReasonSelect}
@@ -422,6 +425,11 @@
 
     $('#cancelConfirm').onclick = closeModal;
     $('#saveEvent').onclick = () => {
+      const saveBtn = $('#saveEvent');
+      if (saveBtn.disabled) return;
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Processing…';
+
       const excSection = $('#exceptionSection');
       const isExceptionMode = excSection && !excSection.classList.contains('hidden');
       const isOnline = isDeviceOnline();
@@ -431,6 +439,8 @@
         const allowStale = Boolean(schoolSettings.allowOfflineStalePickupPolicy);
         const ack = $('#acknowledgeStalePolicy')?.checked;
         if (!allowStale || !ack) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = `Confirm ${mode === 'arrival' ? 'Arrival' : 'Release'}`;
           toast('Offline mode does not permit stale pickup permissions to be treated as current without explicit school policy. Use manual fallback.', '!');
           return;
         }
@@ -438,6 +448,8 @@
 
       if (mode === 'departure' && (!hasCollectors || isExceptionMode)) {
         if (!isAdmin) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = `Confirm ${mode === 'arrival' ? 'Arrival' : 'Release'}`;
           toast('Collector not approved. Escalation instruction: Only a school administrator can authorize an exception.', '!');
           return;
         }
@@ -445,6 +457,8 @@
         const reason = $('#exceptionReasonInput')?.value.trim();
         const verification = $('#exceptionVerifySelect')?.value || 'Admin Exception: ID checked';
         if (!collectorName || !reason) {
+          saveBtn.disabled = false;
+          saveBtn.textContent = `Confirm ${mode === 'arrival' ? 'Arrival' : 'Release'}`;
           toast('Collector name and exception reason are required for administrator authorization.', '!');
           return;
         }
@@ -499,7 +513,9 @@
     }
 
     try {
+      const clientEventId = 'online_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
       const res = await api('/api/events', {
+        clientEventId,
         pupilId: p.id,
         type: 'authorized_exception',
         source: 'Authorized exception',
@@ -588,7 +604,9 @@
     }
 
     try {
+      const clientEventId = 'online_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
       const res = await api('/api/events', {
+        clientEventId,
         pupilId: p.id,
         type,
         source,
@@ -926,8 +944,100 @@
   async function renderUsers(){if(signedInUser?.role!=='admin')return;const body=$('#userRows');body.innerHTML='<tr><td colspan="5">Loading accounts…</td></tr>';try{const {users}=await api('/api/users');body.innerHTML=users.map(u=>`<tr><td><b>${escapeHtml(u.name)}</b></td><td>${escapeHtml(u.email)}</td><td><select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option><option value="manager" ${u.role==='manager'?'selected':''}>Manager</option><option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option></select></td><td>${badge(u.active?'Active':'Disabled',u.active?'status-approved':'status-neutral')}</td><td><button class="button button-outline user-toggle" data-user-active="${u.id}" data-active="${u.active?0:1}" ${u.id===signedInUser.id?'disabled':''}>${u.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5">No staff accounts.</td></tr>'}catch(err){body.innerHTML=`<tr><td colspan="5">${escapeHtml(err.message)}</td></tr>`}}
   function openAddUser(){openModal(`<h2 id="modalTitle">Create staff account</h2><p class="modal-intro">The staff member will use this temporary password at sign-in. Share it privately.</p><form id="addUserForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required maxlength="120"></div><div class="form-field full"><label>School email</label><input name="email" type="email" required maxlength="254"></div><div class="form-field full"><label>Role</label><select name="role"><option value="manager">Manager — manage pupils and gate operations</option><option value="viewer">View only — read school records</option><option value="admin">Admin — manage users and all operations</option></select></div><div class="form-field full"><label>Temporary password (at least 12 characters)</label><input name="password" type="password" minlength="12" required autocomplete="new-password"></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAddUser">Cancel</button><button class="button button-primary" type="submit">Create account</button></div></form>`);$('#cancelAddUser').onclick=closeModal;$('#addUserForm').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);try{await api('/api/users',{name:String(f.get('name')).trim(),email:String(f.get('email')).trim(),role:f.get('role'),password:f.get('password')});closeModal();toast('Staff account created. Share the temporary password privately.');renderUsers()}catch(err){toast(err.message,'!')}}}
   async function previewRoster(file){if(!file)return;if(file.size>8*1024*1024){toast('Roster files must be 8 MB or smaller.','!');return}if(!/\.(csv|xlsx)$/i.test(file.name)){toast('Choose a CSV or XLSX file.','!');return}try{const buffer=await file.arrayBuffer();let binary='';const bytes=new Uint8Array(buffer);for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const {preview,errors,errorCount,token}=await api('/api/import/preview',{filename:file.name,fileBase64:btoa(binary)});const rows=preview.map(p=>`<tr><td>${escapeHtml(p.pupil_id)}</td><td>${escapeHtml(p.pupil_name)}</td><td>${escapeHtml(p.class_name)}</td><td>${escapeHtml(p.guardian_name)}</td></tr>`).join('');openModal(`<h2 id="modalTitle">Review pupil roster</h2><p class="modal-intro">${errorCount?`${errorCount} issue(s) found. Correct the file and upload again; nothing has been imported.`:`${preview.length} pupil(s) ready. Review the sample, then import the entire file.`}</p>${preview.length?`<div class="import-preview-wrap"><table class="import-preview-table"><thead><tr><th>PUPIL ID</th><th>NAME</th><th>CLASS</th><th>GUARDIAN</th></tr></thead><tbody>${rows}</tbody></table></div>`:''}${errorCount?`<div class="import-errors">${errors.map(e=>`<div>Row ${e.row}${e.pupil_id?` · ${escapeHtml(e.pupil_id)}`:''}: ${escapeHtml(e.message)}</div>`).join('')}</div>`:''}<div class="modal-actions"><button class="button button-outline" id="cancelImport">Close</button>${token&&!errorCount?'<button class="button button-primary" id="commitImport">Import pupils</button>':''}</div>`);$('#cancelImport').onclick=closeModal;if(token&&!errorCount)$('#commitImport').onclick=async()=>{const button=$('#commitImport');button.disabled=true;button.textContent='Importing…';try{const result=await api('/api/import/commit',{token});acceptState(result.state);closeModal();render();toast(`${result.imported} pupil(s) imported.`)}catch(err){toast(err.message,'!');button.disabled=false;button.textContent='Import pupils'}}}catch(err){toast(err.message,'!')}finally{$('#rosterFile').value=''}}
-  function qrValue(p){return `GW:${p.id}`}
-  async function startScanner(){if(!('BarcodeDetector'in window)){toast('Live QR scanning is not available in this browser. Enter the pupil ID below.','!');return}try{const detector=new BarcodeDetector({formats:['qr_code']});const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});window._gwStream=stream;openModal(`<h2 id="modalTitle">Scan pupil card</h2><p class="modal-intro">Hold the QR code in the frame. Confirm the pupil on the next screen.</p><video id="scanVideo" autoplay muted playsinline style="width:100%;border-radius:8px;background:#15182a;max-height:310px;object-fit:cover"></video><p class="scan-note">Camera access stays on this device during the scan.</p><div class="modal-actions"><button class="button button-outline" id="stopCamera">Cancel scan</button></div>`);const video=$('#scanVideo');video.srcObject=stream;video.onloadedmetadata=()=>video.play();$('#stopCamera').onclick=closeModal;const loop=async()=>{if(!window._gwStream||!video.isConnected)return;try{const codes=await detector.detect(video);if(codes.length){const val=codes[0].rawValue.replace(/^GW:/,'');closeModal();findAndScan(val, 'Card scan');return}}catch{}requestAnimationFrame(loop)};setTimeout(loop,600)}catch{toast('Camera permission was not granted. Enter the pupil ID instead.','!')}}
+  function qrValue(p){return `GW:${p.cardToken || p.id}`}
+
+  async function handleScannedCode(rawCode) {
+    if (!rawCode) return;
+    const isOnline = isDeviceOnline();
+    if (!isOnline) {
+      // Network unavailable result
+      showScanResult(false, 'Network unavailable', 'Device is offline. Card lookup and online verification cannot be performed without network connection.');
+      toast('Network unavailable: Cannot verify card online.', '!');
+      return;
+    }
+
+    const session = $('#sessionSelect')?.value || '';
+    try {
+      const scanRes = await api('/api/cards/scan', {
+        code: rawCode,
+        mode,
+        session
+      });
+
+      if (scanRes.result === 'valid_pupil') {
+        const p = scanRes.pupil;
+        // Merge or find pupil in local list
+        const localP = pupil(p.id) || p;
+        eventConfirm(localP, false);
+      } else {
+        showScanResult(true, scanRes.message);
+      }
+    } catch (err) {
+      const status = err.status;
+      const data = err.data || {};
+      const resCode = data.result || 'unknown_code';
+
+      if (resCode === 'already_recorded') {
+        showScanResult(false, 'Already recorded', data.message || err.message);
+        toast(data.message || 'Already recorded today.', '!');
+      } else if (resCode === 'wrong_session') {
+        showScanResult(false, 'Wrong session', data.message || err.message);
+        toast(data.message || 'Wrong operating session.', '!');
+      } else if (resCode === 'revoked_card') {
+        showScanResult(false, 'Revoked card', data.message || err.message);
+        toast(data.message || 'This card has been revoked.', '!');
+      } else if (resCode === 'unknown_code' || status === 404) {
+        showScanResult(false, 'Unknown code', data.message || 'Unknown QR code. Pupil card not recognized.');
+        toast('Unknown code: Card not recognized in school database.', '!');
+      } else if (err.message === 'Failed to fetch' || !navigator.onLine) {
+        showScanResult(false, 'Network unavailable', 'Connection lost while validating card scan.');
+        toast('Network unavailable.', '!');
+      } else {
+        showScanResult(false, 'Scan rejected', err.message);
+        toast(err.message, '!');
+      }
+    }
+  }
+
+  async function startScanner(){
+    if (!isDeviceOnline()) {
+      showScanResult(false, 'Network unavailable', 'Cannot start scanner: Network connection is offline.');
+      toast('Network unavailable.', '!');
+      return;
+    }
+    if(!('BarcodeDetector'in window)){
+      toast('Live QR scanning is not available in this browser. Enter the pupil ID or token below.','!');
+      return;
+    }
+    try{
+      const detector=new BarcodeDetector({formats:['qr_code']});
+      const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+      window._gwStream=stream;
+      openModal(`<h2 id="modalTitle">Scan pupil card</h2><p class="modal-intro">Hold the QR code in the frame. Confirm pupil photo and details before logging.</p><video id="scanVideo" autoplay muted playsinline style="width:100%;border-radius:8px;background:#15182a;max-height:310px;object-fit:cover"></video><p class="scan-note">Camera access stays on this device during the scan.</p><div class="modal-actions"><button class="button button-outline" id="stopCamera">Cancel scan</button></div>`);
+      const video=$('#scanVideo');
+      video.srcObject=stream;
+      video.onloadedmetadata=()=>video.play();
+      $('#stopCamera').onclick=closeModal;
+      let scanned = false;
+      const loop=async()=>{
+        if(!window._gwStream||!video.isConnected||scanned)return;
+        try{
+          const codes=await detector.detect(video);
+          if(codes.length && !scanned){
+            scanned = true;
+            const val=codes[0].rawValue;
+            closeModal();
+            handleScannedCode(val);
+            return;
+          }
+        }catch{}
+        requestAnimationFrame(loop);
+      };
+      setTimeout(loop,600);
+    }catch{
+      toast('Camera permission was not granted. Enter the pupil ID instead.','!');
+    }
+  }
   async function exportCsv(){
     try {
       await api('/api/export/activity', {});
@@ -972,7 +1082,7 @@
     const modeBtn=e.target.closest('[data-mode]');if(modeBtn){mode=modeBtn.dataset.mode;$$('.mode-button').forEach(b=>b.classList.toggle('selected',b===modeBtn));$('.scan-start').textContent='Start camera scanner';$('.scan-frame h2').textContent=mode==='arrival'?'Scan pupil ID card':'Scan for departure';}
     const req=e.target.closest('[data-request]');if(req){const r=requests.find(x=>x.id===req.dataset.request);if(r)resolvePickupRequest(r,req.dataset.action);}
     const corr=e.target.closest('[data-correct-event]');if(corr){openCorrectionModal(corr.dataset.correctEvent);}
-    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openModal(`<h2 id="modalTitle">Pupil card</h2><p class="modal-intro">Official PVC ID card record. Security policy: Do not photograph or duplicate QR codes.</p><div class="confirm-profile"><div class="photo-preview-large" style="width:44px;height:44px;font-size:22px">${escapeHtml(p.photo||p.initials)}</div><div><strong>${escapeHtml(p.name)}</strong><small>${escapeHtml(p.id)} · ${escapeHtml(p.className)}</small></div></div><div style="display:grid;place-items:center;padding:20px;background:#fafbff;border:1px solid #eceef4;border-radius:8px"><div id="qrCanvas" style="font:700 14px monospace;color:#4c5ddd;border:8px solid white;background:white;padding:18px;letter-spacing:1px">▦ ${escapeHtml(qrValue(p))}</div><small class="card-tag" style="margin-top:8px">Card token reference: ${escapeHtml(p.id)}</small></div><div class="qr-security-warning" style="margin:12px 0 0"><span>Do not photograph or copy this QR code. If the physical card is unavailable, perform on-screen photo verification via manual search.</span></div><div class="modal-actions"><button class="button button-outline" id="closeCard">Close</button></div>`);$('#closeCard').onclick=closeModal;}
+    const detail=e.target.closest('[data-pupil-detail]');if(detail){const p=pupil(detail.dataset.pupilDetail);if(p)openPupilCardModal(p);}
     if(e.target.id==='syncNowLink'||e.target.id==='syncNowBtn'){e.preventDefault();syncPendingQueue();}
     if(e.target.id==='reconcileFallbackBtn'){e.preventDefault();openReconcileModal();}
   });
@@ -992,6 +1102,133 @@
       e.target.checked = !e.target.checked;
     }
   });
+
+  // Card management modal (Artwork print/export, Reissue, Revoke)
+  async function openPupilCardModal(p) {
+    const isAdmin = signedInUser?.role === 'admin';
+    const card = cards.find(c => c.pupilId === p.id && c.status === 'active') || {
+      cardId: p.cardId || `CARD-${p.id}`,
+      cardToken: p.cardToken || p.id,
+      status: 'active'
+    };
+
+    let artworkData = null;
+    try {
+      const artRes = await api(`/api/cards/${encodeURIComponent(p.id)}/artwork`);
+      artworkData = artRes.artwork;
+    } catch {
+      artworkData = {
+        schoolName: "Northfield Academy",
+        cardStandard: "CR80 PVC (85.6mm x 53.98mm)",
+        pupilId: p.id,
+        pupilName: p.name,
+        className: p.className,
+        photo: p.photo,
+        initials: p.initials,
+        cardId: card.cardId,
+        cardToken: card.cardToken,
+        qrPayload: `GW:${card.cardToken}`,
+        status: card.status
+      };
+    }
+
+    const qrPayload = artworkData ? artworkData.qrPayload : `GW:${card.cardToken}`;
+
+    const adminActions = isAdmin ? `
+      <div style="border-top:1px dashed #e2e8f0;padding-top:12px;margin-top:14px;display:flex;gap:8px;flex-wrap:wrap;justify-content:space-between;align-items:center">
+        <button class="button button-outline button-small" id="reissueCardBtn">🔄 Reissue Card</button>
+        <button class="button button-outline button-small" id="revokeCardBtn" style="color:#b91c1c;border-color:#fca5a5">🚫 Revoke Card</button>
+        <button class="button button-primary button-small" id="printArtworkBtn">🖨️ Print Card</button>
+        <button class="button button-outline button-small" id="exportArtworkBtn">💾 Export Artwork</button>
+      </div>
+    ` : `
+      <div style="border-top:1px dashed #e2e8f0;padding-top:12px;margin-top:14px;display:flex;gap:8px;justify-content:flex-end">
+        <button class="button button-outline button-small" id="printArtworkBtn">🖨️ Print Card</button>
+        <button class="button button-outline button-small" id="exportArtworkBtn">💾 Export Artwork</button>
+      </div>
+    `;
+
+    openModal(`
+      <h2 id="modalTitle">Pupil ID Card Artwork</h2>
+      <p class="modal-intro">Official PVC CR80 card record. Random revocable card token contains NO student PII.</p>
+
+      <div class="card-artwork-box" id="pvcArtworkBox">
+        <div class="card-header">
+          <div style="font:700 13px Manrope;letter-spacing:.5px">🏛️ NORTHFIELD ACADEMY</div>
+          <span class="status-pill status-present" style="font-size:8px;text-transform:uppercase">${escapeHtml(card.status)}</span>
+        </div>
+        <div class="card-body">
+          <div class="photo-preview-large" style="width:58px;height:58px;font-size:30px;background:#fff;border-color:#38bdf8">${escapeHtml(p.photo||p.initials)}</div>
+          <div style="flex:1">
+            <div style="font:700 14px Manrope;line-height:1.2">${escapeHtml(p.name)}</div>
+            <div style="font-size:10px;color:#93c5fd;margin-top:3px">${escapeHtml(p.id)} · ${escapeHtml(p.className)}</div>
+            <div style="font-size:9px;color:#cbd5e1;margin-top:4px">Guardian: ${escapeHtml(p.guardian)}</div>
+          </div>
+          <div class="card-qr-display">
+            <div>▦</div>
+            <div style="font-size:8px;word-break:break-all;max-width:85px;margin-top:2px">${escapeHtml(card.cardToken.slice(0, 12))}...</div>
+          </div>
+        </div>
+        <div class="card-footer">
+          <span>Card ID: <code>${escapeHtml(card.cardId)}</code></span>
+          <span>CR80 PVC Standard</span>
+        </div>
+      </div>
+
+      <div class="qr-security-warning" style="margin:10px 0 0">
+        <span><b>Security Notice:</b> Do not photograph or replicate QR codes. Reissuing or revoking a card does not modify historical attendance records.</span>
+      </div>
+
+      ${adminActions}
+
+      <div class="modal-actions" style="margin-top:14px">
+        <button class="button button-outline" id="closeCard">Close</button>
+      </div>
+    `);
+
+    $('#closeCard').onclick = closeModal;
+
+    $('#printArtworkBtn')?.addEventListener('click', () => {
+      window.print();
+    });
+
+    $('#exportArtworkBtn')?.addEventListener('click', () => {
+      const exportJson = JSON.stringify(artworkData, null, 2);
+      const blob = new Blob([exportJson], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `card-artwork-${p.id}.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast(`Card artwork metadata exported for ${p.name}.`);
+    });
+
+    $('#reissueCardBtn')?.addEventListener('click', async () => {
+      if (!confirm(`Reissue ID card for ${p.name}? This will revoke the existing card token and generate a fresh card. Historical attendance records will remain unchanged.`)) return;
+      try {
+        const res = await api('/api/cards/reissue', { pupilId: p.id, reason: 'Administrator replacement card' });
+        acceptState(res.state);
+        render();
+        closeModal();
+        toast(`New card reissued for ${p.name} (Card ID: ${res.card.cardId}).`);
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    });
+
+    $('#revokeCardBtn')?.addEventListener('click', async () => {
+      if (!confirm(`Revoke active card for ${p.name}? Scanning this card token will be blocked immediately.`)) return;
+      try {
+        const res = await api('/api/cards/revoke', { pupilId: p.id, reason: 'Reported lost/stolen by staff' });
+        acceptState(res.state);
+        render();
+        closeModal();
+        toast(`Card revoked for ${p.name}.`);
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    });
+  }
 
   $('#offlineStalePolicyToggle')?.addEventListener('change', async e => {
     if (signedInUser?.role !== 'admin') {
