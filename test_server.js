@@ -1484,3 +1484,285 @@ test('Card scanning: outcomes, photo pre-verification, duplicate tap prevention,
   assert.ok(artworkHtmlRes.text.includes('Kofi Mensah'));
   assert.ok(artworkHtmlRes.text.includes('Property of Northfield Academy'));
 });
+
+test('Administration: Campuses, Sessions, Classes, Devices, Templates, Retention, Escalation Contacts, MFA, Revocation, and Audit Exports', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Manage Campuses: Create and Update
+  const createCampusRes = await request
+    .post('/api/admin/campuses')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'South Campus Annex',
+      code: 'NF-SOU',
+      address: '99 Southfields Road, London SW18',
+      timezone: 'Europe/London',
+      gates: ['South Gate 1', 'Visitor Turnstile']
+    });
+  assert.equal(createCampusRes.status, 201);
+  assert.equal(createCampusRes.body.campus.name, 'South Campus Annex');
+
+  const updateCampusRes = await request
+    .put(`/api/admin/campuses/${createCampusRes.body.campus.id}`)
+    .set('Cookie', adminCookie)
+    .send({
+      address: '100 Southfields Road, London SW18 (Updated)',
+      gates: ['South Gate 1', 'Visitor Turnstile', 'Service Bay Gate']
+    });
+  assert.equal(updateCampusRes.status, 200);
+  assert.equal(updateCampusRes.body.campus.gates.length, 3);
+
+  // 2. Manage School Classes: Create and Update
+  const createClassRes = await request
+    .post('/api/admin/classes')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Grade 6A',
+      gradeLevel: 'Grade 6',
+      campus: 'South Campus Annex',
+      teacherName: 'Dr. Elizabeth Clark',
+      room: 'Science Lab 3',
+      capacity: 32
+    });
+  assert.equal(createClassRes.status, 201);
+  assert.equal(createClassRes.body.schoolClass.name, 'Grade 6A');
+
+  const updateClassRes = await request
+    .put(`/api/admin/classes/${createClassRes.body.schoolClass.id}`)
+    .set('Cookie', adminCookie)
+    .send({
+      teacherName: 'Dr. Elizabeth Clark & Co-Teacher',
+      capacity: 34
+    });
+  assert.equal(updateClassRes.status, 200);
+  assert.equal(updateClassRes.body.schoolClass.capacity, 34);
+
+  // 3. Manage Devices & Device Lock: Register and Prompt Revocation of Lost Device
+  const createDeviceRes = await request
+    .post('/api/admin/devices')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'South Gate Tablet',
+      type: 'tablet',
+      assignedCampus: 'South Campus Annex',
+      assignedGate: 'South Gate 1',
+      assignedStaff: 'Gate Officer Mark',
+      deviceLockEnabled: true,
+      deviceLockPin: '7788'
+    });
+  assert.equal(createDeviceRes.status, 201);
+  assert.equal(createDeviceRes.body.device.name, 'South Gate Tablet');
+
+  // Verify strong staff sign-in device lock requirement
+  const pinFailLoginRes = await request
+    .post('/api/login')
+    .send({
+      email: DEMO_EMAIL,
+      password: DEMO_PASSWORD,
+      device: 'South Gate Tablet',
+      devicePin: 'wrong-pin'
+    });
+  assert.equal(pinFailLoginRes.status, 401);
+  assert.ok(pinFailLoginRes.body.error.includes('device lock PIN'));
+
+  // Revoke lost device promptly
+  const revokeDeviceRes = await request
+    .post(`/api/admin/devices/${createDeviceRes.body.device.id}/revoke`)
+    .set('Cookie', adminCookie)
+    .send({
+      reason: 'Tablet went missing during dismissal transition',
+      status: 'lost'
+    });
+  assert.equal(revokeDeviceRes.status, 200);
+  assert.equal(revokeDeviceRes.body.device.status, 'lost');
+
+  // Attempt sign-in on lost device is blocked promptly
+  const blockedDeviceLogin = await request
+    .post('/api/login')
+    .send({
+      email: DEMO_EMAIL,
+      password: DEMO_PASSWORD,
+      device: 'South Gate Tablet',
+      devicePin: '7788'
+    });
+  assert.equal(blockedDeviceLogin.status, 403);
+  assert.ok(blockedDeviceLogin.body.error.includes('marked as lost'));
+
+  // 4. Notification Templates: Create and Update
+  const createTmplRes = await request
+    .post('/api/admin/templates')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Custom Dismissal Delayed Alert',
+      type: 'general',
+      channel: 'sms',
+      templateBody: 'Gatewise Alert: Weather advisory at {{campus}}. Dismissal delayed until {{time}}.',
+      variables: ['campus', 'time']
+    });
+  assert.equal(createTmplRes.status, 201);
+  assert.equal(createTmplRes.body.template.name, 'Custom Dismissal Delayed Alert');
+
+  const updateTmplRes = await request
+    .put(`/api/admin/templates/${createTmplRes.body.template.id}`)
+    .set('Cookie', adminCookie)
+    .send({
+      templateBody: 'Gatewise Notice: Dismissal resumed safely at {{campus}} at {{time}}.'
+    });
+  assert.equal(updateTmplRes.status, 200);
+  assert.ok(updateTmplRes.body.template.templateBody.includes('Dismissal resumed'));
+
+  // 5. Escalation Contacts: Create and Update
+  const createEscRes = await request
+    .post('/api/admin/escalation-contacts')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Inspector James Sterling',
+      role: 'School Safety Liaison Officer',
+      phone: '+44 7700 900999',
+      email: 'j.sterling@police.service.uk',
+      priority: 1,
+      campus: 'All campuses',
+      notificationChannels: ['phone', 'sms']
+    });
+  assert.equal(createEscRes.status, 201);
+  assert.equal(createEscRes.body.contact.name, 'Inspector James Sterling');
+
+  // 6. Data Retention Settings & Purge execution
+  const retentionRes = await request
+    .post('/api/admin/retention')
+    .set('Cookie', adminCookie)
+    .send({
+      attendanceRetentionDays: 180,
+      auditLogRetentionDays: 365,
+      offlineQueueTtlHours: 12,
+      sessionTimeoutMinutes: 240,
+      autoPurgeEnabled: true
+    });
+  assert.equal(retentionRes.status, 200);
+  assert.equal(retentionRes.body.retentionSettings.attendanceRetentionDays, 180);
+  assert.equal(retentionRes.body.retentionSettings.offlineQueueTtlHours, 12);
+
+  const purgeRes = await request
+    .post('/api/admin/retention/purge')
+    .set('Cookie', adminCookie)
+    .send({});
+  assert.equal(purgeRes.status, 200);
+  assert.ok(purgeRes.body.purged);
+
+  // 7. Staff Account Creation with Strong Password Requirement & Prompt Revocation
+  // Weak password rejected
+  const weakPasswordRes = await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Weak Pass Staff',
+      email: 'weak.staff@northfield.school',
+      role: 'manager',
+      password: 'password12345' // Missing uppercase & special char
+    });
+  assert.equal(weakPasswordRes.status, 400);
+  assert.ok(weakPasswordRes.body.error.includes('Strong staff sign-in requires'));
+
+  // Strong password accepted
+  const strongStaffRes = await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Marcus Security',
+      email: 'marcus.security@northfield.school',
+      role: 'manager',
+      password: 'GatewiseStrong!99',
+      assignedCampus: 'South Campus Annex'
+    });
+  assert.equal(strongStaffRes.status, 201);
+  const marcusUser = strongStaffRes.body.users.find(u => u.email === 'marcus.security@northfield.school');
+  assert.ok(marcusUser);
+
+  // Sign in with new staff member and establish active session
+  const marcusCookie = await login('marcus.security@northfield.school', 'GatewiseStrong!99');
+  assert.ok(marcusCookie);
+
+  // Administrator revokes staff account promptly
+  const revokeUserRes = await request
+    .post(`/api/users/${marcusUser.id}/revoke`)
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Security staff contract terminated' });
+  assert.equal(revokeUserRes.status, 200);
+  assert.ok(revokeUserRes.body.message.includes('revoked promptly'));
+
+  // Verify Marcus's existing session is immediately terminated (revoked promptly)
+  const revokedAccessAttempt = await request
+    .get('/api/state')
+    .set('Cookie', marcusCookie);
+  assert.equal(revokedAccessAttempt.status, 401);
+
+  // 8. Multi-Factor Authentication (MFA) for Administrators
+  // Setup MFA for admin
+  const mfaSetupRes = await request
+    .post('/api/admin/mfa/setup')
+    .set('Cookie', adminCookie)
+    .send({});
+  assert.equal(mfaSetupRes.status, 200);
+  assert.ok(mfaSetupRes.body.mfaSecret);
+
+  // Enable MFA with verification token
+  const mfaEnableRes = await request
+    .post('/api/admin/mfa/enable')
+    .set('Cookie', adminCookie)
+    .send({ mfaToken: '123456' });
+  assert.equal(mfaEnableRes.status, 200);
+  assert.ok(mfaEnableRes.body.ok);
+
+  // Now, logging in as admin requires MFA challenge
+  const mfaChallengeLoginRes = await request
+    .post('/api/login')
+    .send({ email: DEMO_EMAIL, password: DEMO_PASSWORD });
+  assert.equal(mfaChallengeLoginRes.status, 200);
+  assert.equal(mfaChallengeLoginRes.body.requiresMfa, true);
+  assert.ok(mfaChallengeLoginRes.body.mfaChallengeToken);
+
+  // Invalid MFA token fails
+  const badMfaVerifyRes = await request
+    .post('/api/login/mfa-verify')
+    .send({
+      mfaChallengeToken: mfaChallengeLoginRes.body.mfaChallengeToken,
+      mfaToken: '000000'
+    });
+  assert.equal(badMfaVerifyRes.status, 401);
+  assert.ok(badMfaVerifyRes.body.error.includes('Invalid multi-factor'));
+
+  // Valid MFA token succeeds
+  const goodMfaVerifyRes = await request
+    .post('/api/login/mfa-verify')
+    .send({
+      mfaChallengeToken: mfaChallengeLoginRes.body.mfaChallengeToken,
+      mfaToken: '123456'
+    });
+  assert.equal(goodMfaVerifyRes.status, 200);
+  assert.ok(goodMfaVerifyRes.headers['set-cookie']);
+  const newAdminCookie = goodMfaVerifyRes.headers['set-cookie'][0];
+
+  // 9. Administrative Data Exports and Audit Trail
+  const exportRes = await request
+    .post('/api/admin/export/attendance?format=csv')
+    .set('Cookie', newAdminCookie)
+    .send({ reason: 'Annual local educational authority audit submission' });
+  assert.equal(exportRes.status, 200);
+  assert.equal(exportRes.headers['content-type'], 'text/csv; charset=utf-8');
+  assert.ok(exportRes.text.includes('id,pupilId,type,time'));
+
+  // Verify sensitive action audit log entry was created for data export
+  const exportAudit = await AuditEntry.findOne({ action: 'export_administrative_data' }).sort({ createdAt: -1 });
+  assert.ok(exportAudit);
+  assert.ok(exportAudit.reason.includes('Annual local educational authority audit submission'));
+
+  // Fetch admin audit records endpoint
+  const auditListRes = await request
+    .get('/api/admin/audit?limit=20')
+    .set('Cookie', newAdminCookie);
+  assert.equal(auditListRes.status, 200);
+  assert.ok(Array.isArray(auditListRes.body.entries));
+  assert.ok(auditListRes.body.entries.length >= 1);
+  const hasExportEntry = auditListRes.body.entries.some(e => e.action === 'export_administrative_data');
+  assert.ok(hasExportEntry);
+});

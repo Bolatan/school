@@ -156,9 +156,11 @@
     const roleLabels = { admin: 'School administrator', manager: 'School manager', viewer: 'View only', guardian: 'Parent / Guardian' };
     $('.profile small').textContent=roleLabels[user.role]||'School staff';
     $('#userNav').classList.toggle('hidden',user.role!=='admin');
+    $('#adminNav')?.classList.toggle('hidden',user.role!=='admin');
     $('#addPupilBtn').classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
     $('#uploadRosterBtn').classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
     $('#inviteGuardianBtn')?.classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
+    $('[data-page="admin"]')?.classList.toggle('hidden',user.role!=='admin');
     $('[data-page="scan"]').classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
     $('[data-goto="scan"]')?.classList.toggle('hidden',user.role==='viewer' || user.role==='guardian');
     $('#guardianPortalNav').classList.toggle('hidden', user.role !== 'guardian');
@@ -190,14 +192,15 @@
   function openModal(html){$('#modalContent').innerHTML=html;$('#modalBackdrop').classList.remove('hidden');setTimeout(()=>$('#modalContent input:not([type=hidden]), #modalContent select')?.focus(),30);}
   function closeModal(){$('#modalBackdrop').classList.add('hidden');$('#modalContent').innerHTML='';if(window._gwStream){window._gwStream.getTracks().forEach(t=>t.stop());window._gwStream=null;}}
   function navigate(page){
-    if(page==='users'&&signedInUser?.role!=='admin'){toast('Only an administrator can manage staff accounts.','!');return}
+    if((page==='users'||page==='admin')&&signedInUser?.role!=='admin'){toast('Only an administrator can access this section.','!');return}
     if(page==='scan'&&(signedInUser?.role==='viewer'||signedInUser?.role==='guardian')){toast('Access restricted.','!');return}
     $$('.page').forEach(p=>p.classList.toggle('active',p.id===`page-${page}`));
     $$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
-    $('#crumbPage').textContent=({dashboard:'Overview',scan:'Scan & log',pupils:'Pupils',pickup:'Pickup approvals',activity:'Activity log',users:'User management',guardianPortal:'My Children'})[page]||'Overview';
+    $('#crumbPage').textContent=({dashboard:'Overview',scan:'Scan & log',pupils:'Pupils',pickup:'Pickup approvals',activity:'Activity log',users:'User management',admin:'Administration',guardianPortal:'My Children'})[page]||'Overview';
     $('#sidebar').classList.remove('open');
     window.scrollTo(0,0);
     if(page==='users')renderUsers();
+    if(page==='admin')loadAdminWorkspace();
     if(page==='guardianPortal')loadGuardianPortal();
     if(page==='pickup')loadAdminCorrections();
   }
@@ -1029,8 +1032,394 @@
       }
     };
   }
-  async function renderUsers(){if(signedInUser?.role!=='admin')return;const body=$('#userRows');body.innerHTML='<tr><td colspan="5">Loading accounts…</td></tr>';try{const {users}=await api('/api/users');body.innerHTML=users.map(u=>`<tr><td><b>${escapeHtml(u.name)}</b></td><td>${escapeHtml(u.email)}</td><td><select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}><option value="admin" ${u.role==='admin'?'selected':''}>Admin</option><option value="manager" ${u.role==='manager'?'selected':''}>Manager</option><option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option></select></td><td>${badge(u.active?'Active':'Disabled',u.active?'status-approved':'status-neutral')}</td><td><button class="button button-outline user-toggle" data-user-active="${u.id}" data-active="${u.active?0:1}" ${u.id===signedInUser.id?'disabled':''}>${u.active?'Disable':'Enable'}</button></td></tr>`).join('')||'<tr><td colspan="5">No staff accounts.</td></tr>'}catch(err){body.innerHTML=`<tr><td colspan="5">${escapeHtml(err.message)}</td></tr>`}}
-  function openAddUser(){openModal(`<h2 id="modalTitle">Create staff account</h2><p class="modal-intro">The staff member will use this temporary password at sign-in. Share it privately.</p><form id="addUserForm" class="form-grid"><div class="form-field full"><label>Full name</label><input name="name" required maxlength="120"></div><div class="form-field full"><label>School email</label><input name="email" type="email" required maxlength="254"></div><div class="form-field full"><label>Role</label><select name="role"><option value="manager">Manager — manage pupils and gate operations</option><option value="viewer">View only — read school records</option><option value="admin">Admin — manage users and all operations</option></select></div><div class="form-field full"><label>Temporary password (at least 12 characters)</label><input name="password" type="password" minlength="12" required autocomplete="new-password"></div><div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAddUser">Cancel</button><button class="button button-primary" type="submit">Create account</button></div></form>`);$('#cancelAddUser').onclick=closeModal;$('#addUserForm').onsubmit=async ev=>{ev.preventDefault();const f=new FormData(ev.currentTarget);try{await api('/api/users',{name:String(f.get('name')).trim(),email:String(f.get('email')).trim(),role:f.get('role'),password:f.get('password')});closeModal();toast('Staff account created. Share the temporary password privately.');renderUsers()}catch(err){toast(err.message,'!')}}}
+  async function renderUsers(){
+    if(signedInUser?.role!=='admin')return;
+    const body=$('#userRows');
+    body.innerHTML='<tr><td colspan="6">Loading accounts…</td></tr>';
+    try{
+      const {users}=await api('/api/users');
+      body.innerHTML=users.map(u=>`
+        <tr>
+          <td><b>${escapeHtml(u.name)}</b></td>
+          <td>${escapeHtml(u.email)}</td>
+          <td>
+            <select class="user-role-select" data-user-role="${u.id}" ${u.id===signedInUser.id?'disabled':''}>
+              <option value="admin" ${u.role==='admin'?'selected':''}>Admin</option>
+              <option value="manager" ${u.role==='manager'?'selected':''}>Manager</option>
+              <option value="viewer" ${u.role==='viewer'?'selected':''}>View only</option>
+            </select>
+          </td>
+          <td>
+            <span style="font-size:10px;font-weight:600;color:${u.mfaEnabled?'#16a34a':'#64748b'}">MFA: ${u.mfaEnabled?'Active':'Disabled'}</span>
+            <br>
+            <small style="color:#64748b">Lock: ${u.deviceLockEnforced?'Enforced':'Optional'}</small>
+          </td>
+          <td>${badge(u.active?'Active':'Revoked',u.active?'status-approved':'status-neutral')}</td>
+          <td>
+            ${u.active && u.id!==signedInUser.id ? `
+              <button class="button button-outline user-revoke-btn" data-revoke-user="${u.id}" data-user-name="${escapeHtml(u.name)}" style="color:#b91c1c;border-color:#fca5a5;padding:4px 8px;font-size:10px">Revoke Account</button>
+            ` : (u.id===signedInUser.id ? '<small style="color:#64748b">Active Admin</small>' : '<small style="color:#b91c1c">Revoked</small>')}
+          </td>
+        </tr>
+      `).join('')||'<tr><td colspan="6">No staff accounts.</td></tr>';
+    }catch(err){
+      body.innerHTML=`<tr><td colspan="6">${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  function openAddUser(){
+    openModal(`
+      <h2 id="modalTitle">Create staff account</h2>
+      <p class="modal-intro">Strong staff sign-in: Password must be at least 12 characters with uppercase, lowercase, numbers, and special symbols.</p>
+      <form id="addUserForm" class="form-grid">
+        <div class="form-field full"><label>Full name *</label><input name="name" required maxlength="120"></div>
+        <div class="form-field full"><label>School email *</label><input name="email" type="email" required maxlength="254"></div>
+        <div class="form-field"><label>Role *</label><select name="role"><option value="manager">Manager — manage pupils and gate operations</option><option value="viewer">View only — read school records</option><option value="admin">Admin — manage users and all operations</option></select></div>
+        <div class="form-field"><label>Assigned Campus</label><select name="assignedCampus"><option value="Primary campus">Primary campus</option><option value="Secondary campus">Secondary campus</option><option value="North gate annex">North gate annex</option></select></div>
+        <div class="form-field full"><label>Temporary password (at least 12 characters: Upper, lower, digit, symbol) *</label><input name="password" type="password" minlength="12" required autocomplete="new-password" value="GatewiseStaff!26"></div>
+        <div class="form-field full"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="mfaEnforced" checked><span>Require Multi-Factor Authentication (MFA)</span></label></div>
+        <div class="form-field full"><label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" name="deviceLockEnforced" checked><span>Require device lock PIN at terminal sign-in</span></label></div>
+        <div class="modal-actions form-field full"><button type="button" class="button button-outline" id="cancelAddUser">Cancel</button><button class="button button-primary" type="submit">Create account</button></div>
+      </form>
+    `);
+    $('#cancelAddUser').onclick=closeModal;
+    $('#addUserForm').onsubmit=async ev=>{
+      ev.preventDefault();
+      const f=new FormData(ev.currentTarget);
+      try{
+        await api('/api/users',{
+          name:String(f.get('name')).trim(),
+          email:String(f.get('email')).trim(),
+          role:f.get('role'),
+          assignedCampus:f.get('assignedCampus'),
+          password:f.get('password'),
+          mfaEnforced:f.get('mfaEnforced')!==null,
+          deviceLockEnforced:f.get('deviceLockEnforced')!==null
+        });
+        closeModal();
+        toast('Staff account created. Share temporary password privately.');
+        renderUsers();
+      }catch(err){
+        toast(err.message,'!');
+      }
+    };
+  }
+
+  // -------------------------------------------------------------
+  // ADMINISTRATION WORKSPACE LOGIC
+  // -------------------------------------------------------------
+  async function loadAdminWorkspace() {
+    if (signedInUser?.role !== 'admin') return;
+    loadAdminCampuses();
+    loadAdminSessions();
+    loadAdminClasses();
+    loadAdminDevices();
+    loadAdminTemplates();
+    loadAdminEscalation();
+    loadAdminRetention();
+    loadAdminAudit();
+  }
+
+  // Switch Admin Tabs
+  $$('.admin-tab-btn').forEach(btn => {
+    btn.onclick = () => {
+      const targetTab = btn.dataset.adminTab;
+      $$('.admin-tab-btn').forEach(b => {
+        b.classList.remove('button-primary');
+        b.classList.add('button-outline');
+      });
+      btn.classList.remove('button-outline');
+      btn.classList.add('button-primary');
+      $$('.admin-tab-content').forEach(c => c.classList.add('hidden'));
+      $(`#adminTab-${targetTab}`)?.classList.remove('hidden');
+    };
+  });
+
+  // Campuses
+  async function loadAdminCampuses() {
+    try {
+      const res = await api('/api/admin/campuses');
+      const list = res.campuses || [];
+      const tbody = $('#campusRows');
+      if (!tbody) return;
+      tbody.innerHTML = list.map(c => `
+        <tr>
+          <td><b>${escapeHtml(c.name)}</b><br><small style="color:#64748b">${escapeHtml(c.address || 'Address not specified')}</small></td>
+          <td><span class="pupil-id">${escapeHtml(c.code)}</span></td>
+          <td>${escapeHtml(c.timezone)}</td>
+          <td>${(c.gates || []).map(g => `<span class="class-pill" style="margin:1px">${escapeHtml(g)}</span>`).join(' ')}</td>
+          <td>${badge(c.active ? 'Active' : 'Inactive', c.active ? 'status-approved' : 'status-neutral')}</td>
+          <td><button class="button button-outline button-small edit-campus-btn" data-campus-id="${c.id}">Edit</button></td>
+        </tr>
+      `).join('') || '<tr><td colspan="6">No campuses found.</td></tr>';
+    } catch {}
+  }
+
+  // Sessions
+  async function loadAdminSessions() {
+    try {
+      const res = await api('/api/sessions');
+      const sessions = res.sessions || [];
+      const tbody = $('#sessionRows');
+      if (!tbody) return;
+      tbody.innerHTML = sessions.map(s => `
+        <tr>
+          <td><b>${escapeHtml(s.name)}</b></td>
+          <td>${escapeHtml(s.startTime)} - ${escapeHtml(s.endTime)}</td>
+          <td><span class="status-pill ${s.defaultMode==='arrival'?'status-present':s.defaultMode==='departure'?'status-departed':'status-approved'}">${escapeHtml(s.defaultMode)}</span></td>
+          <td><button class="button button-outline button-small" data-session-name="${escapeHtml(s.name)}">Active</button></td>
+        </tr>
+      `).join('') || '<tr><td colspan="4">No sessions found.</td></tr>';
+    } catch {}
+  }
+
+  // Classes
+  async function loadAdminClasses() {
+    try {
+      const res = await api('/api/admin/classes');
+      const list = res.classes || [];
+      const tbody = $('#classRows');
+      if (!tbody) return;
+      tbody.innerHTML = list.map(cl => `
+        <tr>
+          <td><b>${escapeHtml(cl.name)}</b></td>
+          <td>${escapeHtml(cl.gradeLevel || 'N/A')}</td>
+          <td>${escapeHtml(cl.campus)}</td>
+          <td>${escapeHtml(cl.teacherName || 'Unassigned')}</td>
+          <td>${cl.capacity} pupils</td>
+          <td><button class="button button-outline button-small edit-class-btn" data-class-id="${cl.id}">Edit</button></td>
+        </tr>
+      `).join('') || '<tr><td colspan="6">No classes configured.</td></tr>';
+    } catch {}
+  }
+
+  // Devices & Lock
+  async function loadAdminDevices() {
+    try {
+      const res = await api('/api/admin/devices');
+      const list = res.devices || [];
+      const tbody = $('#deviceRows');
+      if (!tbody) return;
+      tbody.innerHTML = list.map(d => `
+        <tr>
+          <td><b>${escapeHtml(d.name)}</b><br><small style="color:#64748b">${escapeHtml(d.id)}</small></td>
+          <td><span class="class-pill">${escapeHtml(d.type.toUpperCase())}</span></td>
+          <td>${escapeHtml(d.assignedCampus)} (${escapeHtml(d.assignedGate)})</td>
+          <td>${escapeHtml(d.assignedStaff || 'Unassigned')}</td>
+          <td>${d.deviceLockEnabled ? '<span style="color:#16a34a;font-weight:600">✓ PIN Locked</span>' : '<span style="color:#b91c1c">Unlocked</span>'}</td>
+          <td>${badge(d.status.toUpperCase(), d.status==='active'?'status-approved':'status-departed')}</td>
+          <td>
+            ${d.status==='active' ? `
+              <button class="button button-outline button-small revoke-device-btn" data-device-id="${d.id}" data-device-name="${escapeHtml(d.name)}" style="color:#b91c1c;border-color:#fca5a5">Revoke Lost Device</button>
+            ` : '<small style="color:#b91c1c">Revoked</small>'}
+          </td>
+        </tr>
+      `).join('') || '<tr><td colspan="7">No devices registered.</td></tr>';
+    } catch {}
+  }
+
+  // Templates
+  async function loadAdminTemplates() {
+    try {
+      const res = await api('/api/admin/templates');
+      const list = res.templates || [];
+      const tbody = $('#templateRows');
+      if (!tbody) return;
+      tbody.innerHTML = list.map(t => `
+        <tr>
+          <td><b>${escapeHtml(t.name)}</b><br><small style="color:#64748b">${escapeHtml(t.id)}</small></td>
+          <td><span class="class-pill">${escapeHtml(t.type)}</span></td>
+          <td>${escapeHtml(t.channel.toUpperCase())}</td>
+          <td><code style="font-size:10px">${escapeHtml(t.templateBody)}</code></td>
+          <td><button class="button button-outline button-small edit-template-btn" data-template-id="${t.id}">Edit</button></td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">No templates configured.</td></tr>';
+    } catch {}
+  }
+
+  // Escalation Contacts
+  async function loadAdminEscalation() {
+    try {
+      const res = await api('/api/admin/escalation-contacts');
+      const list = res.contacts || [];
+      const tbody = $('#escalationRows');
+      if (!tbody) return;
+      tbody.innerHTML = list.map(c => `
+        <tr>
+          <td><b>${escapeHtml(c.name)}</b></td>
+          <td>${escapeHtml(c.role)}</td>
+          <td>${escapeHtml(c.phone)}</td>
+          <td>${escapeHtml(c.email || '—')}</td>
+          <td>Priority ${c.priority}</td>
+          <td>${escapeHtml(c.campus)}</td>
+          <td><button class="button button-outline button-small edit-esc-btn" data-esc-id="${c.id}">Edit</button></td>
+        </tr>
+      `).join('') || '<tr><td colspan="7">No escalation contacts added.</td></tr>';
+    } catch {}
+  }
+
+  // Retention Settings
+  async function loadAdminRetention() {
+    try {
+      const res = await api('/api/admin/retention');
+      const cfg = res.retentionSettings || {};
+      if ($('#retentionAttendanceDays')) $('#retentionAttendanceDays').value = cfg.attendanceRetentionDays || 365;
+      if ($('#retentionAuditDays')) $('#retentionAuditDays').value = cfg.auditLogRetentionDays || 730;
+      if ($('#retentionQueueHours')) $('#retentionQueueHours').value = cfg.offlineQueueTtlHours || 24;
+      if ($('#retentionSessionMinutes')) $('#retentionSessionMinutes').value = cfg.sessionTimeoutMinutes || 480;
+      if ($('#retentionAutoPurge')) $('#retentionAutoPurge').checked = cfg.autoPurgeEnabled !== false;
+    } catch {}
+  }
+
+  // Audit Log
+  async function loadAdminAudit() {
+    try {
+      const res = await api('/api/admin/audit?limit=50');
+      const list = res.entries || [];
+      const tbody = $('#adminAuditRows');
+      if (!tbody) return;
+      tbody.innerHTML = list.map(e => `
+        <tr>
+          <td><small>${escapeHtml(e.timestamp.replace('T', ' ').slice(0, 19))}</small></td>
+          <td><b>${escapeHtml(e.actorName)}</b><br><small style="color:#64748b">${escapeHtml(e.actorEmail)}</small></td>
+          <td><span class="pupil-id">${escapeHtml(e.action)}</span></td>
+          <td>${escapeHtml(e.objectType)} (${escapeHtml(e.objectId)})</td>
+          <td><small>${escapeHtml(e.reason)}</small></td>
+        </tr>
+      `).join('') || '<tr><td colspan="5">No audit entries found.</td></tr>';
+    } catch {}
+  }
+
+  // Revoke Staff Account click handler
+  document.addEventListener('click', async e => {
+    const revokeUserBtn = e.target.closest('[data-revoke-user]');
+    if (revokeUserBtn) {
+      const userId = revokeUserBtn.dataset.revokeUser;
+      const userName = revokeUserBtn.dataset.userName;
+      const reason = prompt(`Enter mandatory revocation reason for staff member ${userName}:`, 'Staff departure / access revoked');
+      if (reason === null) return;
+      try {
+        const res = await api(`/api/users/${userId}/revoke`, { reason: reason || 'Staff account revoked' });
+        toast(res.message);
+        renderUsers();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    }
+
+    const revokeDevBtn = e.target.closest('.revoke-device-btn');
+    if (revokeDevBtn) {
+      const devId = revokeDevBtn.dataset.deviceId;
+      const devName = revokeDevBtn.dataset.deviceName;
+      const reason = prompt(`Enter reason for revoking lost or compromised device '${devName}':`, 'Device lost during school transport drill');
+      if (reason === null) return;
+      try {
+        const res = await api(`/api/admin/devices/${devId}/revoke`, { reason: reason || 'Device lost', status: 'lost' });
+        toast(res.message);
+        loadAdminDevices();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    }
+  });
+
+  // Admin MFA Setup Modal
+  $('#adminMfaSetupBtn')?.addEventListener('click', async () => {
+    try {
+      const res = await api('/api/admin/mfa/setup', {});
+      openModal(`
+        <h2 id="modalTitle">Administrator Multi-Factor Authentication</h2>
+        <p class="modal-intro">MFA is required for administrator sign-in. Scan or record your MFA secret key and confirm with a 6-digit verification code.</p>
+        <div style="background:#f8fafc;padding:12px;border:1px solid #e2e8f0;border-radius:6px;margin:12px 0;text-align:center">
+          <small style="display:block;color:#64748b;margin-bottom:4px">MFA Secret Key</small>
+          <code style="font-size:13px;font-weight:700;color:#1e40af">${escapeHtml(res.mfaSecret)}</code>
+          <p style="font-size:10px;color:#64748b;margin-top:6px">For testing/demo verification, enter test code <b>123456</b></p>
+        </div>
+        <form id="confirmMfaForm" class="form-grid">
+          <div class="form-field full">
+            <label>6-Digit Verification Code *</label>
+            <input name="mfaToken" required placeholder="e.g. 123456" value="123456">
+          </div>
+          <div class="modal-actions form-field full">
+            <button type="button" class="button button-outline" id="cancelMfaSetup">Cancel</button>
+            <button type="submit" class="button button-primary">Verify & Enable MFA</button>
+          </div>
+        </form>
+      `);
+      $('#cancelMfaSetup').onclick = closeModal;
+      $('#confirmMfaForm').onsubmit = async ev => {
+        ev.preventDefault();
+        const f = new FormData(ev.currentTarget);
+        try {
+          const enableRes = await api('/api/admin/mfa/enable', { mfaToken: f.get('mfaToken') });
+          closeModal();
+          toast(enableRes.message);
+        } catch (err) {
+          toast(err.message, '!');
+        }
+      };
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  });
+
+  // Retention Settings Submit
+  $('#retentionSettingsForm')?.addEventListener('submit', async ev => {
+    ev.preventDefault();
+    const f = new FormData(ev.currentTarget);
+    try {
+      const res = await api('/api/admin/retention', {
+        attendanceRetentionDays: f.get('attendanceRetentionDays'),
+        auditLogRetentionDays: f.get('auditLogRetentionDays'),
+        offlineQueueTtlHours: f.get('offlineQueueTtlHours'),
+        sessionTimeoutMinutes: f.get('sessionTimeoutMinutes'),
+        autoPurgeEnabled: f.get('autoPurgeEnabled') !== null
+      });
+      toast('Data retention settings saved.');
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  });
+
+  // Execute Retention Purge
+  $('#executePurgeBtn')?.addEventListener('click', async () => {
+    if (!confirm('Are you sure you want to execute retention purge? Expired attendance logs and audit entries will be permanently deleted per school policy.')) return;
+    try {
+      const res = await api('/api/admin/retention/purge', {});
+      toast(`Purged ${res.purged.attendanceRecords} attendance logs & ${res.purged.auditEntries} audit entries.`);
+      loadAdminRetention();
+      loadAdminAudit();
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  });
+
+  // Export Audit CSV
+  const triggerAuditExport = async () => {
+    try {
+      const res = await fetch('/api/admin/export/audit?format=csv', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: 'Admin exported audit trail' })
+      });
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `gatewise-audit-${today}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast('Administrative audit log exported.');
+      loadAdminAudit();
+    } catch (e) {
+      toast(e.message, '!');
+    }
+  };
+
+  $('#exportAuditDataBtn')?.addEventListener('click', triggerAuditExport);
+  $('#exportAuditDataBtn2')?.addEventListener('click', triggerAuditExport);
+  $('#refreshAuditBtn')?.addEventListener('click', loadAdminAudit);
   async function previewRoster(file){if(!file)return;if(file.size>8*1024*1024){toast('Roster files must be 8 MB or smaller.','!');return}if(!/\.(csv|xlsx)$/i.test(file.name)){toast('Choose a CSV or XLSX file.','!');return}try{const buffer=await file.arrayBuffer();let binary='';const bytes=new Uint8Array(buffer);for(let i=0;i<bytes.length;i+=0x8000)binary+=String.fromCharCode(...bytes.subarray(i,i+0x8000));const {preview,errors,errorCount,token}=await api('/api/import/preview',{filename:file.name,fileBase64:btoa(binary)});const rows=preview.map(p=>`<tr><td>${escapeHtml(p.pupil_id)}</td><td>${escapeHtml(p.pupil_name)}</td><td>${escapeHtml(p.class_name)}</td><td>${escapeHtml(p.guardian_name)}</td></tr>`).join('');openModal(`<h2 id="modalTitle">Review pupil roster</h2><p class="modal-intro">${errorCount?`${errorCount} issue(s) found. Correct the file and upload again; nothing has been imported.`:`${preview.length} pupil(s) ready. Review the sample, then import the entire file.`}</p>${preview.length?`<div class="import-preview-wrap"><table class="import-preview-table"><thead><tr><th>PUPIL ID</th><th>NAME</th><th>CLASS</th><th>GUARDIAN</th></tr></thead><tbody>${rows}</tbody></table></div>`:''}${errorCount?`<div class="import-errors">${errors.map(e=>`<div>Row ${e.row}${e.pupil_id?` · ${escapeHtml(e.pupil_id)}`:''}: ${escapeHtml(e.message)}</div>`).join('')}</div>`:''}<div class="modal-actions"><button class="button button-outline" id="cancelImport">Close</button>${token&&!errorCount?'<button class="button button-primary" id="commitImport">Import pupils</button>':''}</div>`);$('#cancelImport').onclick=closeModal;if(token&&!errorCount)$('#commitImport').onclick=async()=>{const button=$('#commitImport');button.disabled=true;button.textContent='Importing…';try{const result=await api('/api/import/commit',{token});acceptState(result.state);closeModal();render();toast(`${result.imported} pupil(s) imported.`)}catch(err){toast(err.message,'!');button.disabled=false;button.textContent='Import pupils'}}}catch(err){toast(err.message,'!')}finally{$('#rosterFile').value=''}}
   function qrValue(p){return p.cardToken || `GW:${p.id}`;}
 

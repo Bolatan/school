@@ -19,7 +19,12 @@ const {
   Guardian,
   PupilGuardian,
   CorrectionRequest,
-  Card
+  Card,
+  Campus,
+  SchoolClass,
+  Device,
+  NotificationTemplate,
+  EscalationContact
 } = require('./models');
 const {
   DEMO_EMAIL,
@@ -32,7 +37,10 @@ const {
   formatTimeInTimezone,
   formatDateInTimezone,
   seedInitialData,
-  getNextCollectorId
+  getNextCollectorId,
+  isStrongStaffPassword,
+  generateMfaSecret,
+  verifyMfaToken
 } = require('./authUtils');
 
 const app = express();
@@ -171,11 +179,24 @@ async function getStateJson() {
   const configuredSessions = schoolSettingsMap.operatingSessions || defaultSessions;
   const sessionNames = configuredSessions.map(s => s.name || s);
 
+  // Fetch campuses and devices from MongoDB collections
+  const campusDocs = await Campus.find({ active: true }).sort({ name: 1 });
+  const campusNames = campusDocs.length > 0 ? campusDocs.map(c => c.name) : ["Primary campus", "Secondary campus", "North gate annex"];
+  const campusGates = campusDocs.length > 0 ? [...new Set(campusDocs.flatMap(c => c.gates || []))] : ["Main gate", "East pedestrian gate", "Bus drop-off gate"];
+
+  const deviceDocs = await Device.find({ status: 'active' }).sort({ name: 1 });
+  const deviceNames = deviceDocs.length > 0 ? deviceDocs.map(d => d.name) : ["Primary Gate Terminal", "East Gate Handheld", "Bus Loop Scanner", "Admin Front Desk"];
+
   const defaultCampusTimezones = {
     "Primary campus": "Europe/London",
     "Secondary campus": "Europe/London",
     "North gate annex": "Europe/London"
   };
+  if (campusDocs.length > 0) {
+    campusDocs.forEach(c => {
+      defaultCampusTimezones[c.name] = c.timezone || "Europe/London";
+    });
+  }
   const campusTimezones = schoolSettingsMap.campusTimezones || defaultCampusTimezones;
   const schoolTimezone = schoolSettingsMap.timezone || "Europe/London";
 
@@ -230,13 +251,13 @@ async function getStateJson() {
     school: {
       name: "Northfield Academy",
       campus: "Primary campus",
-      campuses: ["Primary campus", "Secondary campus", "North gate annex"],
-      gates: ["Main gate", "East pedestrian gate", "Bus drop-off gate"],
+      campuses: campusNames,
+      gates: campusGates,
       timezone: schoolTimezone,
       campusTimezones,
       operatingSessions: configuredSessions,
       sessions: sessionNames,
-      devices: ["Primary Gate Terminal", "East Gate Handheld", "Bus Loop Scanner", "Admin Front Desk"],
+      devices: deviceNames,
       discloseCollectorName: schoolSettingsMap.discloseCollectorName !== undefined ? Boolean(schoolSettingsMap.discloseCollectorName) : true,
       allowOfflineStalePickupPolicy: schoolSettingsMap.allowOfflineStalePickupPolicy !== undefined ? Boolean(schoolSettingsMap.allowOfflineStalePickupPolicy) : false,
       totalPupils: 248
@@ -251,9 +272,18 @@ function getUsersJson(userDocs) {
     email: u.email,
     name: u.name,
     role: u.role,
-    active: u.active
+    active: u.active,
+    mfaEnabled: Boolean(u.mfaEnabled),
+    mfaEnforced: Boolean(u.mfaEnforced),
+    deviceLockEnforced: Boolean(u.deviceLockEnforced),
+    assignedCampus: u.assignedCampus || 'Primary campus',
+    revokedAt: u.revokedAt,
+    revokedReason: u.revokedReason
   }));
 }
+
+// In-memory challenge storage for Multi-Factor Authentication
+const MFA_PENDING_CHALLENGES = new Map();
 
 // Routes
 app.get('/api/me', async (req, res) => {
@@ -273,7 +303,10 @@ app.get('/api/me', async (req, res) => {
         name: user.name,
         role: user.role,
         guardianId: user.guardianId || null,
-        guardianStatus: guardianData ? guardianData.status : null
+        guardianStatus: guardianData ? guardianData.status : null,
+        mfaEnabled: Boolean(user.mfaEnabled),
+        deviceLockEnforced: Boolean(user.deviceLockEnforced),
+        assignedCampus: user.assignedCampus || 'Primary campus'
       }
     });
   } catch (err) {
@@ -285,11 +318,73 @@ app.post('/api/login', async (req, res) => {
   try {
     const email = String(req.body.email || '').trim().toLowerCase();
     const password = String(req.body.password || '');
+    const mfaToken = req.body.mfaToken ? String(req.body.mfaToken).trim() : null;
+    const devicePin = req.body.devicePin ? String(req.body.devicePin).trim() : null;
+    const deviceName = req.body.device ? String(req.body.device).trim() : null;
+
     const user = await User.findOne({ email, active: true });
     if (!user || !verifyPassword(password, user.salt, user.passwordHash)) {
       return res.status(401).json({ error: 'Email or password is incorrect.' });
     }
 
+    // Check lost/revoked device prompt check if device is specified
+    if (deviceName) {
+      const dev = await Device.findOne({ name: deviceName });
+      if (dev && (dev.status === 'revoked' || dev.status === 'lost')) {
+        await AuditEntry.create({
+          userId: user._id,
+          action: 'blocked_revoked_device_sign_in',
+          objectType: 'device',
+          objectId: dev.id,
+          reason: `Attempted login on ${dev.status} device: ${dev.name}`,
+          createdAt: new Date()
+        });
+        return res.status(403).json({ error: `Sign-in blocked: Device '${dev.name}' is marked as ${dev.status}. Contact administrator immediately.` });
+      }
+
+      // Check device lock requirement for strong staff sign-in
+      if (dev && dev.deviceLockEnabled && (user.role === 'admin' || user.role === 'manager' || user.deviceLockEnforced)) {
+        if (!devicePin || devicePin !== dev.deviceLockPin) {
+          return res.status(401).json({
+            error: 'Strong staff sign-in: Valid device lock PIN is required for this terminal.',
+            requiresDevicePin: true
+          });
+        }
+      }
+    }
+
+    // Require multi-factor authentication (MFA) for administrators where supported/enforced
+    if (user.role === 'admin' && (user.mfaEnabled || user.mfaEnforced)) {
+      if (!mfaToken) {
+        // Issue MFA Challenge
+        const mfaChallengeToken = crypto.randomBytes(24).toString('base64url');
+        MFA_PENDING_CHALLENGES.set(mfaChallengeToken, {
+          userId: user._id.toString(),
+          expiresAt: Date.now() + 5 * 60 * 1000 // 5 minutes validity
+        });
+        return res.status(200).json({
+          requiresMfa: true,
+          mfaChallengeToken,
+          message: 'Multi-factor authentication required for administrator sign-in. Enter your 6-digit verification code.'
+        });
+      }
+
+      // Validate MFA token
+      const isMfaValid = verifyMfaToken(user.mfaSecret, mfaToken);
+      if (!isMfaValid) {
+        await AuditEntry.create({
+          userId: user._id,
+          action: 'failed_admin_mfa',
+          objectType: 'user',
+          objectId: user._id.toString(),
+          reason: 'Invalid 6-digit MFA verification code entered',
+          createdAt: new Date()
+        });
+        return res.status(401).json({ error: 'Invalid multi-factor authentication code.' });
+      }
+    }
+
+    // Successful sign-in session creation
     const token = crypto.randomBytes(32).toString('base64url');
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     const expiry = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
@@ -310,6 +405,15 @@ app.post('/api/login', async (req, res) => {
       sameSite: 'strict'
     });
 
+    await AuditEntry.create({
+      userId: user._id,
+      action: 'staff_sign_in',
+      objectType: 'user',
+      objectId: user._id.toString(),
+      reason: `Sign-in successful; role=${user.role}; mfa=${Boolean(user.mfaEnabled)}; device=${deviceName || 'default'}`,
+      createdAt: new Date()
+    });
+
     const state = user.role === 'guardian' ? null : await getStateJson();
     res.json({
       user: {
@@ -317,7 +421,90 @@ app.post('/api/login', async (req, res) => {
         email: user.email,
         name: user.name,
         role: user.role,
-        guardianId: user.guardianId || null
+        guardianId: user.guardianId || null,
+        mfaEnabled: Boolean(user.mfaEnabled),
+        deviceLockEnforced: Boolean(user.deviceLockEnforced)
+      },
+      state
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint to complete MFA verification when challenge token was returned
+app.post('/api/login/mfa-verify', async (req, res) => {
+  try {
+    const { mfaChallengeToken, mfaToken, device } = req.body;
+    if (!mfaChallengeToken || !mfaToken) {
+      return res.status(400).json({ error: 'MFA challenge token and verification code are required.' });
+    }
+
+    const challenge = MFA_PENDING_CHALLENGES.get(mfaChallengeToken);
+    if (!challenge || challenge.expiresAt < Date.now()) {
+      MFA_PENDING_CHALLENGES.delete(mfaChallengeToken);
+      return res.status(400).json({ error: 'MFA challenge expired. Please sign in again.' });
+    }
+
+    const user = await User.findById(challenge.userId);
+    if (!user || !user.active) {
+      MFA_PENDING_CHALLENGES.delete(mfaChallengeToken);
+      return res.status(401).json({ error: 'User account inactive or not found.' });
+    }
+
+    const isMfaValid = verifyMfaToken(user.mfaSecret, mfaToken);
+    if (!isMfaValid) {
+      await AuditEntry.create({
+        userId: user._id,
+        action: 'failed_admin_mfa',
+        objectType: 'user',
+        objectId: user._id.toString(),
+        reason: 'Invalid 6-digit MFA verification code entered at challenge completion',
+        createdAt: new Date()
+      });
+      return res.status(401).json({ error: 'Invalid multi-factor authentication code.' });
+    }
+
+    MFA_PENDING_CHALLENGES.delete(mfaChallengeToken);
+
+    const token = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expiry = Math.floor(Date.now() / 1000) + SESSION_SECONDS;
+
+    await Session.create({
+      tokenHash,
+      userId: user._id,
+      expiresAt: expiry,
+      createdAt: Math.floor(Date.now() / 1000)
+    });
+
+    res.cookie('gw_session', token, {
+      path: '/',
+      maxAge: SESSION_SECONDS * 1000,
+      httpOnly: true,
+      sameSite: 'strict'
+    });
+
+    await AuditEntry.create({
+      userId: user._id,
+      action: 'admin_mfa_sign_in_success',
+      objectType: 'user',
+      objectId: user._id.toString(),
+      reason: `MFA verified; device=${device || 'default'}`,
+      createdAt: new Date()
+    });
+
+    const state = user.role === 'guardian' ? null : await getStateJson();
+    res.json({
+      ok: true,
+      user: {
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        guardianId: user.guardianId || null,
+        mfaEnabled: Boolean(user.mfaEnabled),
+        deviceLockEnforced: Boolean(user.deviceLockEnforced)
       },
       state
     });
@@ -364,23 +551,36 @@ app.post('/api/users', requireAuth(['admin']), async (req, res) => {
     const email = String(req.body.email || '').trim().toLowerCase().slice(0, 200);
     const role = String(req.body.role || '');
     const password = String(req.body.password || '');
+    const mfaEnforced = req.body.mfaEnforced !== undefined ? Boolean(req.body.mfaEnforced) : (role === 'admin');
+    const deviceLockEnforced = req.body.deviceLockEnforced !== undefined ? Boolean(req.body.deviceLockEnforced) : true;
+    const assignedCampus = req.body.assignedCampus ? String(req.body.assignedCampus).trim() : 'Primary campus';
 
     if (!name) return res.status(400).json({ error: "Enter the user's name." });
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
     if (!['admin', 'manager', 'viewer'].includes(role)) return res.status(400).json({ error: 'Choose admin, manager, or viewer.' });
     if (password.length < 12) return res.status(400).json({ error: 'Temporary password must be at least 12 characters.' });
+    if (!isStrongStaffPassword(password)) {
+      return res.status(400).json({ error: 'Strong staff sign-in requires uppercase, lowercase, numbers, and special characters.' });
+    }
 
     const existing = await User.findOne({ email });
     if (existing) return res.status(409).json({ error: 'A user with that email already exists.' });
 
     const { salt, hash } = passwordHash(password);
+    const mfaSecret = generateMfaSecret();
+
     const newUser = await User.create({
       email,
       name,
       role,
       salt,
       passwordHash: hash,
-      active: true
+      active: true,
+      mfaEnabled: role === 'admin' || mfaEnforced,
+      mfaSecret,
+      mfaEnforced,
+      deviceLockEnforced,
+      assignedCampus
     });
 
     await AuditEntry.create({
@@ -388,12 +588,12 @@ app.post('/api/users', requireAuth(['admin']), async (req, res) => {
       action: 'create_user',
       objectType: 'user',
       objectId: newUser._id.toString(),
-      reason: role,
+      reason: `role=${role}; mfaEnforced=${mfaEnforced}; deviceLock=${deviceLockEnforced}; campus=${assignedCampus}`,
       createdAt: new Date()
     });
 
     const userDocs = await User.find().sort({ name: 1 });
-    res.status(201).json({ ok: true, users: getUsersJson(userDocs) });
+    res.status(201).json({ ok: true, users: getUsersJson(userDocs), mfaSecret });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -402,7 +602,7 @@ app.post('/api/users', requireAuth(['admin']), async (req, res) => {
 app.post('/api/users/:id', requireAuth(['admin']), async (req, res) => {
   try {
     const userId = req.params.id;
-    const { role, active } = req.body;
+    const { role, active, mfaEnforced, deviceLockEnforced, assignedCampus, reason } = req.body;
 
     if (role !== undefined && !['admin', 'manager', 'viewer'].includes(role)) {
       return res.status(400).json({ error: 'Choose admin, manager, or viewer.' });
@@ -432,6 +632,13 @@ app.post('/api/users/:id', requireAuth(['admin']), async (req, res) => {
 
     targetUser.role = finalRole;
     targetUser.active = finalActive;
+    if (mfaEnforced !== undefined) {
+      targetUser.mfaEnforced = Boolean(mfaEnforced);
+      targetUser.mfaEnabled = Boolean(mfaEnforced);
+    }
+    if (deviceLockEnforced !== undefined) targetUser.deviceLockEnforced = Boolean(deviceLockEnforced);
+    if (assignedCampus) targetUser.assignedCampus = String(assignedCampus).trim();
+
     await targetUser.save();
 
     await AuditEntry.create({
@@ -439,7 +646,7 @@ app.post('/api/users/:id', requireAuth(['admin']), async (req, res) => {
       action: 'update_user',
       objectType: 'user',
       objectId: userId,
-      reason: `role=${finalRole}; active=${finalActive}`,
+      reason: `role=${finalRole}; active=${finalActive}; mfaEnforced=${targetUser.mfaEnforced}; note=${reason || 'admin update'}`,
       createdAt: new Date()
     });
 
@@ -449,6 +656,713 @@ app.post('/api/users/:id', requireAuth(['admin']), async (req, res) => {
 
     const userDocs = await User.find().sort({ name: 1 });
     res.json({ ok: true, users: getUsersJson(userDocs) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Revoke staff account promptly with immediate session termination and preserved audit entry
+app.post('/api/users/:id/revoke', requireAuth(['admin']), async (req, res) => {
+  try {
+    const userId = req.params.id;
+    const reason = String(req.body.reason || 'Staff account revoked by administrator').trim();
+
+    if (req.user._id.toString() === userId) {
+      return res.status(400).json({ error: 'You cannot revoke your own administrator account.' });
+    }
+
+    const targetUser = await User.findById(userId);
+    if (!targetUser) return res.status(404).json({ error: 'User not found.' });
+
+    if (targetUser.role === 'admin' && targetUser.active) {
+      const activeAdmins = await User.countDocuments({ role: 'admin', active: true });
+      if (activeAdmins <= 1) {
+        return res.status(400).json({ error: 'Keep at least one active administrator.' });
+      }
+    }
+
+    targetUser.active = false;
+    targetUser.revokedAt = new Date();
+    targetUser.revokedReason = reason;
+    await targetUser.save();
+
+    // Terminate all sessions promptly
+    await Session.deleteMany({ userId: targetUser._id });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'revoke_staff_account',
+      objectType: 'user',
+      objectId: userId,
+      reason: `Revoked staff account: ${targetUser.email} (${targetUser.name}); reason=${reason}`,
+      createdAt: new Date()
+    });
+
+    const userDocs = await User.find().sort({ name: 1 });
+    res.json({ ok: true, message: `Staff account for ${targetUser.name} revoked promptly. Sessions terminated.`, users: getUsersJson(userDocs) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// ADMINISTRATION CRUD & MANAGEMENT ENDPOINTS
+// -------------------------------------------------------------
+
+// 1. CAMPUSES MANAGEMENT
+app.get('/api/admin/campuses', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const campuses = await Campus.find().sort({ name: 1 });
+    res.json({ campuses });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/campuses', requireAuth(['admin']), async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const code = String(req.body.code || '').trim().toUpperCase();
+    const address = String(req.body.address || '').trim();
+    const timezone = String(req.body.timezone || 'Europe/London').trim();
+    const gates = Array.isArray(req.body.gates) ? req.body.gates.map(g => String(g).trim()).filter(Boolean) : ['Main gate'];
+
+    if (!name || !code) {
+      return res.status(400).json({ error: 'Campus name and code are required.' });
+    }
+
+    const id = req.body.id ? String(req.body.id).trim() : 'camp-' + code.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const existing = await Campus.findOne({ $or: [{ id }, { code }] });
+    if (existing) {
+      return res.status(409).json({ error: 'A campus with that code or ID already exists.' });
+    }
+
+    const campus = await Campus.create({
+      id,
+      name,
+      code,
+      address,
+      timezone,
+      gates,
+      active: true
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'create_campus',
+      objectType: 'campus',
+      objectId: campus.id,
+      reason: `Created campus ${name} (${code}) with gates: ${gates.join(', ')}`,
+      createdAt: new Date()
+    });
+
+    const campuses = await Campus.find().sort({ name: 1 });
+    res.status(201).json({ ok: true, campus, campuses });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/campuses/:id', requireAuth(['admin']), async (req, res) => {
+  try {
+    const campus = await Campus.findOne({ id: req.params.id });
+    if (!campus) return res.status(404).json({ error: 'Campus not found.' });
+
+    if (req.body.name) campus.name = String(req.body.name).trim();
+    if (req.body.address !== undefined) campus.address = String(req.body.address).trim();
+    if (req.body.timezone) campus.timezone = String(req.body.timezone).trim();
+    if (Array.isArray(req.body.gates)) campus.gates = req.body.gates.map(g => String(g).trim()).filter(Boolean);
+    if (req.body.active !== undefined) campus.active = Boolean(req.body.active);
+
+    await campus.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_campus',
+      objectType: 'campus',
+      objectId: campus.id,
+      reason: `Updated campus ${campus.name}; active=${campus.active}`,
+      createdAt: new Date()
+    });
+
+    const campuses = await Campus.find().sort({ name: 1 });
+    res.json({ ok: true, campus, campuses });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 2. CLASSES MANAGEMENT
+app.get('/api/admin/classes', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const classes = await SchoolClass.find().sort({ name: 1 });
+    res.json({ classes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/classes', requireAuth(['admin']), async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const gradeLevel = String(req.body.gradeLevel || '').trim();
+    const campus = String(req.body.campus || 'Primary campus').trim();
+    const teacherName = String(req.body.teacherName || '').trim();
+    const room = String(req.body.room || '').trim();
+    const capacity = Number(req.body.capacity) || 30;
+
+    if (!name) return res.status(400).json({ error: 'Class name is required.' });
+
+    const id = req.body.id ? String(req.body.id).trim() : 'cls-' + name.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    const existing = await SchoolClass.findOne({ id });
+    if (existing) return res.status(409).json({ error: 'Class ID already exists.' });
+
+    const newClass = await SchoolClass.create({
+      id,
+      name,
+      gradeLevel,
+      campus,
+      teacherName,
+      room,
+      capacity,
+      active: true
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'create_class',
+      objectType: 'school_class',
+      objectId: newClass.id,
+      reason: `Created class ${name} at ${campus} with teacher ${teacherName}`,
+      createdAt: new Date()
+    });
+
+    const classes = await SchoolClass.find().sort({ name: 1 });
+    res.status(201).json({ ok: true, schoolClass: newClass, classes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/classes/:id', requireAuth(['admin']), async (req, res) => {
+  try {
+    const targetClass = await SchoolClass.findOne({ id: req.params.id });
+    if (!targetClass) return res.status(404).json({ error: 'Class not found.' });
+
+    if (req.body.name) targetClass.name = String(req.body.name).trim();
+    if (req.body.gradeLevel !== undefined) targetClass.gradeLevel = String(req.body.gradeLevel).trim();
+    if (req.body.campus) targetClass.campus = String(req.body.campus).trim();
+    if (req.body.teacherName !== undefined) targetClass.teacherName = String(req.body.teacherName).trim();
+    if (req.body.room !== undefined) targetClass.room = String(req.body.room).trim();
+    if (req.body.capacity !== undefined) targetClass.capacity = Number(req.body.capacity) || 30;
+    if (req.body.active !== undefined) targetClass.active = Boolean(req.body.active);
+
+    await targetClass.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_class',
+      objectType: 'school_class',
+      objectId: targetClass.id,
+      reason: `Updated class ${targetClass.name}; active=${targetClass.active}`,
+      createdAt: new Date()
+    });
+
+    const classes = await SchoolClass.find().sort({ name: 1 });
+    res.json({ ok: true, schoolClass: targetClass, classes });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 3. DEVICES MANAGEMENT, PROMPT REVOCATION & DEVICE LOCK
+app.get('/api/admin/devices', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const devices = await Device.find().sort({ createdAt: -1 });
+    res.json({ devices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/devices', requireAuth(['admin']), async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const type = ['terminal', 'handheld', 'tablet', 'kiosk'].includes(req.body.type) ? req.body.type : 'terminal';
+    const assignedStaff = String(req.body.assignedStaff || '').trim();
+    const assignedCampus = String(req.body.assignedCampus || 'Primary campus').trim();
+    const assignedGate = String(req.body.assignedGate || 'Main gate').trim();
+    const deviceLockPin = String(req.body.deviceLockPin || '1234').trim();
+    const deviceLockEnabled = req.body.deviceLockEnabled !== undefined ? Boolean(req.body.deviceLockEnabled) : true;
+
+    if (!name) return res.status(400).json({ error: 'Device name is required.' });
+
+    const id = req.body.id ? String(req.body.id).trim().toUpperCase() : 'DEV-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const existing = await Device.findOne({ id });
+    if (existing) return res.status(409).json({ error: 'Device ID already exists.' });
+
+    const device = await Device.create({
+      id,
+      name,
+      type,
+      assignedStaff,
+      assignedCampus,
+      assignedGate,
+      deviceLockEnabled,
+      deviceLockPin,
+      status: 'active',
+      lastSeenAt: new Date()
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'register_device',
+      objectType: 'device',
+      objectId: device.id,
+      reason: `Registered managed device ${name} (${type}) for ${assignedCampus}; lockEnabled=${deviceLockEnabled}`,
+      createdAt: new Date()
+    });
+
+    const devices = await Device.find().sort({ createdAt: -1 });
+    res.status(201).json({ ok: true, device, devices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Revoke lost or compromised device promptly
+app.post('/api/admin/devices/:id/revoke', requireAuth(['admin']), async (req, res) => {
+  try {
+    const deviceId = req.params.id;
+    const reason = String(req.body.reason || 'Device reported lost or compromised').trim();
+    const isLost = req.body.status === 'lost';
+
+    const device = await Device.findOne({ id: deviceId });
+    if (!device) return res.status(404).json({ error: 'Device not found.' });
+
+    device.status = isLost ? 'lost' : 'revoked';
+    device.revokedAt = new Date();
+    device.revokedReason = reason;
+    await device.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: isLost ? 'report_lost_device' : 'revoke_device',
+      objectType: 'device',
+      objectId: device.id,
+      reason: `Promptly revoked device ${device.name} (${device.id}); status=${device.status}; reason=${reason}`,
+      createdAt: new Date()
+    });
+
+    const devices = await Device.find().sort({ createdAt: -1 });
+    res.json({ ok: true, message: `Device ${device.name} has been promptly revoked. Sign-in on this device is blocked.`, device, devices });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 4. NOTIFICATION TEMPLATES MANAGEMENT
+app.get('/api/admin/templates', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const templates = await NotificationTemplate.find().sort({ name: 1 });
+    res.json({ templates });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/templates', requireAuth(['admin']), async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const type = ['arrival', 'departure', 'emergency', 'manual_entry', 'general'].includes(req.body.type) ? req.body.type : 'general';
+    const channel = ['sms', 'whatsapp', 'push', 'email', 'all'].includes(req.body.channel) ? req.body.channel : 'all';
+    const templateBody = String(req.body.templateBody || '').trim();
+    const variables = Array.isArray(req.body.variables) ? req.body.variables : [];
+
+    if (!name || !templateBody) {
+      return res.status(400).json({ error: 'Template name and body are required.' });
+    }
+
+    const id = req.body.id ? String(req.body.id).trim() : 'tmpl-' + crypto.randomBytes(3).toString('hex');
+    const template = await NotificationTemplate.create({
+      id,
+      name,
+      type,
+      channel,
+      templateBody,
+      variables,
+      active: true
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'create_notification_template',
+      objectType: 'notification_template',
+      objectId: template.id,
+      reason: `Created notification template ${name} (${type}) for ${channel}`,
+      createdAt: new Date()
+    });
+
+    const templates = await NotificationTemplate.find().sort({ name: 1 });
+    res.status(201).json({ ok: true, template, templates });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/templates/:id', requireAuth(['admin']), async (req, res) => {
+  try {
+    const template = await NotificationTemplate.findOne({ id: req.params.id });
+    if (!template) return res.status(404).json({ error: 'Template not found.' });
+
+    if (req.body.name) template.name = String(req.body.name).trim();
+    if (req.body.templateBody) template.templateBody = String(req.body.templateBody).trim();
+    if (req.body.channel) template.channel = req.body.channel;
+    if (req.body.type) template.type = req.body.type;
+    if (Array.isArray(req.body.variables)) template.variables = req.body.variables;
+    if (req.body.active !== undefined) template.active = Boolean(req.body.active);
+
+    await template.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_notification_template',
+      objectType: 'notification_template',
+      objectId: template.id,
+      reason: `Updated template ${template.name}`,
+      createdAt: new Date()
+    });
+
+    const templates = await NotificationTemplate.find().sort({ name: 1 });
+    res.json({ ok: true, template, templates });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 5. ESCALATION CONTACTS MANAGEMENT
+app.get('/api/admin/escalation-contacts', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const contacts = await EscalationContact.find().sort({ priority: 1, name: 1 });
+    res.json({ contacts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/escalation-contacts', requireAuth(['admin']), async (req, res) => {
+  try {
+    const name = String(req.body.name || '').trim();
+    const role = String(req.body.role || '').trim();
+    const phone = String(req.body.phone || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const priority = Number(req.body.priority) || 1;
+    const campus = String(req.body.campus || 'All campuses').trim();
+    const notificationChannels = Array.isArray(req.body.notificationChannels) ? req.body.notificationChannels : ['phone', 'sms'];
+
+    if (!name || !role || !phone) {
+      return res.status(400).json({ error: 'Name, role, and phone number are required.' });
+    }
+
+    const id = req.body.id ? String(req.body.id).trim().toUpperCase() : 'ESC-' + crypto.randomBytes(3).toString('hex').toUpperCase();
+    const contact = await EscalationContact.create({
+      id,
+      name,
+      role,
+      phone,
+      email,
+      priority,
+      campus,
+      notificationChannels,
+      active: true
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'create_escalation_contact',
+      objectType: 'escalation_contact',
+      objectId: contact.id,
+      reason: `Added escalation contact: ${name} (${role}) for ${campus}`,
+      createdAt: new Date()
+    });
+
+    const contacts = await EscalationContact.find().sort({ priority: 1, name: 1 });
+    res.status(201).json({ ok: true, contact, contacts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/escalation-contacts/:id', requireAuth(['admin']), async (req, res) => {
+  try {
+    const contact = await EscalationContact.findOne({ id: req.params.id });
+    if (!contact) return res.status(404).json({ error: 'Escalation contact not found.' });
+
+    if (req.body.name) contact.name = String(req.body.name).trim();
+    if (req.body.role) contact.role = String(req.body.role).trim();
+    if (req.body.phone) contact.phone = String(req.body.phone).trim();
+    if (req.body.email !== undefined) contact.email = String(req.body.email).trim().toLowerCase();
+    if (req.body.priority !== undefined) contact.priority = Number(req.body.priority);
+    if (req.body.campus) contact.campus = String(req.body.campus).trim();
+    if (Array.isArray(req.body.notificationChannels)) contact.notificationChannels = req.body.notificationChannels;
+    if (req.body.active !== undefined) contact.active = Boolean(req.body.active);
+
+    await contact.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_escalation_contact',
+      objectType: 'escalation_contact',
+      objectId: contact.id,
+      reason: `Updated escalation contact: ${contact.name}; active=${contact.active}`,
+      createdAt: new Date()
+    });
+
+    const contacts = await EscalationContact.find().sort({ priority: 1, name: 1 });
+    res.json({ ok: true, contact, contacts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 6. RETENTION SETTINGS & DATA RETENTION PRUNING
+app.get('/api/admin/retention', requireAuth(['admin']), async (req, res) => {
+  try {
+    const setting = await SchoolSetting.findOne({ key: 'retentionSettings' });
+    const retentionSettings = setting ? setting.val : {
+      attendanceRetentionDays: 365,
+      auditLogRetentionDays: 730,
+      offlineQueueTtlHours: 24,
+      sessionTimeoutMinutes: 480,
+      autoPurgeEnabled: true,
+      lastPurgedAt: null
+    };
+    res.json({ retentionSettings });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/retention', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { attendanceRetentionDays, auditLogRetentionDays, offlineQueueTtlHours, sessionTimeoutMinutes, autoPurgeEnabled } = req.body;
+    const current = await SchoolSetting.findOne({ key: 'retentionSettings' });
+    const val = {
+      ...(current ? current.val : {}),
+      attendanceRetentionDays: Number(attendanceRetentionDays) || 365,
+      auditLogRetentionDays: Number(auditLogRetentionDays) || 730,
+      offlineQueueTtlHours: Number(offlineQueueTtlHours) || 24,
+      sessionTimeoutMinutes: Number(sessionTimeoutMinutes) || 480,
+      autoPurgeEnabled: autoPurgeEnabled !== undefined ? Boolean(autoPurgeEnabled) : true
+    };
+
+    await SchoolSetting.findOneAndUpdate(
+      { key: 'retentionSettings' },
+      { key: 'retentionSettings', val },
+      { upsert: true, new: true }
+    );
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_retention_settings',
+      objectType: 'school_setting',
+      objectId: 'retentionSettings',
+      reason: `attendanceRetention=${val.attendanceRetentionDays}d; auditRetention=${val.auditLogRetentionDays}d; queueTtl=${val.offlineQueueTtlHours}h; sessionTimeout=${val.sessionTimeoutMinutes}m`,
+      createdAt: new Date()
+    });
+
+    res.json({ ok: true, retentionSettings: val });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Explicit retention purge execution (with sensitive action audit entry)
+app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) => {
+  try {
+    const setting = await SchoolSetting.findOne({ key: 'retentionSettings' });
+    const cfg = setting ? setting.val : { attendanceRetentionDays: 365, auditLogRetentionDays: 730 };
+    const now = Date.now();
+
+    const attendanceCutoff = new Date(now - cfg.attendanceRetentionDays * 24 * 60 * 60 * 1000);
+    const auditCutoff = new Date(now - cfg.auditLogRetentionDays * 24 * 60 * 60 * 1000);
+
+    const attendanceDeleted = await AttendanceEvent.deleteMany({ timestamp: { $lt: attendanceCutoff } });
+    const auditDeleted = await AuditEntry.deleteMany({ createdAt: { $lt: auditCutoff } });
+
+    // Update lastPurgedAt in retention settings
+    if (setting) {
+      setting.val.lastPurgedAt = new Date().toISOString();
+      await SchoolSetting.updateOne({ key: 'retentionSettings' }, { val: setting.val });
+    }
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'execute_retention_purge',
+      objectType: 'retention_policy',
+      objectId: 'purge',
+      reason: `Purged ${attendanceDeleted.deletedCount} attendance events (<${attendanceCutoff.toISOString()}) and ${auditDeleted.deletedCount} audit entries (<${auditCutoff.toISOString()})`,
+      createdAt: new Date()
+    });
+
+    res.json({
+      ok: true,
+      message: 'Retention purge executed successfully.',
+      purged: {
+        attendanceRecords: attendanceDeleted.deletedCount,
+        auditEntries: auditDeleted.deletedCount,
+        attendanceCutoff: attendanceCutoff.toISOString(),
+        auditCutoff: auditCutoff.toISOString()
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 7. AUDIT LOG RETRIEVAL & FILTERING
+app.get('/api/admin/audit', requireAuth(['admin']), async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 100, 500);
+    const actionFilter = req.query.action ? String(req.query.action) : null;
+    const objectTypeFilter = req.query.objectType ? String(req.query.objectType) : null;
+
+    const query = {};
+    if (actionFilter) query.action = actionFilter;
+    if (objectTypeFilter) query.objectType = objectTypeFilter;
+
+    const auditEntries = await AuditEntry.find(query)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .populate('userId', 'name email role');
+
+    res.json({
+      entries: auditEntries.map(e => ({
+        id: e._id.toString(),
+        userId: e.userId ? e.userId._id.toString() : null,
+        actorName: e.userId ? e.userId.name : 'System / Anonymous',
+        actorEmail: e.userId ? e.userId.email : 'system',
+        action: e.action,
+        objectType: e.objectType,
+        objectId: e.objectId,
+        reason: e.reason,
+        timestamp: e.createdAt.toISOString()
+      }))
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. ADMINISTRATIVE DATA EXPORTS (WITH MANDATORY AUDIT LOGGING)
+app.post('/api/admin/export/:type', requireAuth(['admin']), async (req, res) => {
+  try {
+    const exportType = req.params.type; // 'attendance', 'pupils', 'audit', 'staff'
+    const reason = String(req.body.reason || 'Administrative data export').trim();
+    const format = req.query.format || 'json';
+
+    let dataToExport = [];
+    if (exportType === 'attendance') {
+      dataToExport = await AttendanceEvent.find().sort({ createdAt: -1 }).limit(1000);
+    } else if (exportType === 'pupils') {
+      dataToExport = await Pupil.find({ active: true }).sort({ name: 1 });
+    } else if (exportType === 'audit') {
+      dataToExport = await AuditEntry.find().sort({ createdAt: -1 }).limit(1000);
+    } else if (exportType === 'staff') {
+      const staffList = await User.find({}, { passwordHash: 0, salt: 0, mfaSecret: 0 });
+      dataToExport = staffList;
+    } else {
+      return res.status(400).json({ error: 'Invalid export type. Choose attendance, pupils, audit, or staff.' });
+    }
+
+    // MANDATORY AUDIT LOG FOR ADMINISTRATIVE DATA EXPORT
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'export_administrative_data',
+      objectType: exportType,
+      objectId: `export_${exportType}_${Date.now()}`,
+      reason: `Admin ${req.user.name} exported ${dataToExport.length} ${exportType} records; format=${format}; reason=${reason}`,
+      createdAt: new Date()
+    });
+
+    if (format === 'csv') {
+      // Return simple CSV formatting
+      if (exportType === 'attendance') {
+        const header = 'id,pupilId,type,time,date,staff,device,campus,gate,collector,verification\n';
+        const rows = dataToExport.map(e => `"${e.id}","${e.pupilId}","${e.type}","${e.time}","${e.date}","${e.staff}","${e.device}","${e.campus}","${e.gate}","${e.collector || ''}","${e.verification || ''}"`).join('\n');
+        res.setHeader('Content-Type', 'text/csv');
+        res.setHeader('Content-Disposition', `attachment; filename="gatewise-${exportType}-${formatDate(nowLocal())}.csv"`);
+        return res.send(header + rows);
+      }
+    }
+
+    res.json({
+      ok: true,
+      exportType,
+      recordCount: dataToExport.length,
+      exportedAt: new Date().toISOString(),
+      data: dataToExport
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. MULTI-FACTOR AUTHENTICATION SETUP & TOGGLE
+app.post('/api/admin/mfa/setup', requireAuth(['admin']), async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id);
+    const mfaSecret = generateMfaSecret();
+    user.mfaSecret = mfaSecret;
+    await user.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'setup_admin_mfa',
+      objectType: 'user',
+      objectId: user._id.toString(),
+      reason: 'Generated new MFA secret for admin user',
+      createdAt: new Date()
+    });
+
+    res.json({
+      ok: true,
+      mfaSecret,
+      instructions: 'Enter 6-digit verification code to confirm MFA activation (demo code: 123456).'
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/admin/mfa/enable', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { mfaToken } = req.body;
+    const user = await User.findById(req.user._id);
+
+    if (!user.mfaSecret) {
+      return res.status(400).json({ error: 'Please set up MFA secret first before enabling.' });
+    }
+
+    const isValid = verifyMfaToken(user.mfaSecret, mfaToken);
+    if (!isValid) {
+      return res.status(400).json({ error: 'Invalid 6-digit verification code.' });
+    }
+
+    user.mfaEnabled = true;
+    user.mfaEnforced = true;
+    await user.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'enable_admin_mfa',
+      objectType: 'user',
+      objectId: user._id.toString(),
+      reason: 'Multi-factor authentication enabled and verified for administrator',
+      createdAt: new Date()
+    });
+
+    res.json({ ok: true, message: 'Multi-factor authentication enabled successfully for your administrator account.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
