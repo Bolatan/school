@@ -47,3 +47,76 @@
 .correction-status.pending{background:#fef3c7;color:#92400e}
 .correction-status.approved{background:#dcfce7;color:#15803d}
 .correction-status.rejected{background:#fee2e2;color:#b91c1c}
+
+/* Accessibility & Large Tap Targets (WCAG 2.1 AA) */
+button, input, select, textarea, .nav-item, .mode-button, .button {
+  min-height: 38px;
+  touch-action: manipulation;
+}
+.button-primary, .button-dark, .auth-submit, .scan-start {
+  min-height: 44px;
+}
+.mode-button {
+  min-height: 44px;
+}
+:focus-visible {
+  outline: 2px solid #4f46e5;
+  outline-offset: 2px;
+}
+
+/* NFR & System Governance Cards */
+.nfr-card {
+  background: white;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nfr-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid #f1f5f9;
+  padding-bottom: 6px;
+}
+.nfr-card-title {
+  font-weight: 700;
+  font-size: 12px;
+  color: #1e293b;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.nfr-status-pill {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.nfr-status-pill.healthy {
+  background: #dcfce7;
+  color: #15803d;
+}
+.nfr-status-pill.degraded {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.nfr-list {
+  font-size: 10px;
+  color: #475569;
+  line-height: 1.5;
+  margin: 0;
+  padding-left: 14px;
+}
+.nfr-badge {
+  display: inline-block;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #334155;
+  font-size: 9px;
+  font-weight: 600;
+}

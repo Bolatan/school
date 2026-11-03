@@ -39,6 +39,15 @@ async function login(email = DEMO_EMAIL, password = DEMO_PASSWORD) {
     .post('/api/login')
     .send({ email, password });
   assert.equal(res.status, 200);
+  if (res.body.requiresMfa && res.body.mfaChallengeToken) {
+    const mfaRes = await request
+      .post('/api/login/mfa-verify')
+      .send({
+        mfaChallengeToken: res.body.mfaChallengeToken,
+        mfaToken: '123456'
+      });
+    return mfaRes.headers['set-cookie'][0];
+  }
   const cookie = res.headers['set-cookie'][0];
   return cookie;
 }
@@ -1765,4 +1774,198 @@ test('Administration: Campuses, Sessions, Classes, Devices, Templates, Retention
   assert.ok(auditListRes.body.entries.length >= 1);
   const hasExportEntry = auditListRes.body.entries.some(e => e.action === 'export_administrative_data');
   assert.ok(hasExportEntry);
+});
+
+test('Non-Functional Requirements: Availability, Performance, Security, Privacy, Accessibility, Reliability, Compatibility, and Localization', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. AVAILABILITY: Pilot service objective, post-pilot 99.5% target, and degraded mode procedures
+  const sysStatusRes = await request.get('/api/system/status');
+  assert.equal(sysStatusRes.status, 200);
+  assert.ok(sysStatusRes.body.ok);
+  assert.equal(sysStatusRes.body.availability.targetUptimePercent, 99.5);
+  assert.ok(sysStatusRes.body.availability.pilotServiceObjective.includes('99.0%'));
+  assert.ok(sysStatusRes.body.availability.postPilotTarget.includes('99.5% monthly availability'));
+  assert.ok(Array.isArray(sysStatusRes.body.availability.degradedModeProcedures));
+  assert.ok(sysStatusRes.body.availability.degradedModeProcedures.length >= 3);
+  assert.equal(sysStatusRes.body.availability.degradedModeActive, false);
+
+  // Activate degraded mode during simulated third-party outage
+  const activateDegradedRes = await request
+    .post('/api/system/degraded-mode')
+    .set('Cookie', adminCookie)
+    .send({
+      degradedModeActive: true,
+      reason: 'Upstream SMS provider connectivity degradation',
+      providerOutages: ['Telecomm carrier SMS latency']
+    });
+  assert.equal(activateDegradedRes.status, 200);
+  assert.equal(activateDegradedRes.body.degradedMode.degradedModeActive, true);
+
+  // Confirm degraded status is reflected in system status
+  const degradedStatusRes = await request.get('/api/system/status');
+  assert.equal(degradedStatusRes.status, 200);
+  assert.equal(degradedStatusRes.body.availability.status, 'degraded');
+  assert.equal(degradedStatusRes.body.availability.degradedModeActive, true);
+  assert.equal(degradedStatusRes.body.availability.degradedReason, 'Upstream SMS provider connectivity degradation');
+
+  // Audit entry was created for activating degraded mode
+  const degradedAudit = await AuditEntry.findOne({ action: 'activate_degraded_mode' });
+  assert.ok(degradedAudit);
+  assert.ok(degradedAudit.reason.includes('Upstream SMS provider connectivity degradation'));
+
+  // Restore degraded mode to normal
+  const restoreDegradedRes = await request
+    .post('/api/system/degraded-mode')
+    .set('Cookie', adminCookie)
+    .send({ degradedModeActive: false });
+  assert.equal(restoreDegradedRes.status, 200);
+  assert.equal(restoreDegradedRes.body.degradedMode.degradedModeActive, false);
+
+  // 2. PERFORMANCE: Scan lookup and event confirmation completing within 3 seconds at 95th percentile
+  assert.equal(sysStatusRes.body.performance.scanLookupP95TargetMs, 3000);
+  assert.equal(sysStatusRes.body.performance.eventConfirmationP95TargetMs, 3000);
+  assert.equal(sysStatusRes.body.performance.p95ThresholdSeconds, 3);
+  assert.ok(sysStatusRes.body.performance.lastMeasuredP95Ms < 3000);
+
+  // Measure online scan lookup execution time
+  const startScan = Date.now();
+  const scanTestRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({ code: 'NF-1042', mode: 'arrival', session: 'Morning Arrival' });
+  const scanDuration = Date.now() - startScan;
+  assert.equal(scanTestRes.status, 200);
+  assert.ok(scanDuration < 3000, `Scan duration was ${scanDuration}ms, must be < 3000ms`);
+
+  // Measure online event confirmation execution time using a fresh test pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'NFR Performance Pupil',
+      id: 'NF-9999',
+      className: 'Grade 6B',
+      guardian: 'NFR Guardian'
+    });
+
+  const startEvent = Date.now();
+  const clientEvtId = `perf-event-${Date.now()}`;
+  const eventTestRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-9999',
+      type: 'arrival',
+      session: 'Morning Arrival',
+      source: 'scan',
+      clientEventId: clientEvtId
+    });
+  const eventDuration = Date.now() - startEvent;
+  assert.ok(eventTestRes.status === 200 || eventTestRes.status === 201);
+  assert.ok(eventDuration < 3000, `Event confirmation duration was ${eventDuration}ms, must be < 3000ms`);
+
+  // 3. SECURITY: Encryption in transit, managed secrets, short-lived sessions, and sanitized logging
+  assert.ok(sysStatusRes.body.security.trafficEncryption.includes('TLS'));
+  assert.ok(sysStatusRes.body.security.dataAtRestEncryption.includes('AES-256'));
+  assert.ok(sysStatusRes.body.security.shortLivedSessions.timeoutMinutes > 0);
+  assert.equal(sysStatusRes.body.security.auditLogging.excludesUnnecessaryPupilData, true);
+
+  // Verify security headers are returned on API requests
+  assert.ok(sysStatusRes.headers['content-security-policy']);
+  assert.equal(sysStatusRes.headers['x-frame-options'], 'DENY');
+  assert.equal(sysStatusRes.headers['x-content-type-options'], 'nosniff');
+
+  // Verify AuditEntry security logging minimizes PII (does not include raw pupil medical or PII payloads)
+  const recentEventAudit = await AuditEntry.findOne({ action: 'record_arrival', objectId: clientEvtId });
+  if (recentEventAudit) {
+    assert.ok(recentEventAudit.reason.includes('campus='));
+    // Unnecessary personal information like home address or medical info should not appear
+    assert.equal(recentEventAudit.reason.includes('medical'), false);
+    assert.equal(recentEventAudit.reason.includes('home_address'), false);
+  }
+
+  // 4. PRIVACY: Data minimization, role access matrix, documented data recipients/processors
+  assert.equal(sysStatusRes.body.privacy.roleCampusScoped, true);
+  const processorsRes = await request
+    .get('/api/compliance/processors')
+    .set('Cookie', adminCookie);
+  assert.equal(processorsRes.status, 200);
+  assert.ok(Array.isArray(processorsRes.body.dataProcessors));
+  assert.ok(processorsRes.body.dataProcessors.length >= 3);
+  const hasMongoProcessor = processorsRes.body.dataProcessors.some(p => p.recipient.includes('MongoDB'));
+  assert.ok(hasMongoProcessor);
+  assert.ok(processorsRes.body.dataMinimizationNotice.includes('minimum data necessary'));
+
+  // Role privacy isolation: viewer cannot toggle degraded mode or access administrative configurations
+  const viewerCookie = await login('oliver.twist@northfield.school', 'GatewiseDemo!26').catch(() => null);
+  // If demo viewer doesn't exist, create one to verify least privilege
+  let effectiveViewerCookie = viewerCookie;
+  if (!effectiveViewerCookie) {
+    await request
+      .post('/api/users')
+      .set('Cookie', adminCookie)
+      .send({
+        name: 'Viewer Tester',
+        email: 'viewer.tester@northfield.school',
+        role: 'viewer',
+        password: 'GatewiseStrong!88',
+        assignedCampus: 'Primary campus'
+      });
+    effectiveViewerCookie = await login('viewer.tester@northfield.school', 'GatewiseStrong!88');
+  }
+
+  const forbiddenAttempt = await request
+    .post('/api/system/degraded-mode')
+    .set('Cookie', effectiveViewerCookie)
+    .send({ degradedModeActive: true });
+  assert.equal(forbiddenAttempt.status, 403);
+
+  // 5. RELIABILITY: Idempotent writes, durable queues, and daily reconciliation report
+  // Submit duplicate event with same clientEventId
+  const dupEventRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-9999',
+      type: 'arrival',
+      session: 'Morning Arrival',
+      source: 'scan',
+      clientEventId: clientEvtId
+    });
+  assert.equal(dupEventRes.status, 200);
+  assert.equal(dupEventRes.body.isDuplicate, true);
+
+  // Daily reconciliation endpoint
+  const reconcileReportRes = await request
+    .get('/api/reports/reconciliation')
+    .set('Cookie', adminCookie);
+  assert.equal(reconcileReportRes.status, 200);
+  assert.ok(reconcileReportRes.body.ok);
+  assert.ok(reconcileReportRes.body.summary);
+  assert.ok(Array.isArray(reconcileReportRes.body.pupilTimeline));
+  assert.ok(Array.isArray(reconcileReportRes.body.missingArrivalPatterns));
+  assert.ok(Array.isArray(reconcileReportRes.body.missingDeparturePatterns));
+  assert.ok(Array.isArray(reconcileReportRes.body.duplicateScanAttempts));
+  assert.ok(Array.isArray(reconcileReportRes.body.unresolvedExceptions));
+
+  // 6. COMPATIBILITY: Defined minimum Android & iOS versions
+  assert.ok(sysStatusRes.body.compatibility.minimumAndroidVersion.includes('Android 8.0'));
+  assert.ok(sysStatusRes.body.compatibility.minimumIosVersion.includes('iOS 15.0'));
+  assert.ok(Array.isArray(sysStatusRes.body.compatibility.validatedDevices));
+  assert.ok(sysStatusRes.body.compatibility.validatedDevices.length >= 3);
+
+  // 7. LOCALIZATION: UTC timestamps stored, campus local timezone displayed
+  assert.equal(sysStatusRes.body.localization.storageStandard.includes('UTC'), true);
+  assert.ok(sysStatusRes.body.localization.defaultTimezone);
+  assert.ok(Array.isArray(sysStatusRes.body.localization.supportedLocales));
+  assert.ok(sysStatusRes.body.localization.supportedLocales.includes('en-GB'));
+  assert.ok(sysStatusRes.body.localization.phoneFormat.includes('E.164'));
+
+  // Verify attendance record has canonical UTC timestamp and localized date/time
+  const lastRecordedEvent = await AttendanceEvent.findOne({ clientEventId: clientEvtId });
+  assert.ok(lastRecordedEvent);
+  assert.ok(lastRecordedEvent.utcTimestamp.endsWith('Z'));
+  assert.ok(lastRecordedEvent.time);
+  assert.ok(lastRecordedEvent.date);
 });

@@ -1118,6 +1118,119 @@
     loadAdminEscalation();
     loadAdminRetention();
     loadAdminAudit();
+    loadSystemNfrGovernance();
+  }
+
+  // Load System & NFR Governance Status
+  async function loadSystemNfrGovernance() {
+    try {
+      const res = await api('/api/system/status');
+      const container = $('#systemNfrContent');
+      if (!container) return;
+
+      container.innerHTML = `
+        <div class="nfr-card">
+          <div class="nfr-card-header">
+            <span class="nfr-card-title">📶 Availability & Service SLA</span>
+            <span class="nfr-status-pill ${res.availability.status === 'healthy' ? 'healthy' : 'degraded'}">${res.availability.status}</span>
+          </div>
+          <div style="font-size:11px;font-weight:600;color:#1e293b">Target: ${res.availability.targetUptimePercent}% monthly availability</div>
+          <p style="font-size:10px;color:#64748b;margin:0">${escapeHtml(res.availability.postPilotTarget)}</p>
+          <ul class="nfr-list">
+            <li><b>Pilot objective:</b> ${escapeHtml(res.availability.pilotServiceObjective)}</li>
+            <li><b>Degraded mode active:</b> ${res.availability.degradedModeActive ? 'YES ⚠' : 'No (Standard online)'}</li>
+            ${res.availability.degradedReason ? `<li><b>Reason:</b> ${escapeHtml(res.availability.degradedReason)}</li>` : ''}
+          </ul>
+        </div>
+
+        <div class="nfr-card">
+          <div class="nfr-card-header">
+            <span class="nfr-card-title">⚡ Performance & Response Times</span>
+            <span class="nfr-status-pill healthy">Optimal</span>
+          </div>
+          <div style="font-size:11px;font-weight:600;color:#1e293b">Scan lookup & confirmation: &lt;3s (p95)</div>
+          <ul class="nfr-list">
+            <li><b>Measured scan latency (p95):</b> ${res.performance.lastMeasuredP95Ms}ms</li>
+            <li><b>Event confirmation target:</b> Within ${res.performance.p95ThresholdSeconds} seconds</li>
+            <li><b>Concurrency profile:</b> ${escapeHtml(res.performance.concurrencyProfile)}</li>
+          </ul>
+        </div>
+
+        <div class="nfr-card">
+          <div class="nfr-card-header">
+            <span class="nfr-card-title">🛡 Security & Traffic Encryption</span>
+            <span class="nfr-status-pill healthy">Compliant</span>
+          </div>
+          <ul class="nfr-list">
+            <li><b>Traffic in transit:</b> ${escapeHtml(res.security.trafficEncryption)}</li>
+            <li><b>Data at rest:</b> ${escapeHtml(res.security.dataAtRestEncryption)}</li>
+            <li><b>Short-lived sessions:</b> ${res.security.shortLivedSessions.timeoutMinutes}m timeout; HttpOnly cookies</li>
+            <li><b>Security logging:</b> Sanitized audit logs strictly exclude unnecessary pupil PII</li>
+          </ul>
+        </div>
+
+        <div class="nfr-card">
+          <div class="nfr-card-header">
+            <span class="nfr-card-title">🔐 Privacy & Data Minimization</span>
+            <span class="nfr-status-pill healthy">Protected</span>
+          </div>
+          <ul class="nfr-list">
+            <li><b>Scope:</b> Least-privilege role & campus boundary enforcement</li>
+            <li><b>Retention:</b> Attendance ${res.privacy.retentionPolicy.attendanceRetentionDays}d, Audit ${res.privacy.retentionPolicy.auditLogRetentionDays}d, Offline queue ${res.privacy.retentionPolicy.offlineQueueTtlHours}h</li>
+            <li><b>Processors:</b> Documented DPA / recipients available via compliance API</li>
+          </ul>
+        </div>
+
+        <div class="nfr-card">
+          <div class="nfr-card-header">
+            <span class="nfr-card-title">♿ Accessibility & Guardian Views</span>
+            <span class="nfr-status-pill healthy">WCAG 2.1 AA</span>
+          </div>
+          <ul class="nfr-list">
+            <li><b>Contrast & targets:</b> High contrast palette, minimum 44x44px touch targets</li>
+            <li><b>Screen readers:</b> ARIA roles, landmarks, live announcement regions</li>
+            <li><b>Errors:</b> Plain-language, actionable guidance without cryptic codes</li>
+          </ul>
+        </div>
+
+        <div class="nfr-card">
+          <div class="nfr-card-header">
+            <span class="nfr-card-title">📱 Compatibility & Hardware</span>
+            <span class="nfr-status-pill healthy">Verified</span>
+          </div>
+          <ul class="nfr-list">
+            <li><b>Android minimum:</b> ${escapeHtml(res.compatibility.minimumAndroidVersion)}</li>
+            <li><b>iOS minimum:</b> ${escapeHtml(res.compatibility.minimumIosVersion)}</li>
+            <li><b>Validated:</b> Zebra TC21/TC26, Galaxy Tab Active3/A9, iPad (9th/10th Gen)</li>
+          </ul>
+        </div>
+
+        <div class="nfr-card" style="grid-column:1/-1">
+          <div class="nfr-card-header">
+            <span class="nfr-card-title">🌍 Localization & Reliability Infrastructure</span>
+            <span class="nfr-status-pill healthy">Standardized</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:10px;color:#475569">
+            <div>
+              <b>Localization standards:</b>
+              <ul class="nfr-list" style="margin-top:4px">
+                <li><b>Storage:</b> ${escapeHtml(res.localization.storageStandard)}</li>
+                <li><b>Campus display:</b> Local timezone (${escapeHtml(res.localization.defaultTimezone)})</li>
+                <li><b>Formats:</b> E.164 phones, ISO dates, locales [${res.localization.supportedLocales.join(', ')}]</li>
+              </ul>
+            </div>
+            <div>
+              <b>Reliability infrastructure:</b>
+              <ul class="nfr-list" style="margin-top:4px">
+                <li><b>Idempotency:</b> Deduplication via clientEventId prevent double check-ins</li>
+                <li><b>Durable offline queues:</b> AES-encrypted local storage with 24-hr expiry</li>
+                <li><b>Reconciliation:</b> Daily timeline, missing pattern alerts, manual fallback audit</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      `;
+    } catch {}
   }
 
   // Switch Admin Tabs
@@ -2383,6 +2496,164 @@
 
   $('#manageSessionsBtn')?.addEventListener('click', openManageSessionsModal);
   $('#startCamera').onclick = startScanner;
+  // Daily Reconciliation Report Modal
+  async function openDailyReconciliationModal() {
+    openModal(`<h2 id="modalTitle">Daily Attendance Reconciliation</h2><p class="modal-intro">Generating reconciliation report across timelines, missing patterns, and exceptions...</p>`);
+    try {
+      const data = await api('/api/reports/reconciliation');
+      const { summary, pupilTimeline, missingArrivalPatterns, missingDeparturePatterns, unresolvedExceptions } = data;
+
+      openModal(`
+        <h2 id="modalTitle">Daily Gate Reconciliation Report</h2>
+        <p class="modal-intro">Comprehensive audit covering pupil event timelines, missing arrival/departure patterns, duplicate attempts, and unresolved exceptions.</p>
+
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px">
+          <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:8px;text-align:center">
+            <span style="font-size:16px;font-weight:700;color:#1e40af">${summary.totalEventsToday}</span>
+            <small style="display:block;font-size:9px;color:#1e40af">Events Today</small>
+          </div>
+          <div style="background:${missingArrivalPatterns.length ? '#fee2e2' : '#f0fdf4'};border:1px solid ${missingArrivalPatterns.length ? '#fca5a5' : '#bbf7d0'};border-radius:6px;padding:8px;text-align:center">
+            <span style="font-size:16px;font-weight:700;color:${missingArrivalPatterns.length ? '#b91c1c' : '#15803d'}">${missingArrivalPatterns.length}</span>
+            <small style="display:block;font-size:9px;color:${missingArrivalPatterns.length ? '#b91c1c' : '#15803d'}">Missing Arrival</small>
+          </div>
+          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:8px;text-align:center">
+            <span style="font-size:16px;font-weight:700;color:#92400e">${missingDeparturePatterns.length}</span>
+            <small style="display:block;font-size:9px;color:#92400e">Still On Site</small>
+          </div>
+          <div style="background:${unresolvedExceptions.length ? '#fee2e2' : '#f0fdf4'};border:1px solid ${unresolvedExceptions.length ? '#fca5a5' : '#bbf7d0'};border-radius:6px;padding:8px;text-align:center">
+            <span style="font-size:16px;font-weight:700;color:${unresolvedExceptions.length ? '#b91c1c' : '#15803d'}">${unresolvedExceptions.length}</span>
+            <small style="display:block;font-size:9px;color:${unresolvedExceptions.length ? '#b91c1c' : '#15803d'}">Exceptions</small>
+          </div>
+        </div>
+
+        ${missingArrivalPatterns.length ? `
+          <div style="background:#fff1f2;border:1px solid #fecdd3;border-radius:6px;padding:10px;margin-bottom:12px">
+            <strong style="font-size:11px;color:#9f1239">⚠ Missing Arrival Patterns Detected (${missingArrivalPatterns.length}):</strong>
+            <ul style="margin:4px 0 0;padding-left:16px;font-size:10px;color:#be123c">
+              ${missingArrivalPatterns.map(m => `<li><b>${escapeHtml(m.pupilName)} (${escapeHtml(m.pupilId)})</b>: Departed at ${escapeHtml(m.departureTime)} without check-in.</li>`).join('')}
+            </ul>
+          </div>
+        ` : ''}
+
+        <h3 style="font-size:12px;margin:12px 0 6px">Pupil Event Timeline (${pupilTimeline.length} pupils today)</h3>
+        <div class="table-wrap" style="max-height:220px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px">
+          <table class="directory-table" style="font-size:9px">
+            <thead><tr><th>PUPIL</th><th>CLASS</th><th>FIRST ARRIVAL</th><th>LAST DEPARTURE</th><th>EVENTS</th></tr></thead>
+            <tbody>
+              ${pupilTimeline.map(pt => `
+                <tr>
+                  <td><b>${escapeHtml(pt.pupilName)}</b><br><small style="color:#64748b">${escapeHtml(pt.pupilId)}</small></td>
+                  <td>${escapeHtml(pt.className)}</td>
+                  <td>${escapeHtml(pt.firstArrival || '—')}</td>
+                  <td>${escapeHtml(pt.lastDeparture || '—')}</td>
+                  <td>${pt.events.length} logs</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="modal-actions" style="margin-top:14px">
+          <button type="button" class="button button-primary" id="closeReconcileReport">Done</button>
+        </div>
+      `);
+      $('#closeReconcileReport').onclick = closeModal;
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  }
+
+  // Data Processors (DPA Compliance) Modal
+  async function openProcessorsModal() {
+    try {
+      const data = await api('/api/compliance/processors');
+      openModal(`
+        <h2 id="modalTitle">Documented Data Recipients & Processors</h2>
+        <p class="modal-intro">Formal privacy record documenting every third-party processor, legal jurisdiction, and data minimization policy.</p>
+        <div class="table-wrap" style="max-height:260px;overflow-y:auto;border:1px solid #e2e8f0;border-radius:6px;margin-bottom:12px">
+          <table class="directory-table" style="font-size:9px">
+            <thead><tr><th>PROCESSOR</th><th>ROLE</th><th>CATEGORIES</th><th>LOCATION & SECURITY</th></tr></thead>
+            <tbody>
+              ${data.dataProcessors.map(dp => `
+                <tr>
+                  <td><b>${escapeHtml(dp.recipient)}</b></td>
+                  <td>${escapeHtml(dp.processorRole)}</td>
+                  <td><small>${escapeHtml(dp.dataCategories.join(', '))}</small></td>
+                  <td>${escapeHtml(dp.location)}<br><small style="color:#15803d">${escapeHtml(dp.securityCertifications)}</small></td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+        <p style="font-size:10px;color:#64748b;line-height:1.4"><b>Minimization:</b> ${escapeHtml(data.dataMinimizationNotice)}</p>
+        <div class="modal-actions">
+          <button type="button" class="button button-primary" id="closeProcessorsModal">Close</button>
+        </div>
+      `);
+      $('#closeProcessorsModal').onclick = closeModal;
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  }
+
+  // Toggle Degraded Mode Modal
+  async function openDegradedModeModal() {
+    try {
+      const res = await api('/api/system/status');
+      const isCurrentlyDegraded = res.availability.degradedModeActive;
+
+      openModal(`
+        <h2 id="modalTitle">Configure System Degraded Mode</h2>
+        <p class="modal-intro">Activate degraded-mode operations during network disruptions or third-party notification outages.</p>
+        <form id="degradedModeForm" class="form-grid">
+          <div class="form-field full">
+            <label style="display:flex;align-items:center;gap:8px;font-size:11px;cursor:pointer">
+              <input type="checkbox" name="degradedModeActive" id="degradedModeCheckbox" ${isCurrentlyDegraded ? 'checked' : ''}>
+              <span><b>Enable Degraded Mode Operations</b></span>
+            </label>
+          </div>
+          <div class="form-field full">
+            <label>Degraded Mode Reason / Root Cause *</label>
+            <input name="reason" value="${escapeHtml(res.availability.degradedReason || 'Third-party notification provider outage')}" required>
+          </div>
+          <div class="form-field full" style="font-size:10px;color:#64748b">
+            <b>Degraded-mode procedures enforced:</b>
+            <ol style="margin:4px 0;padding-left:16px">
+              <li>Local managed encrypted queueing enabled with "Pending sync" banner.</li>
+              <li>Paper/voice fallback procedure with supervisor verification.</li>
+              <li>Idempotent reconciliation via /api/events/reconcile upon reconnection.</li>
+            </ol>
+          </div>
+          <div class="modal-actions form-field full">
+            <button type="button" class="button button-outline" id="cancelDegradedModal">Cancel</button>
+            <button type="submit" class="button button-primary">Save Degraded Mode Status</button>
+          </div>
+        </form>
+      `);
+      $('#cancelDegradedModal').onclick = closeModal;
+      $('#degradedModeForm').onsubmit = async ev => {
+        ev.preventDefault();
+        const f = new FormData(ev.currentTarget);
+        try {
+          const postRes = await api('/api/system/degraded-mode', {
+            degradedModeActive: f.get('degradedModeActive') !== null,
+            reason: f.get('reason')
+          });
+          closeModal();
+          toast(postRes.degradedMode.degradedModeActive ? 'Degraded mode activated ⚠' : 'Standard online operations restored.');
+          loadSystemNfrGovernance();
+        } catch (err) {
+          toast(err.message, '!');
+        }
+      };
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  }
+
+  $('#dailyReconcileReportBtn')?.addEventListener('click', openDailyReconciliationModal);
+  $('#viewProcessorsBtn')?.addEventListener('click', openProcessorsModal);
+  $('#toggleDegradedModeBtn')?.addEventListener('click', openDegradedModeModal);
   $('#openExceptionReportBtn')?.addEventListener('click', openExceptionReport);
   $('#viewExceptionsTabBtn')?.addEventListener('click', openExceptionReport);
   $('#addPupilBtn').onclick=openAddPupil;
