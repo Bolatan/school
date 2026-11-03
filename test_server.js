@@ -1028,3 +1028,146 @@ test('Missing card & unreadable QR: manual entry marking, reason recording, and 
   assert.equal(depReport.collector, 'Dmitri Rostov');
   assert.equal(depReport.manualEntry, true);
 });
+
+test('Pickup authorization lifecycle: guardian requests, staff approval with effective dates/guidance, time-limited/one-time/emergency permissions, revocation, and complete audit history', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+  const guardianCookie = await login(DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD);
+
+  // Pupil NF-1042 (Zara Adeyemi) is linked to guardian Tomi Adeyemi
+  const todayStr = new Date().toISOString().slice(0, 10);
+  const futureStr = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+
+  // 1. Guardian submits a pickup contact request (one-time permission for today with ID-check guidance)
+  const guardianReqRes = await request
+    .post('/api/guardian/pickup-request')
+    .set('Cookie', guardianCookie)
+    .send({
+      pupilId: 'NF-1042',
+      name: 'Grace Hopper',
+      relation: 'Aunt',
+      phone: '+1 555-0777',
+      permissionType: 'one_time',
+      startDate: todayStr,
+      endDate: todayStr,
+      idGuidance: 'Check state driver license and match emergency password "BlueMoon"',
+      note: 'One-time emergency pickup today only.'
+    });
+  assert.equal(guardianReqRes.status, 201);
+  assert.ok(guardianReqRes.body.request);
+  const pReqId = guardianReqRes.body.request.id;
+
+  // Check audit entry for guardian submission
+  const reqAudit = await AuditEntry.findOne({ action: 'guardian_submit_pickup_request', objectId: pReqId });
+  assert.ok(reqAudit);
+  assert.ok(reqAudit.reason.includes('Grace Hopper'));
+  assert.ok(reqAudit.reason.includes('Type=one_time'));
+
+  // 2. Staff approves pickup contact request: sets effective dates, ID guidance, and reason
+  const approveReqRes = await request
+    .post(`/api/pickup/${pReqId}`)
+    .set('Cookie', adminCookie)
+    .send({
+      action: 'approve',
+      permissionType: 'one_time',
+      startDate: todayStr,
+      endDate: todayStr,
+      validUntil: todayStr,
+      idGuidance: 'Check state driver license and match emergency password "BlueMoon"',
+      reason: 'School office verified emergency call with guardian'
+    });
+  assert.equal(approveReqRes.status, 200);
+
+  // Verify collector was added to pupil in database with verification data
+  const pupilDoc = await Pupil.findOne({ id: 'NF-1042' });
+  const addedCol = pupilDoc.collectors.find(c => c.name === 'Grace Hopper');
+  assert.ok(addedCol);
+  assert.equal(addedCol.type, 'one_time');
+  assert.equal(addedCol.startDate, todayStr);
+  assert.equal(addedCol.endDate, todayStr);
+  assert.equal(addedCol.idGuidance, 'Check state driver license and match emergency password "BlueMoon"');
+  assert.equal(addedCol.status, 'active');
+
+  // Check audit entry for approval
+  const approveAudit = await AuditEntry.findOne({ action: 'approve_pickup_request', objectId: `NF-1042:${addedCol.id}` });
+  assert.ok(approveAudit);
+  assert.ok(approveAudit.reason.includes('School office verified emergency call with guardian'));
+
+  // 3. Staff directly adds an emergency exception pickup contact
+  const staffAddRes = await request
+    .post('/api/pupils/NF-1042/collectors')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Dr. John Watson',
+      relation: 'Family Physician',
+      phone: '+1 555-0888',
+      type: 'emergency_exception',
+      startDate: todayStr,
+      endDate: futureStr,
+      idGuidance: 'Hospital badge and school emergency dispatch authorization required',
+      reason: 'Medical emergency escort approved by head of school'
+    });
+  assert.equal(staffAddRes.status, 201);
+  const emergencyColId = staffAddRes.body.collector.id;
+
+  const staffAddAudit = await AuditEntry.findOne({ action: 'add_pickup_contact', objectId: `NF-1042:${emergencyColId}` });
+  assert.ok(staffAddAudit);
+  assert.ok(staffAddAudit.reason.includes('Medical emergency escort approved by head of school'));
+
+  // 4. Staff updates effective dates / guidance on existing pickup contact
+  const extendedDateStr = new Date(Date.now() + 14 * 86400000).toISOString().slice(0, 10);
+  const updateRes = await request
+    .put(`/api/pupils/NF-1042/collectors/${emergencyColId}`)
+    .set('Cookie', adminCookie)
+    .send({
+      endDate: extendedDateStr,
+      idGuidance: 'Hospital badge, driver license, and call school office',
+      reason: 'Extended emergency medical observation leave'
+    });
+  assert.equal(updateRes.status, 200);
+  assert.equal(updateRes.body.collector.endDate, extendedDateStr);
+  assert.equal(updateRes.body.collector.idGuidance, 'Hospital badge, driver license, and call school office');
+
+  const updateAudit = await AuditEntry.findOne({ action: 'update_pickup_contact', objectId: `NF-1042:${emergencyColId}` });
+  assert.ok(updateAudit);
+  assert.ok(updateAudit.reason.includes('Extended emergency medical observation leave'));
+
+  // 5. Staff revokes pickup permissions with mandatory audit reason
+  // Missing reason fails
+  const noReasonRevoke = await request
+    .delete(`/api/pupils/NF-1042/collectors/${emergencyColId}`)
+    .set('Cookie', adminCookie)
+    .send({ reason: '' });
+  assert.equal(noReasonRevoke.status, 400);
+  assert.ok(noReasonRevoke.body.error.includes('reason is required'));
+
+  // Valid revocation succeeds
+  const revokeRes = await request
+    .delete(`/api/pupils/NF-1042/collectors/${emergencyColId}`)
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Emergency medical period concluded; pupil returned to regular schedule' });
+  assert.equal(revokeRes.status, 200);
+
+  const revokedPupilDoc = await Pupil.findOne({ id: 'NF-1042' });
+  const revokedCol = revokedPupilDoc.collectors.find(c => c.id === emergencyColId);
+  assert.equal(revokedCol.status, 'revoked');
+  assert.equal(revokedCol.active, false);
+
+  const revokeAudit = await AuditEntry.findOne({ action: 'revoke_pickup_contact', objectId: `NF-1042:${emergencyColId}` });
+  assert.ok(revokeAudit);
+  assert.ok(revokeAudit.reason.includes('Emergency medical period concluded'));
+
+  // 6. Complete pickup authorization audit trail endpoint
+  const auditRes = await request
+    .get('/api/pickup/audit?pupilId=NF-1042')
+    .set('Cookie', adminCookie);
+  assert.equal(auditRes.status, 200);
+  assert.ok(Array.isArray(auditRes.body.auditHistory));
+  assert.ok(auditRes.body.auditHistory.length >= 4);
+
+  const actions = auditRes.body.auditHistory.map(a => a.action);
+  assert.ok(actions.includes('guardian_submit_pickup_request'));
+  assert.ok(actions.includes('approve_pickup_request'));
+  assert.ok(actions.includes('add_pickup_contact'));
+  assert.ok(actions.includes('update_pickup_contact'));
+  assert.ok(actions.includes('revoke_pickup_contact'));
+});

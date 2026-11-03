@@ -12,11 +12,31 @@ const userSchema = new mongoose.Schema({
 
 const collectorSchema = new mongoose.Schema({
   id: { type: Number },
-  name: { type: String, required: true },
-  relation: { type: String, required: true },
-  until: { type: String, default: 'Ongoing' },
+  name: { type: String, required: true, trim: true },
+  relation: { type: String, default: '', trim: true },
+  phone: { type: String, default: '', trim: true },
+  email: { type: String, default: '', trim: true, lowercase: true },
+  idGuidance: { type: String, default: '', trim: true }, // photo / ID-check guidance
+  type: {
+    type: String,
+    enum: ['ongoing', 'time_limited', 'one_time', 'emergency_exception'],
+    default: 'ongoing'
+  },
+  startDate: { type: String, default: null }, // YYYY-MM-DD
+  endDate: { type: String, default: null },   // YYYY-MM-DD
+  until: { type: String, default: 'Ongoing' }, // Human-readable or date string for backwards compatibility
+  status: {
+    type: String,
+    enum: ['active', 'expired', 'revoked'],
+    default: 'active'
+  },
+  addedBy: { type: String, default: 'School Staff' },
+  approvedBy: { type: String, default: 'School Staff' },
+  revokedBy: { type: String, default: null },
+  revokedAt: { type: Date, default: null },
+  reason: { type: String, default: '' },
   active: { type: Boolean, default: true }
-});
+}, { timestamps: true });
 
 const pupilSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true, uppercase: true, trim: true },
@@ -48,12 +68,25 @@ const notificationSchema = new mongoose.Schema({
 const pickupRequestSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
   pupilId: { type: String, required: true, ref: 'Pupil' },
-  name: { type: String, required: true },
-  relation: { type: String, required: true },
+  name: { type: String, required: true, trim: true },
+  relation: { type: String, default: '', trim: true },
+  phone: { type: String, default: '', trim: true },
+  email: { type: String, default: '', trim: true, lowercase: true },
+  idGuidance: { type: String, default: '', trim: true },
+  permissionType: {
+    type: String,
+    enum: ['ongoing', 'time_limited', 'one_time', 'emergency_exception'],
+    default: 'ongoing'
+  },
+  startDate: { type: String, default: null },
+  endDate: { type: String, default: null },
   requestedBy: { type: String, required: true },
   time: { type: String, required: true },
   note: { type: String, default: '' },
-  status: { type: String, enum: ['pending', 'approved', 'declined'], default: 'pending' }
+  status: { type: String, enum: ['pending', 'approved', 'declined'], default: 'pending' },
+  reviewedBy: { type: String, default: null },
+  reviewedAt: { type: Date, default: null },
+  reviewReason: { type: String, default: '' }
 }, { timestamps: true });
 
 const attendanceEventSchema = new mongoose.Schema({
