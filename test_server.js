@@ -13,7 +13,8 @@ const {
   AuditEntry,
   Guardian,
   PupilGuardian,
-  CorrectionRequest
+  CorrectionRequest,
+  Card
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
@@ -1297,4 +1298,189 @@ test('Attendance events: all 6 event types, UTC timestamps, campus timezone rend
   const safeDepEvent = await AttendanceEvent.findOne({ id: confirmedMismatchRes.body.eventId });
   assert.equal(safeDepEvent.session, 'Early Bird Arrival');
   assert.equal(safeDepEvent.type, 'departure');
+});
+
+test('Card scanning: outcomes, photo pre-verification, duplicate tap prevention, admin reissue, revoke, and artwork export', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Create a test pupil
+  const createRes = await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Kofi Mensah',
+      id: 'NF-9901',
+      className: 'Grade 3A',
+      guardian: 'Kwame Mensah'
+    });
+  assert.equal(createRes.status, 201);
+
+  // Retrieve active card generated for Kofi
+  const activeCard = await Card.findOne({ pupilId: 'NF-9901', status: 'active' });
+  assert.ok(activeCard);
+  assert.ok(activeCard.cardToken.startsWith('gw_tok_'));
+
+  // A. Scan outcome: unknown_code
+  const unknownScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: 'unrecognized_random_qr_code_token_12345',
+      mode: 'arrival'
+    });
+  assert.equal(unknownScanRes.status, 200);
+  assert.equal(unknownScanRes.body.outcome, 'unknown_code');
+
+  // B. Scan outcome: valid_pupil (returns photo and minimum useful identity info before confirmation)
+  const validScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: activeCard.cardToken,
+      mode: 'arrival'
+    });
+  assert.equal(validScanRes.status, 200);
+  assert.equal(validScanRes.body.outcome, 'valid_pupil');
+  assert.equal(validScanRes.body.pupil.id, 'NF-9901');
+  assert.equal(validScanRes.body.pupil.name, 'Kofi Mensah');
+  assert.equal(validScanRes.body.pupil.className, 'Grade 3A');
+  assert.ok(validScanRes.body.pupil.photo);
+  assert.ok(validScanRes.body.pupil.initials);
+
+  // C. Scan outcome: wrong_session (mode mismatch without confirmation)
+  const wrongSessionScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: activeCard.cardToken,
+      mode: 'departure',
+      session: 'Morning Arrival', // configured for arrival
+      confirmModeMismatch: false
+    });
+  assert.equal(wrongSessionScanRes.status, 200);
+  assert.equal(wrongSessionScanRes.body.outcome, 'wrong_session');
+  assert.equal(wrongSessionScanRes.body.session, 'Morning Arrival');
+  assert.equal(wrongSessionScanRes.body.defaultMode, 'arrival');
+  assert.equal(wrongSessionScanRes.body.currentMode, 'departure');
+
+  // Record arrival event with clientEventId for duplicate tap prevention testing
+  const tapEventId = 'tap-prevent-001';
+  const firstTapRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-9901',
+      type: 'arrival',
+      source: 'Card scan',
+      clientEventId: tapEventId
+    });
+  assert.equal(firstTapRes.status, 201);
+  assert.ok(firstTapRes.body.ok);
+
+  // Repeated tap / retry with same clientEventId does NOT create duplicate event
+  const repeatedTapRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-9901',
+      type: 'arrival',
+      source: 'Card scan',
+      clientEventId: tapEventId
+    });
+  assert.equal(repeatedTapRes.status, 200);
+  assert.equal(repeatedTapRes.body.isDuplicate, true);
+
+  const totalEventsForPupil = await AttendanceEvent.find({ pupilId: 'NF-9901', type: 'arrival' });
+  assert.equal(totalEventsForPupil.length, 1);
+
+  // D. Scan outcome: already_recorded (scanning again for arrival returns already_recorded)
+  const alreadyRecordedScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: activeCard.cardToken,
+      mode: 'arrival'
+    });
+  assert.equal(alreadyRecordedScanRes.status, 200);
+  assert.equal(alreadyRecordedScanRes.body.outcome, 'already_recorded');
+  assert.equal(alreadyRecordedScanRes.body.pupil.id, 'NF-9901');
+  assert.ok(alreadyRecordedScanRes.body.message.includes('already has arrival recorded today'));
+
+  // E. Admin card reissue: issues new random token, marks previous card replaced, preserves attendance history
+  const historyBeforeReissue = await AttendanceEvent.find({ pupilId: 'NF-9901' });
+  assert.equal(historyBeforeReissue.length, 1);
+
+  const reissueRes = await request
+    .post('/api/cards/NF-9901/reissue')
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Pupil lost original PVC card' });
+  assert.equal(reissueRes.status, 201);
+  assert.ok(reissueRes.body.ok);
+  assert.notEqual(reissueRes.body.card.cardToken, activeCard.cardToken);
+
+  // Verify previous card is marked 'replaced'
+  const oldCard = await Card.findById(activeCard._id);
+  assert.equal(oldCard.status, 'replaced');
+  assert.ok(oldCard.revokedReason.includes('Pupil lost original PVC card'));
+
+  // Verify historical attendance record was not mutated
+  const historyAfterReissue = await AttendanceEvent.find({ pupilId: 'NF-9901' });
+  assert.equal(historyAfterReissue.length, 1);
+  assert.equal(historyAfterReissue[0].id, historyBeforeReissue[0].id);
+
+  // Verify audit log for card reissue
+  const reissueAudit = await AuditEntry.findOne({ action: 'reissue_pupil_card', objectId: reissueRes.body.card.id });
+  assert.ok(reissueAudit);
+  assert.ok(reissueAudit.reason.includes('Pupil lost original PVC card'));
+
+  // F. Admin card revoke: revokes card, audit logged, historical attendance preserved
+  const newCardToken = reissueRes.body.card.cardToken;
+  const revokeRes = await request
+    .post(`/api/cards/${reissueRes.body.card.id}/revoke`)
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Suspicious card duplicate reported' });
+  assert.equal(revokeRes.status, 200);
+  assert.equal(revokeRes.body.card.status, 'revoked');
+
+  // Verify scanning revoked card yields outcome 'revoked_card'
+  const revokedScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: newCardToken,
+      mode: 'arrival'
+    });
+  assert.equal(revokedScanRes.status, 200);
+  assert.equal(revokedScanRes.body.outcome, 'revoked_card');
+  assert.ok(revokedScanRes.body.reason.includes('Suspicious card duplicate reported'));
+
+  // Verify attendance records are still preserved untouched
+  const historyAfterRevoke = await AttendanceEvent.find({ pupilId: 'NF-9901' });
+  assert.equal(historyAfterRevoke.length, 1);
+
+  // G. Card artwork export: printable artwork contains no PII in QR token
+  // Reissue an active card first
+  const freshCardRes = await request
+    .post('/api/cards/NF-9901/reissue')
+    .set('Cookie', adminCookie)
+    .send({ reason: 'New card for artwork print' });
+  assert.equal(freshCardRes.status, 201);
+
+  const artworkJsonRes = await request
+    .get('/api/cards/NF-9901/artwork')
+    .set('Cookie', adminCookie);
+  assert.equal(artworkJsonRes.status, 200);
+  assert.equal(artworkJsonRes.body.pupil.name, 'Kofi Mensah');
+  assert.ok(artworkJsonRes.body.artwork.qrToken.startsWith('gw_tok_'));
+  // Ensure token does NOT contain pupil name or PII
+  assert.ok(!artworkJsonRes.body.artwork.qrToken.includes('Kofi'));
+  assert.ok(!artworkJsonRes.body.artwork.qrToken.includes('Mensah'));
+
+  const artworkHtmlRes = await request
+    .get('/api/cards/NF-9901/artwork?format=html')
+    .set('Cookie', adminCookie);
+  assert.equal(artworkHtmlRes.status, 200);
+  assert.ok(artworkHtmlRes.text.includes('NORTHFIELD ACADEMY'));
+  assert.ok(artworkHtmlRes.text.includes('Kofi Mensah'));
+  assert.ok(artworkHtmlRes.text.includes('Property of Northfield Academy'));
 });
