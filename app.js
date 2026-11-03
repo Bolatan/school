@@ -14,7 +14,7 @@
   const today = new Date().toLocaleDateString('en-CA');
   const localTime = (minsAgo=0) => {const d=new Date(Date.now()-minsAgo*60000);return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
   const load=(key,fallback)=>{try{const v=JSON.parse(localStorage.getItem('gatewise-'+key));return v??fallback}catch{return fallback}};
-  let pupils=[], events=[], requests=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
+  let pupils=[], events=[], requests=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses', liveViewChoice='still_on_site';
   let isOfflineSimulated = false;
   let deviceManaged = true;
   let deviceEncrypted = true;
@@ -116,6 +116,16 @@
     requests=state.requests||[];
     schoolSettings=state.school||{};
     updateSessionOptions();
+
+    // Populate filterClass dropdown with unique class names
+    const classSet = [...new Set(pupils.map(p => p.className))].sort();
+    const filterClassSelect = $('#filterClass');
+    if (filterClassSelect) {
+      const cur = filterClassSelect.value || 'All classes';
+      filterClassSelect.innerHTML = `<option value="All classes">All classes</option>` +
+        classSet.map(c => `<option value="${escapeHtml(c)}" ${c===cur?'selected':''}>${escapeHtml(c)}</option>`).join('');
+    }
+
     if($('#disclosureToggle')){
       $('#disclosureToggle').checked=schoolSettings.discloseCollectorName!==false;
     }
@@ -245,11 +255,193 @@
     }
   }
 
-  function renderDashboard(){const es=todayEvents(), arrivals=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival'), deps=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception'), present=pupils.filter(p=>statusFor(p)==='On campus').length;$('#presentCount').innerHTML=`${present} <small>/ 248</small>`;$('#presentProgress').style.width=`${Math.min(100,present/248*100)}%`;$('#arrivalsCount').textContent=arrivals.length;$('#departuresCount').textContent=deps.length;$('#lastArrival').textContent=arrivals.length?arrivals.sort((a,b)=>b.createdAt-a.createdAt)[0].time:'—';$('#alertsSent').textContent=es.filter(e=>e.alert==='Sent').length;$('#attentionCount').textContent=requests.length+1;const term=($('#arrivalSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>statusFor(p)==='On campus'&&(!term||`${p.name} ${p.className}`.toLowerCase().includes(term))&&(classChoice==='All classes'||p.className===classChoice));$('#arrivalRows').innerHTML=list.slice(0,7).map(p=>{const e=lastEvent(p.id);return `<tr><td>${pupilCell(p)}</td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td class="time-cell">${escapeHtml(e?.time||'—')}</td><td>${badge('On campus','status-present')}</td></tr>`}).join('');$('#emptyArrivals').classList.toggle('hidden',list.length>0);const recent=es.slice().sort((a,b)=>b.createdAt-a.createdAt).slice(0,5);$('#recentActivity').innerHTML=recent.map(activityItem).join('')||'<div class="empty-state">No events recorded yet.</div>';updateOfflineStatusUI();}
+  function renderDashboard(){
+    const es = todayEvents();
+    const arrivals = es.filter(e => e.type === 'arrival' || e.type === 'manual_arrival');
+    const departures = es.filter(e => e.type === 'departure' || e.type === 'manual_departure' || e.type === 'authorized_exception');
+    const stillOnSiteList = pupils.filter(p => statusFor(p) === 'On campus');
+    const departedList = pupils.filter(p => statusFor(p) === 'Departed');
+    const notArrivedList = pupils.filter(p => statusFor(p) === 'Not arrived');
+    const exceptionList = pupils.filter(p => {
+      const pEvents = es.filter(e => e.pupilId === p.id);
+      return pEvents.some(e => e.manualEntry || e.reason === 'card_missing' || e.reason === 'card_unreadable' || e.type === 'authorized_exception' || e.source === 'Manual entry' || e.source === 'Manual ID lookup');
+    });
+
+    if ($('#expectedCount')) $('#expectedCount').textContent = pupils.length;
+    if ($('#arrivalsCount')) $('#arrivalsCount').textContent = arrivals.length;
+    if ($('#departuresCount')) $('#departuresCount').textContent = departures.length;
+    if ($('#notArrivedCount')) $('#notArrivedCount').textContent = notArrivedList.length;
+    if ($('#stillOnSiteCount')) $('#stillOnSiteCount').textContent = stillOnSiteList.length;
+    if ($('#exceptionsCount')) $('#exceptionsCount').textContent = exceptionList.length;
+    if ($('#alertsSent')) $('#alertsSent').textContent = es.filter(e => e.alert === 'Sent').length;
+
+    // Update active highlight on cards
+    $$('.stat-card.interactive').forEach(card => card.classList.remove('active-filter'));
+    const cardIdMap = {
+      all: 'cardExpected',
+      arrived: 'cardArrived',
+      departed: 'cardDeparted',
+      not_yet_arrived: 'cardNotYetArrived',
+      still_on_site: 'cardStillOnSite',
+      exceptions: 'cardExceptions'
+    };
+    if (cardIdMap[liveViewChoice] && $(`#${cardIdMap[liveViewChoice]}`)) {
+      $(`#${cardIdMap[liveViewChoice]}`).classList.add('active-filter');
+    }
+
+    const headingTitles = {
+      all: 'Expected pupils (Full Roster)',
+      arrived: 'Arrived pupils today',
+      departed: 'Departed pupils today',
+      not_yet_arrived: 'Pupils not yet arrived',
+      still_on_site: 'Pupils currently still on campus',
+      exceptions: 'Pupils with exceptions / manual entries'
+    };
+    if ($('#liveViewHeading')) {
+      $('#liveViewHeading').textContent = `Live pupil view: ${headingTitles[liveViewChoice] || 'Still on campus'}`;
+    }
+    if ($('#liveStatusFilter')) {
+      $('#liveStatusFilter').innerHTML = `View: ${headingTitles[liveViewChoice]?.split(' ')[0] || 'Still on site'} <span>⌄</span>`;
+    }
+
+    const term = ($('#arrivalSearch')?.value || '').toLowerCase();
+    let displayPupils = pupils;
+    if (liveViewChoice === 'still_on_site') {
+      displayPupils = stillOnSiteList;
+    } else if (liveViewChoice === 'departed') {
+      displayPupils = departedList;
+    } else if (liveViewChoice === 'not_yet_arrived') {
+      displayPupils = notArrivedList;
+    } else if (liveViewChoice === 'arrived') {
+      displayPupils = pupils.filter(p => es.some(e => e.pupilId === p.id && (e.type === 'arrival' || e.type === 'manual_arrival')));
+    } else if (liveViewChoice === 'exceptions') {
+      displayPupils = exceptionList;
+    }
+
+    const filtered = displayPupils.filter(p => {
+      const matchTerm = !term || `${p.name} ${p.className} ${p.id}`.toLowerCase().includes(term);
+      const matchCls = classChoice === 'All classes' || p.className === classChoice;
+      return matchTerm && matchCls;
+    });
+
+    if ($('#arrivalRows')) {
+      $('#arrivalRows').innerHTML = filtered.slice(0, 15).map(p => {
+        const e = lastEvent(p.id);
+        const st = statusFor(p);
+        const lastDetail = e ? `${escapeHtml(e.time)} (${escapeHtml(e.type)})` : 'None';
+        return `<tr>
+          <td>${pupilCell(p)}</td>
+          <td><span class="class-pill">${escapeHtml(p.className)}</span></td>
+          <td class="time-cell">${lastDetail}</td>
+          <td>${badge(st, statusClass(st))}</td>
+        </tr>`;
+      }).join('');
+    }
+    if ($('#emptyArrivals')) {
+      $('#emptyArrivals').classList.toggle('hidden', filtered.length > 0);
+    }
+
+    const recent = es.slice().sort((a,b) => b.createdAt - a.createdAt).slice(0, 5);
+    if ($('#recentActivity')) {
+      $('#recentActivity').innerHTML = recent.map(activityItem).join('') || '<div class="empty-state">No events recorded yet.</div>';
+    }
+    updateOfflineStatusUI();
+  }
   function activityItem(e){const p=pupil(e.pupilId)||{name:'Unknown pupil'};let type=e.type;const isArrival=type==='arrival'||type==='manual_arrival';const isDep=type==='departure'||type==='manual_departure'||type==='authorized_exception';const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION</span>`:'';const pendingTag=isPendingSync?`<span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">PENDING SYNC (NOT NOTIFIED)</span>`:'';const alertText=isPendingSync?'Pending sync (parents NOT notified)':(e.alert||'Sent');return `<div class="activity-item"><div class="activity-icon ${isArrival?'arrival':isDep?'departure':'request'}">${isArrival?'↘':isDep?'↗':'◷'}</div><div class="activity-copy"><b>${isArrival?'Arrival recorded':isDep?'Departure recorded':'Activity'}</b> for ${escapeHtml(p.name)}${e.collector?` with ${escapeHtml(e.collector)}`:''} ${manualTag} ${corrTag} ${pendingTag}<small>${escapeHtml(e.time)} · ${escapeHtml(e.staff)} · Guardian alert: <b>${escapeHtml(alertText)}</b></small></div></div>`;}
   function renderPupils(){const q=($('#pupilSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>{const st=statusFor(p);const matchStatus=pupilStatusChoice==='All statuses'||st===pupilStatusChoice;const matchQ=!q||`${p.name} ${p.id} ${p.className}`.toLowerCase().includes(q);const matchCls=classChoice==='All classes'||p.className===classChoice;return matchStatus&&matchQ&&matchCls;});$('#pupilResultCount').textContent=`${list.length} pupils`;$('#pupilRows').innerHTML=list.map(p=>`<tr><td>${pupilCell(p)}</td><td><span class="pupil-id">${escapeHtml(p.id)}</span></td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td>${p.collectors.length} approved</td><td>${badge(statusFor(p),statusClass(statusFor(p)))}</td><td><button class="row-menu" data-pupil-detail="${escapeHtml(p.id)}" aria-label="Pupil options">···</button></td></tr>`).join('');}
   function renderPickup(){const total=pupils.reduce((n,p)=>n+p.collectors.length,0);$('#pendingCount').textContent=requests.length;$('#approvedCount').textContent=total;$('#requestList').innerHTML=requests.length?requests.map(r=>{const p=pupil(r.pupilId)||{name:'Unknown pupil',initials:'?',color:'blue'};return `<div class="request-card"><div>${avatar(p)}</div><div class="request-details"><strong>${escapeHtml(r.name)} <span class="card-tag">· ${escapeHtml(r.relation)}</span></strong><p>Pickup for <b>${escapeHtml(p.name)}</b> · Requested by ${escapeHtml(r.requestedBy)}</p><small>${escapeHtml(r.time)} — ${escapeHtml(r.note)}</small></div>${signedInUser?.role==='viewer'?'':`<div class="request-actions"><button class="decline-button" data-request="${r.id}" data-action="decline">Decline</button><button class="approve-button" data-request="${r.id}" data-action="approve">✓ Approve</button></div>`}</div>`}).join(''):'<div class="empty-state">No pending pickup requests.</div>';const q=($('#pickupSearch')?.value||'').toLowerCase();const active=pupils.flatMap(p=>p.collectors.map(c=>({p,c}))).filter(x=>`${x.p.name} ${x.c.name} ${x.c.relation}`.toLowerCase().includes(q));$('#approvedRows').innerHTML=active.map(({p,c})=>`<tr><td>${pupilCell(p)}</td><td><b>${escapeHtml(c.name)}</b></td><td>${escapeHtml(c.relation)}</td><td>${escapeHtml(c.until||'Ongoing')}</td><td>${badge('Approved','status-approved')}</td></tr>`).join('');}
-  function renderActivity(){const q=($('#activitySearch')?.value||'').toLowerCase();let es=todayEvents().slice().sort((a,b)=>b.createdAt-a.createdAt);if(activityChoice==='Arrivals')es=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival');else if(activityChoice==='Departures')es=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception');else if(activityChoice==='Manual entries')es=es.filter(e=>e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.source==='Paper/voice manual fallback'||e.reason);es=es.filter(e=>{const p=pupil(e.pupilId)||{};return `${p.name||''} ${e.type} ${e.source} ${e.staff} ${e.reason||''} ${e.alert||''}`.toLowerCase().includes(q)});$('#activityResultCount').textContent=`${es.length} events`;$('#activityRows').innerHTML=es.map(e=>{const p=pupil(e.pupilId)||{name:'Unknown pupil',guardian:'',initials:'?',color:'blue'};const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<br><span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<br><span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION (LINKED: ${escapeHtml(e.correctionLink)})</span>`:'';const offlineTag=e.source==='Offline queued'||isPendingSync?`<br><span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">OFFLINE QUEUED</span>`:'';const fallbackTag=e.source==='Paper/voice manual fallback'?`<br><span class="manual-tag" style="background:#f3e8ff;color:#6b21a8;font-weight:700">RECONCILED FALLBACK (${escapeHtml(e.reconciliationAuditReason||'Manual log')})</span>`:'';const canCorrect=(signedInUser?.role==='admin'||signedInUser?.role==='manager')&&!isPendingSync?`<button class="text-link" data-correct-event="${escapeHtml(e.id)}" style="margin-left:8px;font-size:11px">Correct</button>`:'';const alertBadge=isPendingSync?`<span class="status-pill status-pending" title="Parents have NOT been notified. Will sync upon reconnection."><i></i>Pending sync</span>`:badge(e.alert||'Sent',e.alert==='Sent'?'status-approved':'status-pending');return `<tr><td>${badge(e.type.includes('arrival')?'Arrival':e.type.includes('exception')?'Authorized Exception':'Departure',e.type.includes('arrival')?'status-present':'status-departed')}</td><td>${pupilCell(p)}</td><td>${escapeHtml(e.source||'Card scan')}${e.collector?`<small class="card-tag"> · ${escapeHtml(e.collector)}</small>`:''}${manualTag}${corrTag}${offlineTag}${fallbackTag}${canCorrect}</td><td>${escapeHtml(e.staff)}</td><td class="time-cell">${escapeHtml(e.time)}</td><td>${alertBadge}</td></tr>`}).join('');$('#emptyActivity').classList.toggle('hidden',es.length>0);updateOfflineStatusUI();}
+  function renderActivity(){
+    const q = ($('#activitySearch')?.value || '').toLowerCase();
+    const selCampus = $('#filterCampus')?.value || 'All campuses';
+    const selClass = $('#filterClass')?.value || 'All classes';
+    const selSession = $('#filterSession')?.value || 'All sessions';
+    const selEventType = $('#filterEventType')?.value || 'All events';
+    const selStatus = $('#filterStatus')?.value || 'All statuses';
+
+    let es = todayEvents().slice().sort((a,b) => b.createdAt - a.createdAt);
+
+    // Filter by Campus
+    if (selCampus !== 'All campuses') {
+      es = es.filter(e => (e.campus || 'Primary campus') === selCampus);
+    }
+    // Filter by Session
+    if (selSession !== 'All sessions') {
+      es = es.filter(e => (e.session || 'Morning Arrival') === selSession);
+    }
+    // Filter by Event Type
+    if (selEventType === 'arrival') {
+      es = es.filter(e => e.type === 'arrival' || e.type === 'manual_arrival');
+    } else if (selEventType === 'departure') {
+      es = es.filter(e => e.type === 'departure' || e.type === 'manual_departure' || e.type === 'authorized_exception');
+    } else if (selEventType === 'exceptions') {
+      es = es.filter(e => e.manualEntry || e.reason === 'card_missing' || e.reason === 'card_unreadable' || e.source === 'Manual entry' || e.source === 'Manual ID lookup' || e.type === 'authorized_exception');
+    } else if (selEventType === 'correction') {
+      es = es.filter(e => e.type === 'correction' || e.correctionLink);
+    }
+
+    // Filter by Status (synced, offline, manual)
+    if (selStatus === 'manual') {
+      es = es.filter(e => e.manualEntry || e.reason || e.source === 'Manual entry' || e.source === 'Manual ID lookup');
+    } else if (selStatus === 'offline') {
+      es = es.filter(e => e.offlineQueued || e.syncStatus === 'pending_sync' || e.source === 'Offline queued');
+    } else if (selStatus === 'synced') {
+      es = es.filter(e => e.syncStatus === 'synced');
+    }
+
+    // Filter by Class and search pupil/term
+    es = es.filter(e => {
+      const p = pupil(e.pupilId) || {};
+      const matchClass = selClass === 'All classes' || p.className === selClass;
+      const matchQ = !q || `${p.name || ''} ${p.id || ''} ${e.type} ${e.source} ${e.staff} ${e.campus || ''} ${e.gate || ''} ${e.reason || ''} ${e.alert || ''}`.toLowerCase().includes(q);
+      return matchClass && matchQ;
+    });
+
+    if ($('#activityResultCount')) {
+      $('#activityResultCount').textContent = `${es.length} event(s)`;
+    }
+
+    if ($('#activityRows')) {
+      $('#activityRows').innerHTML = es.map(e => {
+        const p = pupil(e.pupilId) || { name: 'Unknown pupil', guardian: '', initials: '?', color: 'blue' };
+        const isPendingSync = e.alert === 'Pending sync' || e.syncStatus === 'pending_sync';
+        const manualTag = e.manualEntry || e.source === 'Manual entry' || e.source === 'Manual ID lookup' || e.reason
+          ? `<br><span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason || 'manual').replace('_', ' '))})</span>`
+          : '';
+        const corrTag = e.correctionLink
+          ? `<br><span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION (LINKED: ${escapeHtml(e.correctionLink)})</span>`
+          : '';
+        const offlineTag = e.source === 'Offline queued' || isPendingSync
+          ? `<br><span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">OFFLINE QUEUED</span>`
+          : '';
+        const fallbackTag = e.source === 'Paper/voice manual fallback'
+          ? `<br><span class="manual-tag" style="background:#f3e8ff;color:#6b21a8;font-weight:700">RECONCILED FALLBACK (${escapeHtml(e.reconciliationAuditReason || 'Manual log')})</span>`
+          : '';
+        const canCorrect = (signedInUser?.role === 'admin' || signedInUser?.role === 'manager') && !isPendingSync
+          ? `<button class="text-link" data-correct-event="${escapeHtml(e.id)}" style="margin-left:8px;font-size:11px">Correct</button>`
+          : '';
+
+        // Notification outcome indicator
+        const notifBadge = isPendingSync
+          ? `<span class="status-pill status-pending" title="Parents NOT notified. Queued on encrypted device."><i></i>Pending sync</span>`
+          : (e.syncStatus === 'reconciled_fallback'
+            ? `<span class="status-pill status-approved"><i></i>Reconciled (Notified)</span>`
+            : badge(e.alert || 'Sent', e.alert === 'Sent' ? 'status-approved' : 'status-pending'));
+
+        return `<tr>
+          <td>${badge(e.type.includes('arrival') ? 'Arrival' : e.type.includes('exception') ? 'Authorized Exception' : e.type === 'correction' ? 'Correction' : 'Departure', e.type.includes('arrival') ? 'status-present' : 'status-departed')}</td>
+          <td>${pupilCell(p)}</td>
+          <td>${escapeHtml(e.source || 'Card scan')}${e.collector ? `<small class="card-tag"> · ${escapeHtml(e.collector)}</small>` : ''}${manualTag}${corrTag}${offlineTag}${fallbackTag}${canCorrect}</td>
+          <td>${escapeHtml(e.staff)}<br><small style="color:#94a3b8">${escapeHtml(e.time)}</small></td>
+          <td><small style="font-weight:600;color:#475569">${escapeHtml(e.campus || 'Primary campus')}</small><br><small style="color:#94a3b8">${escapeHtml(e.session || 'Morning Arrival')}</small></td>
+          <td>${notifBadge}</td>
+        </tr>`;
+      }).join('');
+    }
+    if ($('#emptyActivity')) {
+      $('#emptyActivity').classList.toggle('hidden', es.length > 0);
+    }
+    updateOfflineStatusUI();
+  }
   function showScanResult(isSuccess, message, details = '') {
     const banner = $('#scanResultBanner');
     if (!banner) return;
@@ -1328,11 +1520,166 @@
     }
   }
 
-  async function exportCsv(){
+  async function exportAttendanceReport(){
+    if (signedInUser?.role !== 'admin' && signedInUser?.role !== 'manager' && signedInUser?.role !== 'viewer') {
+      toast('Role check failed: Access to attendance export is restricted.', '!');
+      return;
+    }
+    const campus = $('#filterCampus')?.value || 'All campuses';
+    const className = $('#filterClass')?.value || 'All classes';
+    const session = $('#filterSession')?.value || 'All sessions';
     try {
-      await api('/api/export/activity', {});
-    } catch {}
-    const lines=[['Event','Pupil ID','Pupil','Type','Time','Staff','Source','Reason','Manual Entry','Collector','Verification','Alert'],...todayEvents().map(e=>{const p=pupil(e.pupilId)||{};return[e.id,e.pupilId,p.name||'',e.type,e.time,e.staff,e.source,e.reason||'',e.manualEntry||e.reason?'Yes':'No',e.collector||'',e.verification||'',e.alert]} )];const csv=lines.map(row=>row.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\r\n');const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`gatewise-activity-${today}.csv`;a.click();URL.revokeObjectURL(a.href);toast('Activity CSV exported.');}
+      toast('Generating attendance report export…', 'i');
+      const query = new URLSearchParams({
+        campus,
+        className,
+        session,
+        date: today,
+        format: 'csv'
+      });
+      const res = await fetch(`/api/reports/attendance/export?${query.toString()}`, {
+        credentials: 'same-origin'
+      });
+      if (!res.ok) {
+        let errData = {};
+        try { errData = await res.json(); } catch {}
+        throw new Error(errData.error || `Export failed with status ${res.status}`);
+      }
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = `gatewise-attendance-report-${today}.csv`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast('Attendance report exported and logged in audit log.');
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  }
+
+  async function openDailyReconciliationModal(){
+    try {
+      toast('Loading daily reconciliation data…', 'i');
+      const campus = $('#campusSelect')?.value || 'Primary campus';
+      const res = await api(`/api/reports/reconciliation?campus=${encodeURIComponent(campus)}&date=${today}`);
+      const recon = res.reconciliation;
+      const sum = recon.summary;
+
+      const unrecordedRows = recon.missingPatterns.unrecordedPupils.map(p =>
+        `<tr><td><b>${escapeHtml(p.name)}</b></td><td><span class="pupil-id">${escapeHtml(p.pupilId)}</span></td><td>${escapeHtml(p.className)}</td><td><span class="recon-badge missing">No scans today</span></td></tr>`
+      ).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:8px">No completely unrecorded pupils.</td></tr>';
+
+      const missingArrRows = recon.missingPatterns.departedWithoutArrival.map(p =>
+        `<tr><td><b>${escapeHtml(p.name)}</b></td><td><span class="pupil-id">${escapeHtml(p.pupilId)}</span></td><td>${escapeHtml(p.className)}</td><td><span class="recon-badge warning">Departed without Arrival</span></td></tr>`
+      ).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:8px">No pupils departed without recorded arrival.</td></tr>';
+
+      const missingDepRows = recon.missingPatterns.arrivedWithoutDeparture.map(p =>
+        `<tr><td><b>${escapeHtml(p.name)}</b></td><td><span class="pupil-id">${escapeHtml(p.pupilId)}</span></td><td>${escapeHtml(p.className)}</td><td><span class="recon-badge info">Still on site (No departure)</span></td></tr>`
+      ).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:8px">All arrived pupils have been dismissed.</td></tr>';
+
+      const duplicateRows = recon.duplicateScanAttempts.map(d =>
+        `<tr><td><small>${escapeHtml(new Date(d.timestamp).toLocaleTimeString())}</small></td><td><code>${escapeHtml(d.objectId)}</code></td><td><small>${escapeHtml(d.reason)}</small></td></tr>`
+      ).join('') || '<tr><td colspan="3" style="text-align:center;color:#94a3b8;padding:8px">No duplicate scan attempts logged today.</td></tr>';
+
+      const unresolvedRows = recon.unresolvedExceptions.map(u =>
+        `<tr><td><b>${escapeHtml(u.title)}</b></td><td><span class="pupil-id">${escapeHtml(u.pupilId)}</span></td><td>${escapeHtml(u.requestedBy)}</td><td><span class="recon-badge warning">${escapeHtml(u.status)}</span></td></tr>`
+      ).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:8px">No unresolved exceptions found.</td></tr>';
+
+      const timelineRows = (recon.timeline || []).slice(0, 10).map(t => {
+        const evs = t.events.map(ev =>
+          `<span style="margin-right:8px"><i class="timeline-dot ${ev.type.includes('arrival')?'arr':'dep'}"></i>${escapeHtml(ev.time)} (${escapeHtml(ev.type)})</span>`
+        ).join('');
+        return `<tr><td><b>${escapeHtml(t.pupil.name)}</b></td><td><span class="pupil-id">${escapeHtml(t.pupil.id)}</span></td><td>${escapeHtml(t.pupil.className)}</td><td>${evs}</td></tr>`;
+      }).join('') || '<tr><td colspan="4" style="text-align:center;color:#94a3b8;padding:8px">No pupil movements recorded yet.</td></tr>';
+
+      openModal(`
+        <h2 id="modalTitle">Daily Attendance Reconciliation</h2>
+        <p class="modal-intro">End-of-day reconciliation: Pupil timelines, missing arrival/departure patterns, duplicate scans, and exceptions.</p>
+
+        <div class="recon-summary-cards">
+          <div class="recon-card">
+            <strong>${sum.totalPupils}</strong>
+            <small>Total Pupils</small>
+          </div>
+          <div class="recon-card good">
+            <strong>${sum.totalEventsToday}</strong>
+            <small>Events Today</small>
+          </div>
+          <div class="recon-card warn">
+            <strong>${sum.missingArrivalsCount}</strong>
+            <small>Missing Arrivals</small>
+          </div>
+          <div class="recon-card ${sum.duplicateScansCount > 0 ? 'warn' : 'good'}">
+            <strong>${sum.duplicateScansCount}</strong>
+            <small>Duplicate Scans</small>
+          </div>
+          <div class="recon-card ${sum.unresolvedExceptionsCount > 0 ? 'danger' : 'good'}">
+            <strong>${sum.unresolvedExceptionsCount}</strong>
+            <small>Exceptions Pending</small>
+          </div>
+        </div>
+
+        <div style="max-height:360px;overflow-y:auto;display:grid;gap:12px">
+          <!-- Missing Patterns -->
+          <div class="recon-section">
+            <h3><span>⚠</span> Missing Arrival & Departure Patterns</h3>
+            <p>Pupils with incomplete gate transactions for today.</p>
+            <table class="recon-table">
+              <thead><tr><th>PUPIL</th><th>ID</th><th>CLASS</th><th>STATUS PATTERN</th></tr></thead>
+              <tbody>${missingArrRows}${missingDepRows}</tbody>
+            </table>
+          </div>
+
+          <!-- Duplicate scan attempts -->
+          <div class="recon-section">
+            <h3><span>🛡</span> Duplicate Scan Attempts Logged</h3>
+            <p>Traceable log of rapid duplicate card taps and idempotency rejections.</p>
+            <table class="recon-table">
+              <thead><tr><th>TIME</th><th>OBJECT ID</th><th>REASON & STAFF</th></tr></thead>
+              <tbody>${duplicateRows}</tbody>
+            </table>
+          </div>
+
+          <!-- Unresolved Exceptions -->
+          <div class="recon-section">
+            <h3><span>⏳</span> Unresolved Exceptions</h3>
+            <p>Pending guardian requests, manual exceptions, and unresolved items.</p>
+            <table class="recon-table">
+              <thead><tr><th>TITLE</th><th>PUPIL</th><th>REQUESTED BY</th><th>STATUS</th></tr></thead>
+              <tbody>${unresolvedRows}</tbody>
+            </table>
+          </div>
+
+          <!-- Pupil Event Timeline Sample -->
+          <div class="recon-section">
+            <h3><span>⏱</span> Pupil Event Timeline</h3>
+            <p>Chronological sequence of arrival and dismissal movements today.</p>
+            <table class="recon-table">
+              <thead><tr><th>PUPIL</th><th>ID</th><th>CLASS</th><th>TIMELINE OF MOVEMENTS</th></tr></thead>
+              <tbody>${timelineRows}</tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="modal-actions">
+          <button class="button button-outline" id="closeReconModal">Close</button>
+          <button class="button button-primary" id="exportReconCsv">Export Attendance Report (CSV)</button>
+        </div>
+      `);
+
+      $('#closeReconModal').onclick = closeModal;
+      $('#exportReconCsv').onclick = () => {
+        closeModal();
+        exportAttendanceReport();
+      };
+    } catch (err) {
+      toast(`Failed to load daily reconciliation: ${err.message}`, '!');
+    }
+  }
+
+  async function exportCsv(){
+    return exportAttendanceReport();
+  }
   function pickFilter(button,options,current,cb){const old=$('.filter-menu');old?.remove();const menu=document.createElement('div');menu.className='filter-menu';menu.style.cssText='position:absolute;background:white;border:1px solid #eceef4;border-radius:7px;box-shadow:0 8px 24px #22264018;padding:5px;z-index:20;min-width:130px';const r=button.getBoundingClientRect();menu.style.left=`${r.left+window.scrollX}px`;menu.style.top=`${r.bottom+window.scrollY+4}px`;options.forEach(x=>{const b=document.createElement('button');b.textContent=x;b.style.cssText='display:block;width:100%;text-align:left;background:white;border:0;padding:8px 9px;border-radius:4px;font:10px DM Sans;color:#555b70;cursor:pointer';if(x===current)b.style.color='#5368ef';b.onclick=()=>{menu.remove();cb(x);button.innerHTML=`${escapeHtml(x)} <span>⌄</span>`};menu.append(b)});document.body.append(menu);setTimeout(()=>document.addEventListener('click',function close(e){if(!menu.contains(e.target)&&e.target!==button){menu.remove();document.removeEventListener('click',close)}},{once:true}),0);}
 
   function openCorrectionModal(eventId) {
@@ -2001,11 +2348,48 @@
   $('#pupilSearch').oninput=renderPupils;
   $('#activitySearch').oninput=renderActivity;
   $('#pickupSearch').oninput=renderPickup;
+
+  // Live view interactive stat cards
+  $('#cardExpected')?.addEventListener('click', () => { liveViewChoice = 'all'; renderDashboard(); });
+  $('#cardArrived')?.addEventListener('click', () => { liveViewChoice = 'arrived'; renderDashboard(); });
+  $('#cardDeparted')?.addEventListener('click', () => { liveViewChoice = 'departed'; renderDashboard(); });
+  $('#cardNotYetArrived')?.addEventListener('click', () => { liveViewChoice = 'not_yet_arrived'; renderDashboard(); });
+  $('#cardStillOnSite')?.addEventListener('click', () => { liveViewChoice = 'still_on_site'; renderDashboard(); });
+  $('#cardExceptions')?.addEventListener('click', () => { liveViewChoice = 'exceptions'; renderDashboard(); });
+
+  $('#liveStatusFilter')?.addEventListener('click', () => {
+    pickFilter($('#liveStatusFilter'), [
+      'Still on site', 'Expected pupils', 'Arrived', 'Departed', 'Not yet arrived', 'Exceptions'
+    ], liveViewChoice, choice => {
+      const map = {
+        'Still on site': 'still_on_site',
+        'Expected pupils': 'all',
+        'Arrived': 'arrived',
+        'Departed': 'departed',
+        'Not yet arrived': 'not_yet_arrived',
+        'Exceptions': 'exceptions'
+      };
+      liveViewChoice = map[choice] || 'still_on_site';
+      renderDashboard();
+    });
+  });
+
+  // Multi-parameter activity / report filters
+  $('#filterCampus')?.addEventListener('change', renderActivity);
+  $('#filterClass')?.addEventListener('change', renderActivity);
+  $('#filterSession')?.addEventListener('change', renderActivity);
+  $('#filterEventType')?.addEventListener('change', renderActivity);
+  $('#filterStatus')?.addEventListener('change', renderActivity);
+
+  $('#openDailyReconBtn')?.addEventListener('click', openDailyReconciliationModal);
+  $('#reconModalBtn')?.addEventListener('click', openDailyReconciliationModal);
+  $('#exportAttendanceBtn')?.addEventListener('click', exportAttendanceReport);
+
   $('#classFilter').onclick=()=>pickFilter($('#classFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderDashboard()});
   $('#directoryFilter').onclick=()=>pickFilter($('#directoryFilter'),['All classes',...new Set(pupils.map(p=>p.className))],classChoice,x=>{classChoice=x;renderPupils()});
   $('#pupilStatusFilter')?.addEventListener('click',()=>pickFilter($('#pupilStatusFilter'),['All statuses','On campus','Departed','Not arrived'],pupilStatusChoice,x=>{pupilStatusChoice=x;renderPupils()}));
-  $('#eventFilter').onclick=()=>pickFilter($('#eventFilter'),['All events','Arrivals','Departures','Manual entries','Exceptions (Manual cards)'],activityChoice,x=>{activityChoice=x;renderActivity()});
-  $('#exportActivity').onclick=exportCsv;
+  $('#eventFilter')?.addEventListener('click',()=>pickFilter($('#eventFilter'),['All events','Arrivals','Departures','Manual entries','Exceptions (Manual cards)'],activityChoice,x=>{activityChoice=x;renderActivity()}));
+  $('#exportActivity')?.addEventListener('click', exportAttendanceReport);
   $('#modalClose').onclick=closeModal;
   $('#modalBackdrop').onclick=e=>{if(e.target.id==='modalBackdrop')closeModal()};
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal()});

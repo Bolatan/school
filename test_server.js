@@ -1484,3 +1484,206 @@ test('Card scanning: outcomes, photo pre-verification, duplicate tap prevention,
   assert.ok(artworkHtmlRes.text.includes('Kofi Mensah'));
   assert.ok(artworkHtmlRes.text.includes('Property of Northfield Academy'));
 });
+
+test('Dashboards and reports: Live views, search/filter, attendance export with audit logging, and daily reconciliation', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Create test pupils for live views and reconciliation
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      id: 'NF-8801',
+      name: 'Simi Johnson',
+      className: 'Grade 3A',
+      guardian: 'Folake Johnson'
+    });
+
+  // Attach an approved collector to NF-8801
+  await Pupil.updateOne(
+    { id: 'NF-8801' },
+    { $set: { collectors: [{ id: 1, name: 'Folake Johnson', relation: 'Mother', until: 'Ongoing', active: true }] } }
+  );
+
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      id: 'NF-8802',
+      name: 'Tariq Al-Mansoor',
+      className: 'Grade 3A',
+      guardian: 'Zainab Al-Mansoor'
+    });
+
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      id: 'NF-8803',
+      name: 'Chioma Obi',
+      className: 'Grade 4B',
+      guardian: 'Emeka Obi'
+    });
+
+  // A. Record arrival for NF-8801 (normal scan)
+  const arr1 = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-8801',
+      type: 'arrival',
+      campus: 'Primary campus',
+      gate: 'Main gate',
+      session: 'Morning Arrival',
+      source: 'Card scan'
+    });
+  assert.equal(arr1.status, 201);
+
+  // B. Record arrival for NF-8802 (manual entry / card_missing)
+  const arr2 = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-8802',
+      type: 'manual_arrival',
+      campus: 'Primary campus',
+      gate: 'Main gate',
+      session: 'Morning Arrival',
+      source: 'Manual entry',
+      reason: 'card_missing',
+      manualEntry: true
+    });
+  assert.equal(arr2.status, 201);
+
+  // C. Attempt duplicate arrival scan for NF-8801 via /api/cards/scan to verify duplicate scan attempt logging
+  const cardDoc = await Card.findOne({ pupilId: 'NF-8801', status: 'active' });
+  const dupScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: cardDoc ? cardDoc.cardToken : 'NF-8801',
+      mode: 'arrival',
+      session: 'Morning Arrival',
+      campus: 'Primary campus'
+    });
+  assert.equal(dupScanRes.status, 200);
+  assert.equal(dupScanRes.body.outcome, 'already_recorded');
+
+  // Verify duplicate scan attempt was recorded in AuditEntry
+  const dupAudit = await AuditEntry.findOne({ action: 'duplicate_scan_attempt', objectId: 'NF-8801' });
+  assert.ok(dupAudit);
+  assert.ok(dupAudit.reason.includes('already arrived today'));
+
+  // D. Record departure for NF-8801 (leaving NF-8802 still on site, and NF-8803 not yet arrived)
+  const dep1 = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-8801',
+      type: 'departure',
+      collectorName: 'Folake Johnson',
+      verification: 'Guardian photo ID checked',
+      campus: 'Primary campus',
+      gate: 'Main gate',
+      session: 'Afternoon Dismissal'
+    });
+  assert.equal(dep1.status, 201);
+
+  // 2. Test GET /api/dashboard/live
+  const liveRes = await request
+    .get('/api/dashboard/live?campus=Primary%20campus')
+    .set('Cookie', adminCookie);
+  assert.equal(liveRes.status, 200);
+  assert.ok(liveRes.body.metrics);
+  assert.ok(liveRes.body.metrics.expectedPupils >= 3);
+  assert.ok(liveRes.body.metrics.arrived >= 2);
+  assert.ok(liveRes.body.metrics.departed >= 1);
+  assert.ok(liveRes.body.metrics.stillOnSite >= 1);
+  assert.ok(liveRes.body.metrics.exceptions >= 1); // NF-8802 had manualEntry card_missing
+  assert.ok(Array.isArray(liveRes.body.pupils));
+
+  // Check specific pupil statuses in live view
+  const p8801Live = liveRes.body.pupils.find(p => p.id === 'NF-8801');
+  assert.equal(p8801Live.liveStatus, 'departed');
+  const p8802Live = liveRes.body.pupils.find(p => p.id === 'NF-8802');
+  assert.equal(p8802Live.liveStatus, 'still_on_site');
+  assert.equal(p8802Live.hasException, true);
+  const p8803Live = liveRes.body.pupils.find(p => p.id === 'NF-8803');
+  assert.equal(p8803Live.liveStatus, 'not_yet_arrived');
+
+  // 3. Test GET /api/reports/attendance search & filter
+  // Filter by className
+  const classFilterRes = await request
+    .get('/api/reports/attendance?className=Grade%203A')
+    .set('Cookie', adminCookie);
+  assert.equal(classFilterRes.status, 200);
+  assert.ok(classFilterRes.body.results.length >= 2);
+  assert.ok(classFilterRes.body.results.every(r => r.className === 'Grade 3A'));
+
+  // Filter by eventType
+  const arrFilterRes = await request
+    .get('/api/reports/attendance?eventType=arrival')
+    .set('Cookie', adminCookie);
+  assert.equal(arrFilterRes.status, 200);
+  assert.ok(arrFilterRes.body.results.every(r => r.type.includes('arrival')));
+
+  // Filter by pupil search
+  const pupilSearchRes = await request
+    .get('/api/reports/attendance?pupil=Tariq')
+    .set('Cookie', adminCookie);
+  assert.equal(pupilSearchRes.status, 200);
+  assert.ok(pupilSearchRes.body.results.length >= 1);
+  assert.ok(pupilSearchRes.body.results.some(r => r.pupilId === 'NF-8802'));
+
+  // Check notification outcome and manual/offline indicators in report items
+  const manualItem = pupilSearchRes.body.results.find(r => r.pupilId === 'NF-8802');
+  assert.equal(manualItem.manualEntry, true);
+  assert.equal(manualItem.reason, 'card_missing');
+  assert.ok(manualItem.notificationOutcome);
+  assert.equal(manualItem.notificationOutcome.status, 'Sent');
+
+  // 4. Test Export Attendance Report: CSV export, role check, and audit logging
+  const exportCsvRes = await request
+    .get('/api/reports/attendance/export?campus=Primary%20campus&className=Grade%203A')
+    .set('Cookie', adminCookie);
+  assert.equal(exportCsvRes.status, 200);
+  assert.equal(exportCsvRes.headers['content-type'], 'text/csv; charset=utf-8');
+  assert.ok(exportCsvRes.text.includes('Event ID,Pupil ID,Pupil Name,Class'));
+  assert.ok(exportCsvRes.text.includes('Simi Johnson'));
+  assert.ok(exportCsvRes.text.includes('Tariq Al-Mansoor'));
+
+  // Verify AuditEntry created for export
+  const exportAudit = await AuditEntry.findOne({ action: 'export_attendance_report' });
+  assert.ok(exportAudit);
+  assert.ok(exportAudit.reason.includes('exported attendance report'));
+
+  // Verify role check: unauthenticated request rejected
+  const unauthExportRes = await request.get('/api/reports/attendance/export');
+  assert.equal(unauthExportRes.status, 401);
+
+  // 5. Test Daily Reconciliation endpoint: /api/reports/reconciliation
+  const reconRes = await request
+    .get('/api/reports/reconciliation?campus=Primary%20campus')
+    .set('Cookie', adminCookie);
+  assert.equal(reconRes.status, 200);
+  const recon = reconRes.body.reconciliation;
+  assert.ok(recon.summary);
+  assert.ok(recon.missingPatterns);
+  assert.ok(recon.duplicateScanAttempts);
+  assert.ok(recon.unresolvedExceptions);
+  assert.ok(Array.isArray(recon.timeline));
+
+  // Check missing patterns:
+  // NF-8802 arrived but not departed => arrivedWithoutDeparture
+  assert.ok(recon.missingPatterns.arrivedWithoutDeparture.some(p => p.pupilId === 'NF-8802'));
+  // NF-8803 never scanned => unrecordedPupils
+  assert.ok(recon.missingPatterns.unrecordedPupils.some(p => p.pupilId === 'NF-8803'));
+
+  // Check duplicate scan attempts captured
+  assert.ok(recon.duplicateScanAttempts.some(d => d.objectId === 'NF-8801'));
+
+  // Check pupil timeline present
+  const simiTimeline = recon.timeline.find(t => t.pupil.id === 'NF-8801');
+  assert.ok(simiTimeline);
+  assert.ok(simiTimeline.events.length >= 2); // arrival and departure
+});
