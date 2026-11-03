@@ -115,12 +115,29 @@
     events = [...pendingQueue, ...serverEvents];
     requests=state.requests||[];
     schoolSettings=state.school||{};
+    updateSessionOptions();
     if($('#disclosureToggle')){
       $('#disclosureToggle').checked=schoolSettings.discloseCollectorName!==false;
     }
     if($('#offlineStalePolicyToggle')){
       $('#offlineStalePolicyToggle').checked=Boolean(schoolSettings.allowOfflineStalePickupPolicy);
     }
+  }
+
+  function updateSessionOptions() {
+    const sessionSelect = $('#sessionSelect');
+    if (!sessionSelect) return;
+    const currentVal = sessionSelect.value;
+    const sessions = schoolSettings.operatingSessions || (schoolSettings.sessions ? schoolSettings.sessions.map(s => ({ name: s, defaultMode: 'arrival' })) : [
+      { id: "morning", name: "Morning Arrival", defaultMode: "arrival" },
+      { id: "standard", name: "Standard Day", defaultMode: "arrival" },
+      { id: "afternoon", name: "Afternoon Dismissal", defaultMode: "departure" }
+    ]);
+    sessionSelect.innerHTML = sessions.map(s => {
+      const sName = typeof s === 'string' ? s : s.name;
+      const sMode = typeof s === 'object' && s.defaultMode ? ` (${s.defaultMode})` : '';
+      return `<option value="${escapeHtml(sName)}" ${sName === currentVal ? 'selected' : ''}>${escapeHtml(sName)}${escapeHtml(sMode)}</option>`;
+    }).join('');
   }
   async function refreshState(){
     if (!isDeviceOnline()) {
@@ -253,6 +270,48 @@
 
     const isOnline = isDeviceOnline();
     const allowStalePickup = Boolean(schoolSettings.allowOfflineStalePickupPolicy);
+    const pStatus = statusFor(p);
+
+    // Accidental mode error detection:
+    // 1) Pupil status vs Mode check
+    let pupilStatusMismatchHtml = '';
+    if (mode === 'arrival' && pStatus === 'On campus') {
+      pupilStatusMismatchHtml = `
+        <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:9px 12px;margin:8px 0;font-size:10px;color:#9a3412">
+          <strong>⚠ Accidental Mode Error Warning:</strong> ${escapeHtml(p.name)} is <b>already marked On Campus</b> today. Confirming arrival again will result in a duplicate check-in.
+        </div>
+      `;
+    } else if (mode === 'departure' && pStatus !== 'On campus') {
+      pupilStatusMismatchHtml = `
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:9px 12px;margin:8px 0;font-size:10px;color:#991b1b">
+          <strong>⚠ Accidental Mode Error Warning:</strong> ${escapeHtml(p.name)} has <b>not arrived</b> on campus yet (current status: ${escapeHtml(pStatus)}). School policy requires arrival verification before departure release.
+        </div>
+      `;
+    }
+
+    // 2) Operating session vs Mode check
+    const selectedSessionName = $('#sessionSelect')?.value || 'Morning Arrival';
+    const sessions = schoolSettings.operatingSessions || [];
+    const sObj = sessions.find(s => s.name === selectedSessionName || s.id === selectedSessionName);
+    const isSessionMismatch = sObj && sObj.defaultMode && sObj.defaultMode !== 'both' && sObj.defaultMode !== mode;
+
+    let sessionMismatchHtml = '';
+    if (isSessionMismatch) {
+      sessionMismatchHtml = `
+        <div style="background:#fffbeb;border:1px solid #fcd34d;border-radius:8px;padding:9px 12px;margin:8px 0;">
+          <div style="color:#b45309;font-weight:700;font-size:10px;display:flex;align-items:center;gap:6px">
+            <span>⚠</span> OPERATING SESSION MISMATCH WARNING
+          </div>
+          <p style="margin:4px 0 6px;font-size:9px;color:#92400e;line-height:1.4">
+            The gate operating session is set to <b>"${escapeHtml(sObj.name)}"</b> (scheduled for <b>${sObj.defaultMode.toUpperCase()}</b>), but you are recording a <b>${mode.toUpperCase()}</b>.
+          </p>
+          <label style="display:flex;align-items:center;gap:6px;font-size:10px;color:#78350f;font-weight:700;cursor:pointer">
+            <input type="checkbox" id="confirmSessionMismatchCheckbox">
+            <span>I confirm this ${mode.toUpperCase()} during ${escapeHtml(sObj.name)} is intentional</span>
+          </label>
+        </div>
+      `;
+    }
 
     // Offline stale pickup warning banner
     let offlinePickupWarningHtml = '';
@@ -370,10 +429,17 @@
     ` : '';
 
     openModal(`
-      <h2 id="modalTitle">Confirm ${mode === 'arrival' ? 'Arrival' : 'Departure & Release'}</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+        <h2 id="modalTitle" style="margin:0">Confirm Handover</h2>
+        <span class="status-pill ${mode === 'arrival' ? 'status-present' : 'status-departed'}" style="font-size:10px;padding:4px 9px">
+          MODE: ${mode === 'arrival' ? 'ARRIVAL' : 'DEPARTURE'}
+        </span>
+      </div>
       <p class="modal-intro">
-        Staff verifies pupil against official photograph before recording handover. Device: <b>${escapeHtml(device)}</b> · Location: <b>${escapeHtml(campus)} (${escapeHtml(gate)})</b>.
+        Staff verifies pupil against official photograph before recording handover. Session: <b>${escapeHtml(selectedSessionName)}</b> · Device: <b>${escapeHtml(device)}</b> · Location: <b>${escapeHtml(campus)} (${escapeHtml(gate)})</b>.
       </p>
+      ${pupilStatusMismatchHtml}
+      ${sessionMismatchHtml}
       <div class="confirm-profile">
         <div class="photo-preview-large">${escapeHtml(p.photo||p.initials)}</div>
         <div>
@@ -426,6 +492,15 @@
       const isExceptionMode = excSection && !excSection.classList.contains('hidden');
       const isOnline = isDeviceOnline();
 
+      // Check operating session mismatch confirmation prompt
+      if (isSessionMismatch) {
+        const confirmedMismatch = $('#confirmSessionMismatchCheckbox')?.checked;
+        if (!confirmedMismatch) {
+          toast(`Please tick the session mismatch confirmation checkbox before logging ${mode}.`, '!');
+          return;
+        }
+      }
+
       // Check offline stale pickup policy on departure
       if (!isOnline && mode === 'departure' && !isExceptionMode) {
         const allowStale = Boolean(schoolSettings.allowOfflineStalePickupPolicy);
@@ -450,7 +525,8 @@
         }
         recordAuthorizedException(p, collectorName, reason, verification);
       } else {
-        recordEvent(p, mode, isManual ? 'Manual entry' : 'Card scan', isManual ? ($('#reasonSelect')?.value || 'card_missing') : '');
+        const eventType = isManual ? (mode === 'arrival' ? 'manual_arrival' : 'manual_departure') : mode;
+        recordEvent(p, eventType, isManual ? 'Manual entry' : 'Card scan', isManual ? ($('#reasonSelect')?.value || 'card_missing') : '');
       }
     };
   }
@@ -459,6 +535,7 @@
     const device = $('#deviceSelect')?.value || 'Primary Gate Terminal';
     const campus = $('#campusSelect')?.value || 'Primary campus';
     const gate = $('#gateSelect')?.value || 'Main gate';
+    const session = $('#sessionSelect')?.value || 'Morning Arrival';
     const isOnline = isDeviceOnline();
 
     if (!isOnline) {
@@ -479,6 +556,7 @@
         device,
         campus,
         gate,
+        session,
         manualEntry: true,
         deviceCapturedAt: Date.now(),
         staffEmail: signedInUser?.email || '',
@@ -509,7 +587,9 @@
         device,
         campus,
         gate,
-        manualEntry: true
+        session,
+        manualEntry: true,
+        confirmModeMismatch: true
       });
       acceptState(res.state);
       closeModal();
@@ -530,9 +610,12 @@
     const device = $('#deviceSelect')?.value || 'Primary Gate Terminal';
     const campus = $('#campusSelect')?.value || 'Primary campus';
     const gate = $('#gateSelect')?.value || 'Main gate';
+    const session = $('#sessionSelect')?.value || 'Morning Arrival';
     const isOnline = isDeviceOnline();
 
-    if (type === 'departure') {
+    const isDep = type === 'departure' || type === 'manual_departure';
+
+    if (isDep) {
       const selectedRadio = $('input[name="selectedCollectorRadio"]:checked');
       if (!selectedRadio) {
         toast('Select an approved collector. If collector is unapproved, escalate to administrator.', '!');
@@ -563,15 +646,16 @@
         device,
         campus,
         gate,
-        manualEntry: source === 'Manual entry' || source === 'Manual ID lookup' || !!reason,
-        collectorId: type === 'departure' ? collectorId : undefined,
-        collectorName: type === 'departure' ? collectorName : undefined,
+        session,
+        manualEntry: source === 'Manual entry' || source === 'Manual ID lookup' || !!reason || type.startsWith('manual_'),
+        collectorId: isDep ? collectorId : undefined,
+        collectorName: isDep ? collectorName : undefined,
         verification,
         deviceCapturedAt: Date.now(),
         staffEmail: signedInUser?.email || '',
         deviceManaged: true,
         deviceEncrypted: true,
-        allowOfflineStalePickupPolicy: type === 'departure' && Boolean(schoolSettings.allowOfflineStalePickupPolicy),
+        allowOfflineStalePickupPolicy: isDep && Boolean(schoolSettings.allowOfflineStalePickupPolicy),
         time: localTime(),
         date: today
       };
@@ -596,8 +680,10 @@
         device,
         campus,
         gate,
-        manualEntry: source === 'Manual entry' || source === 'Manual ID lookup' || !!reason,
-        collectorId: type === 'departure' ? collectorId : undefined,
+        session,
+        confirmModeMismatch: true,
+        manualEntry: source === 'Manual entry' || source === 'Manual ID lookup' || !!reason || type.startsWith('manual_'),
+        collectorId: isDep ? collectorId : undefined,
         verification
       });
       acceptState(res.state);
@@ -1482,6 +1568,117 @@
     findAndScan($('#pupilIdInput').value, 'Manual entry', reason);
     $('#pupilIdInput').value = '';
   });
+  $('#sessionSelect')?.addEventListener('change', e => {
+    const selectedName = e.target.value;
+    const sessions = schoolSettings.operatingSessions || [];
+    const sObj = sessions.find(s => s.name === selectedName || s.id === selectedName);
+    if (sObj && sObj.defaultMode && sObj.defaultMode !== 'both') {
+      if (sObj.defaultMode !== mode) {
+        const newMode = sObj.defaultMode;
+        openModal(`
+          <h2 id="modalTitle">Switch Mode for Operating Session?</h2>
+          <p class="modal-intro">
+            The selected session <b>"${escapeHtml(sObj.name)}"</b> is scheduled for <b>${newMode.toUpperCase()}</b> operations.
+          </p>
+          <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px;margin:12px 0;font-size:11px;color:#1e40af">
+            Would you like to automatically switch the gate operating mode from <b>${mode.toUpperCase()}</b> to <b>${newMode.toUpperCase()}</b>?
+          </div>
+          <div class="modal-actions">
+            <button class="button button-outline" id="keepCurrentMode">Keep ${mode.toUpperCase()} Mode</button>
+            <button class="button button-primary" id="confirmSwitchMode">Switch to ${newMode.toUpperCase()} Mode</button>
+          </div>
+        `);
+        $('#keepCurrentMode').onclick = closeModal;
+        $('#confirmSwitchMode').onclick = () => {
+          mode = newMode;
+          $$('.mode-button').forEach(b => b.classList.toggle('selected', b.dataset.mode === mode));
+          $('.scan-start').textContent = 'Start camera scanner';
+          $('.scan-frame h2').textContent = mode === 'arrival' ? 'Scan pupil ID card' : 'Scan for departure';
+          closeModal();
+          toast(`Operating mode switched to ${mode.toUpperCase()} for ${sObj.name}.`);
+        };
+      }
+    }
+  });
+
+  function openManageSessionsModal() {
+    if (signedInUser?.role !== 'admin') {
+      toast('Only administrators can configure operating sessions.', '!');
+      return;
+    }
+    const sessions = schoolSettings.operatingSessions || [
+      { id: "morning", name: "Morning Arrival", startTime: "07:30", endTime: "08:30", defaultMode: "arrival" },
+      { id: "standard", name: "Standard Day", startTime: "08:30", endTime: "14:30", defaultMode: "arrival" },
+      { id: "afternoon", name: "Afternoon Dismissal", startTime: "14:30", endTime: "15:30", defaultMode: "departure" }
+    ];
+    const sessionsListHtml = sessions.map(s => `
+      <div style="display:flex;align-items:center;justify-content:space-between;background:#f8fafc;border:1px solid #e2e8f0;padding:8px 10px;border-radius:6px;margin-bottom:6px">
+        <div>
+          <strong style="font-size:11px">${escapeHtml(s.name)}</strong>
+          <small style="display:block;color:#64748b">${escapeHtml(s.startTime)} - ${escapeHtml(s.endTime)} · Default: <b>${escapeHtml(s.defaultMode)}</b></small>
+        </div>
+        <span class="status-pill ${s.defaultMode === 'arrival' ? 'status-present' : s.defaultMode === 'departure' ? 'status-departed' : 'status-approved'}">${escapeHtml(s.defaultMode)}</span>
+      </div>
+    `).join('');
+
+    openModal(`
+      <h2 id="modalTitle">Configurable Operating Sessions</h2>
+      <p class="modal-intro">
+        Configure scheduled operating sessions. Sessions help prevent accidental arrival/departure mode errors at the gates.
+      </p>
+      <div style="max-height:160px;overflow-y:auto;margin-bottom:12px">
+        ${sessionsListHtml}
+      </div>
+      <form id="addSessionForm" class="form-grid" style="border-top:1px dashed #cbd5e1;padding-top:12px">
+        <div class="form-field full">
+          <label>New / Updated Session Name *</label>
+          <input name="name" required placeholder="e.g. Evening Club Dismissal">
+        </div>
+        <div class="form-field">
+          <label>Start Time (HH:MM)</label>
+          <input name="startTime" placeholder="15:30" value="15:30">
+        </div>
+        <div class="form-field">
+          <label>End Time (HH:MM)</label>
+          <input name="endTime" placeholder="17:00" value="17:00">
+        </div>
+        <div class="form-field full">
+          <label>Default Operating Mode *</label>
+          <select name="defaultMode">
+            <option value="arrival">Arrival (Check-in)</option>
+            <option value="departure">Departure (Dismissal & Release)</option>
+            <option value="both">Both (Flexible operations)</option>
+          </select>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="closeSessionsModal">Close</button>
+          <button type="submit" class="button button-primary">Save Session</button>
+        </div>
+      </form>
+    `);
+
+    $('#closeSessionsModal').onclick = closeModal;
+    $('#addSessionForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.currentTarget);
+      try {
+        const res = await api('/api/sessions', {
+          name: f.get('name'),
+          startTime: f.get('startTime'),
+          endTime: f.get('endTime'),
+          defaultMode: f.get('defaultMode')
+        });
+        toast(`Session "${res.session.name}" configured.`);
+        schoolSettings.operatingSessions = res.sessions;
+        updateSessionOptions();
+        closeModal();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  $('#manageSessionsBtn')?.addEventListener('click', openManageSessionsModal);
   $('#startCamera').onclick = startScanner;
   $('#openExceptionReportBtn')?.addEventListener('click', openExceptionReport);
   $('#viewExceptionsTabBtn')?.addEventListener('click', openExceptionReport);
