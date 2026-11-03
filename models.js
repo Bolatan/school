@@ -7,7 +7,14 @@ const userSchema = new mongoose.Schema({
   salt: { type: String, required: true },
   passwordHash: { type: String, required: true },
   active: { type: Boolean, default: true },
-  guardianId: { type: String, default: null } // Optional link to Guardian document
+  guardianId: { type: String, default: null }, // Optional link to Guardian document
+  mfaEnabled: { type: Boolean, default: false },
+  mfaSecret: { type: String, default: null },
+  mfaEnforced: { type: Boolean, default: false },
+  deviceLockEnforced: { type: Boolean, default: false },
+  revokedAt: { type: Date, default: null },
+  revokedReason: { type: String, default: '' },
+  assignedCampus: { type: String, default: 'Primary campus' }
 }, { timestamps: true });
 
 const collectorSchema = new mongoose.Schema({
@@ -173,6 +180,69 @@ const cardSchema = new mongoose.Schema({
   issuedBy: { type: String, default: 'School Administration' }
 }, { timestamps: true });
 
+const campusSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  code: { type: String, required: true, unique: true, uppercase: true, trim: true },
+  address: { type: String, default: '' },
+  timezone: { type: String, default: 'Europe/London' },
+  gates: [{ type: String, trim: true }],
+  active: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const schoolClassSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  gradeLevel: { type: String, default: '' },
+  campus: { type: String, default: 'Primary campus' },
+  teacherName: { type: String, default: '' },
+  room: { type: String, default: '' },
+  capacity: { type: Number, default: 30 },
+  active: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const deviceSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, trim: true }, // e.g. DEV-001
+  name: { type: String, required: true, trim: true },
+  type: { type: String, enum: ['terminal', 'handheld', 'tablet', 'kiosk'], default: 'terminal' },
+  assignedStaff: { type: String, default: '' },
+  assignedCampus: { type: String, default: 'Primary campus' },
+  assignedGate: { type: String, default: 'Main gate' },
+  deviceLockEnabled: { type: Boolean, default: true },
+  deviceLockPin: { type: String, default: '1234' }, // Required lock PIN for strong staff sign-in
+  status: { type: String, enum: ['active', 'revoked', 'lost', 'maintenance'], default: 'active' },
+  revokedAt: { type: Date, default: null },
+  revokedReason: { type: String, default: '' },
+  lastSeenAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+const notificationTemplateSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  type: { type: String, enum: ['arrival', 'departure', 'emergency', 'manual_entry', 'general'], required: true },
+  channel: { type: String, enum: ['sms', 'whatsapp', 'push', 'email', 'all'], default: 'all' },
+  templateBody: { type: String, required: true },
+  variables: [{ type: String }], // e.g. ['pupil_name', 'campus', 'gate', 'time', 'collector_name']
+  active: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const escalationContactSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  role: { type: String, required: true, trim: true }, // e.g. "Head of Safeguarding", "Principal", "Gate Supervisor"
+  phone: { type: String, required: true, trim: true },
+  email: { type: String, default: '', lowercase: true, trim: true },
+  priority: { type: Number, default: 1 }, // 1 = highest / primary
+  campus: { type: String, default: 'All campuses' },
+  notificationChannels: [{ type: String, enum: ['sms', 'phone', 'email', 'whatsapp'] }],
+  active: { type: Boolean, default: true }
+}, { timestamps: true });
+
+const Campus = mongoose.model('Campus', campusSchema);
+const SchoolClass = mongoose.model('SchoolClass', schoolClassSchema);
+const Device = mongoose.model('Device', deviceSchema);
+const NotificationTemplate = mongoose.model('NotificationTemplate', notificationTemplateSchema);
+const EscalationContact = mongoose.model('EscalationContact', escalationContactSchema);
 const Card = mongoose.model('Card', cardSchema);
 const Guardian = mongoose.model('Guardian', guardianSchema);
 const PupilGuardian = mongoose.model('PupilGuardian', pupilGuardianSchema);
@@ -191,5 +261,10 @@ module.exports = {
   Guardian,
   PupilGuardian,
   CorrectionRequest,
-  Card
+  Card,
+  Campus,
+  SchoolClass,
+  Device,
+  NotificationTemplate,
+  EscalationContact
 };
