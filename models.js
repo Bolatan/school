@@ -19,10 +19,27 @@ const userSchema = new mongoose.Schema({
 
 const collectorSchema = new mongoose.Schema({
   id: { type: Number },
-  name: { type: String, required: true },
-  relation: { type: String, required: true },
-  until: { type: String, default: 'Ongoing' },
-  active: { type: Boolean, default: true }
+  name: { type: String, required: true, trim: true },
+  relation: { type: String, default: '', trim: true }, // relationship (optional)
+  contactDetails: { type: String, default: '', trim: true }, // phone, email if needed
+  idCheckGuidance: { type: String, default: '', trim: true }, // photo/ID-check guidance under school policy
+  permissionType: {
+    type: String,
+    enum: ['ongoing', 'time_limited', 'one_time', 'emergency_exception'],
+    default: 'ongoing'
+  },
+  startDate: { type: String, default: null }, // YYYY-MM-DD
+  endDate: { type: String, default: null }, // YYYY-MM-DD
+  until: { type: String, default: 'Ongoing' }, // Legacy / display until string
+  status: { type: String, enum: ['active', 'expired', 'revoked'], default: 'active' },
+  active: { type: Boolean, default: true },
+  addedBy: { type: String, default: 'School Staff' },
+  approvedBy: { type: String, default: 'School Staff' },
+  approvedAt: { type: Date, default: Date.now },
+  revokedAt: { type: Date, default: null },
+  revokedBy: { type: String, default: null },
+  revocationReason: { type: String, default: '' },
+  oneTimeUsedAt: { type: Date, default: null }
 });
 
 const pupilSchema = new mongoose.Schema({
@@ -55,12 +72,25 @@ const notificationSchema = new mongoose.Schema({
 const pickupRequestSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
   pupilId: { type: String, required: true, ref: 'Pupil' },
-  name: { type: String, required: true },
-  relation: { type: String, required: true },
+  guardianId: { type: String, ref: 'Guardian', default: null },
+  name: { type: String, required: true, trim: true },
+  relation: { type: String, default: '', trim: true }, // relationship (optional)
+  contactDetails: { type: String, default: '', trim: true }, // contact details if needed
+  idCheckGuidance: { type: String, default: '', trim: true }, // photo/ID-check guidance if collected
+  permissionType: {
+    type: String,
+    enum: ['ongoing', 'time_limited', 'one_time', 'emergency_exception'],
+    default: 'one_time'
+  },
+  startDate: { type: String, default: null },
+  endDate: { type: String, default: null },
   requestedBy: { type: String, required: true },
   time: { type: String, required: true },
   note: { type: String, default: '' },
-  status: { type: String, enum: ['pending', 'approved', 'declined'], default: 'pending' }
+  status: { type: String, enum: ['pending', 'approved', 'declined'], default: 'pending' },
+  reviewedBy: { type: String, default: null },
+  reviewNote: { type: String, default: '' },
+  reviewedAt: { type: Date, default: null }
 }, { timestamps: true });
 
 const attendanceEventSchema = new mongoose.Schema({
