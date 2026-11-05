@@ -42,14 +42,48 @@ const pupilSchema = new mongoose.Schema({
 
 const notificationSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
-  eventId: { type: String, required: true },
-  pupilId: { type: String, required: true },
+  eventId: { type: String, required: true, index: true },
+  pupilId: { type: String, required: true, index: true },
+  guardianId: { type: String, default: null, index: true },
   guardianName: { type: String, required: true },
-  channel: { type: String, required: true },
+  channel: { type: String, enum: ['push', 'sms', 'whatsapp', 'email', 'PUSH', 'SMS', 'WHATSAPP', 'EMAIL'], required: true },
   recipient: { type: String, required: true },
   message: { type: String, default: '' },
-  status: { type: String, default: 'Sent' },
+  preview: { type: String, default: '' }, // Lock-screen privacy-safe preview
+  status: {
+    type: String,
+    enum: ['queued', 'accepted_by_provider', 'delivered', 'failed', 'suppressed', 'Sent', 'Pending'],
+    default: 'queued'
+  },
+  providerStatus: { type: String, default: null }, // raw status reported by provider
+  providerMessageId: { type: String, default: null },
+  idempotencyKey: { type: String, default: null, index: true },
+  retryCount: { type: Number, default: 0 },
+  maxRetries: { type: Number, default: 3 },
+  nextRetryAt: { type: Date, default: null },
+  failureCategory: { type: String, default: null },
+  failureReason: { type: String, default: '' },
+  dispatchedAt: { type: Date, default: null },
+  deliveredAt: { type: Date, default: null },
   sentAt: { type: String, required: true }
+}, { timestamps: true });
+
+const notificationAlertSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  eventId: { type: String, required: true, index: true },
+  pupilId: { type: String, required: true, index: true },
+  pupilName: { type: String, required: true },
+  guardianId: { type: String, default: null },
+  guardianName: { type: String, required: true },
+  attemptedChannels: [{ type: String }],
+  status: { type: String, enum: ['active', 'acknowledged', 'resolved'], default: 'active' },
+  severity: { type: String, enum: ['critical', 'high', 'warning'], default: 'high' },
+  details: { type: String, default: 'All configured notification channels failed to deliver.' },
+  acknowledgedBy: { type: String, default: null },
+  acknowledgedAt: { type: Date, default: null },
+  resolutionNote: { type: String, default: '' },
+  resolvedAt: { type: Date, default: null },
+  createdAt: { type: Date, default: Date.now }
 }, { timestamps: true });
 
 const pickupRequestSchema = new mongoose.Schema({
@@ -115,6 +149,7 @@ const Pupil = mongoose.model('Pupil', pupilSchema);
 const PickupRequest = mongoose.model('PickupRequest', pickupRequestSchema);
 const AttendanceEvent = mongoose.model('AttendanceEvent', attendanceEventSchema);
 const Notification = mongoose.model('Notification', notificationSchema);
+const NotificationAlert = mongoose.model('NotificationAlert', notificationAlertSchema);
 const AuditEntry = mongoose.model('AuditEntry', auditEntrySchema);
 const Session = mongoose.model('Session', sessionSchema);
 
@@ -140,7 +175,14 @@ const guardianSchema = new mongoose.Schema({
   consentAcceptedAt: { type: Date, default: null },
   status: { type: String, enum: ['invited', 'active', 'suspended'], default: 'invited' },
   preferredChannels: [{ type: String, enum: ['sms', 'whatsapp', 'push', 'email'] }],
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  // Non-critical notification pause settings (guardians can pause non-critical alerts without altering school records)
+  notificationsPaused: { type: Boolean, default: false },
+  notificationsPausedUntil: { type: Date, default: null },
+  // WhatsApp prerequisites: confirmed opt-in, template, provider, cost, and delivery SLA
+  whatsAppOptInConfirmed: { type: Boolean, default: false },
+  whatsAppOptInAt: { type: Date, default: null },
+  whatsAppOptInMethod: { type: String, default: null }
 }, { timestamps: true });
 
 const pupilGuardianSchema = new mongoose.Schema({
@@ -255,6 +297,7 @@ module.exports = {
   PickupRequest,
   AttendanceEvent,
   Notification,
+  NotificationAlert,
   AuditEntry,
   Session,
   SchoolSetting,

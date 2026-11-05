@@ -2186,10 +2186,28 @@
     // 2. Notification Preferences
     const form = $('#guardianPrefsForm');
     if (form) {
-      const current = data.guardian.preferredChannels || ['sms'];
+      const current = data.guardian.preferredChannels || ['push', 'sms'];
       $$('input[name="prefChannels"]', form).forEach(cb => {
         cb.checked = current.includes(cb.value);
       });
+      const waCheck = $('#prefWhatsappCheck');
+      const waContainer = $('#whatsappOptInContainer');
+      const waOptIn = $('#whatsappOptInCheck');
+      const pauseCheck = $('#pauseAlertsCheck');
+
+      if (waCheck && waContainer) {
+        waContainer.style.display = waCheck.checked ? 'block' : 'none';
+        waCheck.onchange = () => {
+          waContainer.style.display = waCheck.checked ? 'block' : 'none';
+        };
+      }
+      if (waOptIn) {
+        waOptIn.checked = Boolean(data.guardian.whatsAppOptInConfirmed);
+      }
+      if (pauseCheck) {
+        pauseCheck.checked = Boolean(data.guardian.notificationsPaused);
+      }
+
       form.onsubmit = async (e) => {
         e.preventDefault();
         const selected = $$('input[name="prefChannels"]:checked', form).map(cb => cb.value);
@@ -2197,8 +2215,15 @@
           toast('Select at least one notification channel.', '!');
           return;
         }
+
+        const payload = {
+          channels: selected,
+          notificationsPaused: Boolean(pauseCheck?.checked),
+          whatsAppOptInConfirmed: Boolean(waOptIn?.checked)
+        };
+
         try {
-          const res = await api('/api/guardian/preferences', { channels: selected });
+          const res = await api('/api/guardian/preferences', payload);
           toast(res.message);
           loadGuardianPortal();
         } catch (err) {
@@ -2676,7 +2701,66 @@
   };
   $('#pickupHelp').onclick=()=>toast('Follow the school’s approved pickup verification policy.');
   $('#contactSupport').onclick=e=>{e.preventDefault();toast('Demo: contact your school administrator for support.','i')};
-  $('#notificationsBtn').onclick=()=>toast('Message delivery is not configured in this local MVP.','!');
+  $('#notificationsBtn').onclick = async () => {
+    try {
+      const res = await api('/api/notifications/alerts?status=all');
+      const alerts = res.alerts || [];
+      const activeCount = res.activeAlertsCount || 0;
+
+      let alertsHtml = '';
+      if (!alerts.length) {
+        alertsHtml = '<div class="empty-state">No notification delivery alerts. All channels are operating normally.</div>';
+      } else {
+        alertsHtml = alerts.map(a => `
+          <div style="padding:10px;margin-bottom:8px;border-radius:6px;border:1px solid ${a.status==='active'?'#fca5a5':'#e5e7eb'};background:${a.status==='active'?'#fef2f2':'#f9fafb'}">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <strong>${escapeHtml(a.pupilName)} (${escapeHtml(a.pupilId)})</strong>
+              <span class="status-pill ${a.status==='active'?'status-absent':'status-approved'}">${escapeHtml(a.status)}</span>
+            </div>
+            <div style="font-size:11px;color:#475569;margin-top:4px">${escapeHtml(a.details)}</div>
+            <div style="font-size:10px;color:#64748b;margin-top:2px">Guardian: ${escapeHtml(a.guardianName)} · Channels: ${escapeHtml((a.attemptedChannels||[]).join(', '))}</div>
+            ${a.status === 'active' && (signedInUser?.role === 'admin' || signedInUser?.role === 'manager') ? `
+              <div style="margin-top:8px;display:flex;gap:6px">
+                <button class="button button-outline" style="font-size:10px;padding:3px 8px" onclick="acknowledgeAlert('${escapeHtml(a.id)}')">Acknowledge</button>
+                <button class="button button-primary" style="font-size:10px;padding:3px 8px" onclick="resolveAlert('${escapeHtml(a.id)}')">Resolve</button>
+              </div>
+            ` : ''}
+          </div>
+        `).join('');
+      }
+
+      openModal(`
+        <h2 id="modalTitle">School Notification Delivery Alerts</h2>
+        <p class="modal-intro">Raised when all configured channels fail for a guardian alert. Active alerts: <b>${activeCount}</b></p>
+        <div style="max-height:350px;overflow-y:auto;padding:8px 0">${alertsHtml}</div>
+        <div class="modal-actions">
+          <button class="button button-primary" onclick="closeModal()">Close</button>
+        </div>
+      `);
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  };
+
+  window.acknowledgeAlert = async (alertId) => {
+    try {
+      await api(`/api/notifications/alerts/${alertId}/acknowledge`, {});
+      toast('Alert acknowledged.');
+      closeModal();
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  };
+
+  window.resolveAlert = async (alertId) => {
+    try {
+      await api(`/api/notifications/alerts/${alertId}/acknowledge`, { resolve: true, resolutionNote: 'Resolved by staff operator' });
+      toast('Alert resolved.');
+      closeModal();
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  };
   $('.more-button').onclick=async()=>{try{await api('/api/logout',{});signedInUser=null;$('#authScreen').classList.remove('hidden');pupils=[];events=[];requests=[];$('#loginPassword').value='';$('#loginError').classList.add('hidden')}catch(err){toast(err.message,'!')}};
   const now=new Date();$('#todayLabel').textContent=now.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'});$('#dateEyebrow').innerHTML=`${now.toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'}).toUpperCase()} <span class="live-label"><i></i> LIVE</span>`;
   $('#startOnboardingFromLogin')?.addEventListener('click', (e) => {

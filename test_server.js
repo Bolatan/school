@@ -14,7 +14,11 @@ const {
   Guardian,
   PupilGuardian,
   CorrectionRequest,
-  Card
+  Card,
+  Notification,
+  NotificationAlert,
+  NotificationTemplate,
+  SchoolSetting
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
@@ -1968,4 +1972,385 @@ test('Non-Functional Requirements: Availability, Performance, Security, Privacy,
   assert.ok(lastRecordedEvent.utcTimestamp.endsWith('Z'));
   assert.ok(lastRecordedEvent.time);
   assert.ok(lastRecordedEvent.date);
+});
+
+test('Notifications: push + SMS fallback, WhatsApp gating, privacy formatting, status tracking, retries & school-visible alerts', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Setup a test pupil with a linked guardian
+  const pupilId = 'NF-9501';
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Amara Williams',
+      id: pupilId,
+      className: 'Year 5B',
+      guardian: 'David Williams'
+    });
+
+  const inviteRes = await request
+    .post('/api/guardians/invite')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId,
+      name: 'David Williams',
+      phone: '+44 7700 900123',
+      email: 'david.williams@example.com',
+      verifiedContactMethod: 'sms',
+      relationship: 'Father'
+    });
+  assert.equal(inviteRes.status, 201);
+  const { guardianId, inviteToken, verificationCode } = inviteRes.body.invite;
+
+  // Complete onboarding
+  const verifyRes = await request
+    .post('/api/guardian/verify-channel')
+    .send({ inviteToken, verificationCode });
+  assert.equal(verifyRes.status, 200);
+
+  const acceptRes = await request
+    .post('/api/guardian/accept-consent')
+    .send({
+      inviteToken,
+      acceptPrivacyNotice: true,
+      acceptConsent: true,
+      password: 'StrongGuardianPass123!'
+    });
+  assert.equal(acceptRes.status, 200);
+  const guardianCookie = acceptRes.headers['set-cookie'][0];
+
+  // Add an approved collector
+  const pupilDoc = await Pupil.findOne({ id: pupilId });
+  pupilDoc.collectors.push({ id: 1, name: 'Uncle Chidi', relation: 'Uncle', until: 'Ongoing', active: true });
+  await pupilDoc.save();
+
+  // 2. Configure Push + SMS fallback (MVP recommendation)
+  const prefRes = await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      channels: ['push', 'sms']
+    });
+  assert.equal(prefRes.status, 200);
+  assert.deepEqual(prefRes.body.preferredChannels, ['push', 'sms']);
+
+  // 3. Arrival Event: Privacy-safe message formatting & lock-screen preview
+  const arrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId,
+      type: 'arrival',
+      campus: 'Primary campus',
+      gate: 'Main gate'
+    });
+  assert.equal(arrivalRes.status, 201);
+  const arrivalNotif = arrivalRes.body.notification;
+  assert.ok(arrivalNotif);
+  // Verify privacy-safe content: contains pupil name, event type, local time, and school identity
+  assert.ok(arrivalNotif.message.includes('Northfield Academy'));
+  assert.ok(arrivalNotif.message.includes('Amara Williams'));
+  assert.ok(arrivalNotif.message.includes('arrived'));
+  // Never include sensitive pupil ID or full address
+  assert.ok(!arrivalNotif.message.includes('NF-9501'));
+  assert.ok(!arrivalNotif.preview.includes('NF-9501'));
+  assert.ok(arrivalNotif.preview.includes('Northfield Academy'));
+
+  // 4. Status per recipient/channel: queued -> accepted_by_provider -> delivered
+  // Provider acceptance is NOT labeled as delivery
+  const pendingDeliveryArrival = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId,
+      type: 'departure',
+      collectorId: 1,
+      verification: 'Photo matched',
+      simulateNotificationDelivery: false // Provider accepts payload but delivery receipt is pending
+    });
+  assert.equal(pendingDeliveryArrival.status, 201);
+  assert.equal(pendingDeliveryArrival.body.notification.status, 'accepted_by_provider');
+
+  // Find notification record in DB
+  const acceptedNotif = await Notification.findOne({
+    pupilId,
+    eventId: pendingDeliveryArrival.body.eventId,
+    channel: 'PUSH'
+  });
+  assert.ok(acceptedNotif);
+  assert.equal(acceptedNotif.status, 'accepted_by_provider');
+  assert.notEqual(acceptedNotif.status, 'delivered');
+
+  // Now provider reports delivery via webhook
+  const webhookRes = await request
+    .post('/api/notifications/webhook')
+    .send({
+      providerMessageId: acceptedNotif.providerMessageId,
+      status: 'delivered'
+    });
+  assert.equal(webhookRes.status, 200);
+  assert.equal(webhookRes.body.status, 'delivered');
+
+  // Verify updated in DB
+  const deliveredNotif = await Notification.findById(acceptedNotif._id);
+  assert.equal(deliveredNotif.status, 'delivered');
+  assert.ok(deliveredNotif.deliveredAt);
+
+  // 5. Fallback cascade: Primary channel (push) fails -> SMS fallback succeeds
+  const pupilId2 = 'NF-9502';
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Kofi Mensah',
+      id: pupilId2,
+      className: 'Year 6A',
+      guardian: 'Ama Mensah'
+    });
+  const pupilDoc2 = await Pupil.findOne({ id: pupilId2 });
+  pupilDoc2.preferredChannel = 'push';
+  pupilDoc2.collectors.push({ id: 1, name: 'Ama Mensah', relation: 'Mother', until: 'Ongoing', active: true });
+  await pupilDoc2.save();
+
+  const guardianDoc2 = await Guardian.create({
+    id: 'GD-9502',
+    name: 'Ama Mensah',
+    phone: '+44 7700 900456',
+    email: 'ama.mensah@example.com',
+    verifiedContactMethod: 'sms',
+    preferredChannels: ['push', 'sms'],
+    status: 'active'
+  });
+  await PupilGuardian.create({
+    id: 'PG-9502',
+    pupilId: pupilId2,
+    guardianId: guardianDoc2.id,
+    relationship: 'Mother',
+    isLegalGuardian: true,
+    status: 'active'
+  });
+
+  const fallbackEventRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: pupilId2,
+      type: 'arrival',
+      simulateNotificationFailure: 'push' // Push channel fails, SMS fallback triggers
+    });
+  assert.equal(fallbackEventRes.status, 201);
+
+  // Verify two notification records: push (failed) and sms (delivered)
+  const pushNotif = await Notification.findOne({ pupilId: pupilId2, channel: 'PUSH' });
+  const smsNotif = await Notification.findOne({ pupilId: pupilId2, channel: 'SMS' });
+  assert.ok(pushNotif);
+  assert.equal(pushNotif.status, 'failed');
+  assert.ok(smsNotif);
+  assert.equal(smsNotif.status, 'delivered');
+
+  // 6. WhatsApp gating: requires confirmed opt-in, template, provider, cost, and delivery SLA
+  guardianDoc2.preferredChannels = ['whatsapp'];
+  guardianDoc2.whatsAppOptInConfirmed = false;
+  await guardianDoc2.save();
+
+  const waGatedRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: pupilId2,
+      type: 'departure',
+      collectorName: 'Ama Mensah',
+      verification: 'Photo matched'
+    });
+  assert.equal(waGatedRes.status, 201);
+  const waSuppressedNotif = await Notification.findOne({
+    pupilId: pupilId2,
+    channel: 'WHATSAPP',
+    eventId: waGatedRes.body.eventId
+  });
+  assert.ok(waSuppressedNotif);
+  assert.equal(waSuppressedNotif.status, 'suppressed');
+  assert.ok(waSuppressedNotif.failureReason.includes('opt-in not confirmed'));
+
+  // Confirm WhatsApp opt-in
+  guardianDoc2.whatsAppOptInConfirmed = true;
+  guardianDoc2.whatsAppOptInAt = new Date();
+  guardianDoc2.whatsAppOptInMethod = 'portal_form';
+  await guardianDoc2.save();
+
+  // 7. Pausing non-critical notifications: guardians can pause alerts without altering school records
+  const pausePrefRes = await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      notificationsPaused: true
+    });
+  assert.equal(pausePrefRes.status, 200);
+  assert.equal(pausePrefRes.body.notificationsPaused, true);
+
+  // New pupil to test paused non-critical arrival
+  const pupilId3 = 'NF-9503';
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Tariq Al-Mansoor',
+      id: pupilId3,
+      className: 'Year 4C',
+      guardian: 'David Williams'
+    });
+  await PupilGuardian.create({
+    id: 'PG-9503',
+    pupilId: pupilId3,
+    guardianId: guardianId,
+    relationship: 'Father',
+    isLegalGuardian: true,
+    status: 'active'
+  });
+
+  const pausedArrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: pupilId3,
+      type: 'arrival'
+    });
+  assert.equal(pausedArrivalRes.status, 201);
+  const pausedNotif = await Notification.findOne({ pupilId: pupilId3, eventId: pausedArrivalRes.body.eventId });
+  assert.ok(pausedNotif);
+  assert.equal(pausedNotif.status, 'suppressed');
+  assert.ok(pausedNotif.failureReason.includes('paused'));
+
+  // Verify school attendance event was still recorded correctly (school records NOT altered)
+  const schoolEvent = await AttendanceEvent.findOne({ id: pausedArrivalRes.body.eventId });
+  assert.ok(schoolEvent);
+  assert.equal(schoolEvent.pupilId, pupilId3);
+  assert.equal(schoolEvent.type, 'arrival');
+
+  // Unpause
+  await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({ notificationsPaused: false });
+
+  // 8. School-visible alerts when all configured channels fail
+  const pupilId4 = 'NF-9504';
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Chloe Bennett',
+      id: pupilId4,
+      className: 'Year 3A',
+      guardian: 'Sarah Bennett'
+    });
+  const guardianDoc4 = await Guardian.create({
+    id: 'GD-9504',
+    name: 'Sarah Bennett',
+    phone: '+44 7700 900789',
+    email: 'sarah.bennett@example.com',
+    verifiedContactMethod: 'sms',
+    preferredChannels: ['push', 'sms'],
+    status: 'active'
+  });
+  await PupilGuardian.create({
+    id: 'PG-9504',
+    pupilId: pupilId4,
+    guardianId: guardianDoc4.id,
+    relationship: 'Mother',
+    isLegalGuardian: true,
+    status: 'active'
+  });
+
+  // Trigger event where all channels fail
+  const allFailEventRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: pupilId4,
+      type: 'arrival',
+      simulateNotificationFailure: 'all'
+    });
+  assert.equal(allFailEventRes.status, 201);
+
+  // Check that school-visible alert is raised
+  const alertsRes = await request
+    .get('/api/notifications/alerts?status=active')
+    .set('Cookie', adminCookie);
+  assert.equal(alertsRes.status, 200);
+  assert.ok(alertsRes.body.ok);
+  assert.ok(alertsRes.body.activeAlertsCount >= 1);
+  const activeAlert = alertsRes.body.alerts.find(a => a.pupilId === pupilId4);
+  assert.ok(activeAlert);
+  assert.equal(activeAlert.status, 'active');
+  assert.ok(activeAlert.details.includes('failed to deliver'));
+
+  // 9. Retry transient failures with bounded backoff and idempotency deduplication
+  const failedNotifRecord = await Notification.findOne({
+    pupilId: pupilId4,
+    eventId: allFailEventRes.body.eventId,
+    channel: 'SMS'
+  });
+  assert.ok(failedNotifRecord);
+  assert.equal(failedNotifRecord.status, 'failed');
+
+  const retryRes = await request
+    .post('/api/notifications/retry')
+    .set('Cookie', adminCookie)
+    .send({
+      notificationId: failedNotifRecord.id,
+      simulateDelivery: true
+    });
+  assert.equal(retryRes.status, 200);
+  assert.ok(retryRes.body.ok);
+  assert.equal(retryRes.body.retries[0].status, 'delivered');
+  assert.ok(retryRes.body.retries[0].backoffDelayMs > 0);
+
+  const retriedNotif = await Notification.findById(failedNotifRecord._id);
+  assert.equal(retriedNotif.status, 'delivered');
+  assert.equal(retriedNotif.retryCount, 2);
+
+  // Trigger retry again for the same notification - Idempotency avoids duplicate delivery
+  const duplicateRetryRes = await request
+    .post('/api/notifications/retry')
+    .set('Cookie', adminCookie)
+    .send({
+      notificationId: failedNotifRecord.id
+    });
+  assert.equal(duplicateRetryRes.status, 200);
+  assert.equal(duplicateRetryRes.body.processed, 0);
+
+  const checkAlert = await NotificationAlert.findOne({ id: activeAlert.id });
+  assert.equal(checkAlert.status, 'resolved');
+
+  // 10. Manual alert acknowledgement and resolution endpoints
+  const testAlert = await NotificationAlert.create({
+    id: 'ALT-TEST-01',
+    eventId: 'EVT-TEST-01',
+    pupilId: pupilId,
+    pupilName: 'Amara Williams',
+    guardianName: 'David Williams',
+    attemptedChannels: ['PUSH', 'SMS'],
+    status: 'active'
+  });
+
+  const ackRes = await request
+    .post(`/api/notifications/alerts/${testAlert.id}/acknowledge`)
+    .set('Cookie', adminCookie)
+    .send({
+      resolve: false
+    });
+  assert.equal(ackRes.status, 200);
+  assert.equal(ackRes.body.alert.status, 'acknowledged');
+
+  const resolveRes = await request
+    .post(`/api/notifications/alerts/${testAlert.id}/acknowledge`)
+    .set('Cookie', adminCookie)
+    .send({
+      resolve: true,
+      resolutionNote: 'Phone call made to parent manually'
+    });
+  assert.equal(resolveRes.status, 200);
+  assert.equal(resolveRes.body.alert.status, 'resolved');
 });
