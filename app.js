@@ -1688,6 +1688,10 @@
       $$('input[name="prefChannels"]', form).forEach(cb => {
         cb.checked = current.includes(cb.value);
       });
+      const pauseToggle = $('#pauseNotificationsToggle');
+      if (pauseToggle) {
+        pauseToggle.checked = Boolean(data.guardian.notificationsPaused);
+      }
       form.onsubmit = async (e) => {
         e.preventDefault();
         const selected = $$('input[name="prefChannels"]:checked', form).map(cb => cb.value);
@@ -1695,8 +1699,12 @@
           toast('Select at least one notification channel.', '!');
           return;
         }
+        const notificationsPaused = pauseToggle ? pauseToggle.checked : false;
         try {
-          const res = await api('/api/guardian/preferences', { channels: selected });
+          const res = await api('/api/guardian/preferences', {
+            channels: selected,
+            notificationsPaused
+          });
           toast(res.message);
           loadGuardianPortal();
         } catch (err) {
@@ -2016,7 +2024,48 @@
   };
   $('#pickupHelp').onclick=()=>toast('Follow the school’s approved pickup verification policy.');
   $('#contactSupport').onclick=e=>{e.preventDefault();toast('Demo: contact your school administrator for support.','i')};
-  $('#notificationsBtn').onclick=()=>toast('Message delivery is not configured in this local MVP.','!');
+  $('#notificationsBtn').onclick=async()=>{
+    try {
+      const alertData = await api('/api/notifications/alerts');
+      const alerts = alertData.alerts || [];
+      if (!alerts.length) {
+        toast('No active delivery failure alerts. All notifications operational.');
+        return;
+      }
+      openModal(`
+        <h2 id="modalTitle">Notification Delivery Alerts (${alerts.length})</h2>
+        <p class="modal-intro">The following alerts failed across all configured channels. Immediate gate/staff intervention is required.</p>
+        <div style="display:grid;gap:10px;max-height:350px;overflow-y:auto;margin:12px 0">
+          ${alerts.map(a => `
+            <div style="background:#fef2f2;border:1px solid #fecaca;padding:10px;border-radius:6px;font-size:11px">
+              <strong style="color:#b91c1c">${escapeHtml(a.pupilName)}</strong> · Guardian: ${escapeHtml(a.guardianName)}
+              <div style="margin:4px 0;color:#7f1d1d">${escapeHtml(a.reason)}</div>
+              <small style="color:#991b1b">Failed channels: ${escapeHtml(a.failedChannels.join(', '))}</small>
+              <div style="margin-top:6px;text-align:right">
+                <button class="button button-outline button-small resolve-alert-btn" data-alert-id="${escapeHtml(a.id)}">✓ Acknowledge & Resolve</button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div class="modal-actions"><button class="button button-primary" id="alertsDone">Close</button></div>
+      `);
+      $('#alertsDone').onclick = closeModal;
+      $$('.resolve-alert-btn').forEach(btn => {
+        btn.onclick = async () => {
+          try {
+            await api(`/api/notifications/alerts/${btn.dataset.alertId}/resolve`, {});
+            toast('Alert resolved.');
+            closeModal();
+            refreshState();
+          } catch (e) {
+            toast(e.message, '!');
+          }
+        };
+      });
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  };
   $('.more-button').onclick=async()=>{try{await api('/api/logout',{});signedInUser=null;$('#authScreen').classList.remove('hidden');pupils=[];events=[];requests=[];$('#loginPassword').value='';$('#loginError').classList.add('hidden')}catch(err){toast(err.message,'!')}};
   const now=new Date();$('#todayLabel').textContent=now.toLocaleDateString(undefined,{weekday:'short',day:'numeric',month:'short'});$('#dateEyebrow').innerHTML=`${now.toLocaleDateString(undefined,{weekday:'long',day:'numeric',month:'long'}).toUpperCase()} <span class="live-label"><i></i> LIVE</span>`;
   $('#startOnboardingFromLogin')?.addEventListener('click', (e) => {

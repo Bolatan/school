@@ -10,13 +10,15 @@ const {
   Pupil,
   PickupRequest,
   AttendanceEvent,
+  Notification,
+  SchoolNotificationAlert,
   AuditEntry,
   Guardian,
   PupilGuardian,
   CorrectionRequest,
   Card
 } = require('./models');
-const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
+const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD, passwordHash } = require('./authUtils');
 
 let mongod;
 let request;
@@ -1483,4 +1485,417 @@ test('Card scanning: outcomes, photo pre-verification, duplicate tap prevention,
   assert.ok(artworkHtmlRes.text.includes('NORTHFIELD ACADEMY'));
   assert.ok(artworkHtmlRes.text.includes('Kofi Mensah'));
   assert.ok(artworkHtmlRes.text.includes('Property of Northfield Academy'));
+});
+
+test('Notifications: Multi-channel delivery, push/SMS fallback, WhatsApp gating, privacy guards, retries, pause, and failure alerts', async () => {
+  const adminCookie = await login('admin@northfield.school', 'GatewiseDemo!26');
+
+  // Reset provider configs
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({ reset: true });
+
+  // 1. Create pupil with guardian
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Nia Johnson',
+      id: 'NF-7001',
+      className: 'Grade 3B',
+      guardian: 'David Johnson',
+      guardianPhone: '+1 555-0701',
+      guardianEmail: 'david.johnson@example.com',
+      inviteGuardian: true,
+      verifiedContactMethod: 'sms'
+    });
+
+  const pupil = await Pupil.findOne({ id: 'NF-7001' });
+  const guardianLink = await PupilGuardian.findOne({ pupilId: 'NF-7001' });
+  const guardian = await Guardian.findOne({ id: guardianLink.guardianId });
+  assert.ok(guardian);
+
+  // Activate guardian and create user account
+  guardian.channelVerified = true;
+  guardian.privacyNoticeAccepted = true;
+  guardian.consentAccepted = true;
+  guardian.status = 'active';
+  guardian.preferredChannels = ['push', 'sms'];
+  await guardian.save();
+
+  const { salt, hash } = passwordHash('DavidPass!2026');
+  const guardianUser = await User.create({
+    email: 'david.johnson@example.com',
+    name: 'David Johnson',
+    role: 'guardian',
+    salt,
+    passwordHash: hash,
+    active: true,
+    guardianId: guardian.id
+  });
+  guardian.userId = guardianUser._id;
+  await guardian.save();
+
+  const guardianCookie = await login('david.johnson@example.com', 'DavidPass!2026');
+
+  // A. Push plus SMS fallback verification:
+  // When Push succeeds, SMS fallback is not dispatched
+  const arrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({ pupilId: 'NF-7001', type: 'arrival' });
+  assert.equal(arrRes.status, 201);
+  assert.equal(arrRes.body.notification.channel, 'PUSH');
+
+  // Check notification records
+  const notifs1 = await Notification.find({ eventId: arrRes.body.eventId });
+  assert.equal(notifs1.length, 1);
+  assert.equal(notifs1[0].channel, 'PUSH');
+  assert.equal(notifs1[0].status, 'delivered');
+
+  // Privacy guard check: ensure message & preview contain pupil name, event type, local timestamp, and school identity ("Northfield Academy"), without sensitive IDs or full addresses
+  assert.ok(notifs1[0].message.includes('Northfield Academy Alert:'));
+  assert.ok(notifs1[0].message.includes('Nia Johnson'));
+  assert.ok(notifs1[0].message.includes('has arrived safely'));
+  assert.ok(notifs1[0].preview.includes('Northfield Academy:'));
+  assert.ok(notifs1[0].preview.includes('Nia Johnson arrived at'));
+  // Ensure sensitive data is NOT included
+  assert.ok(!notifs1[0].message.includes('david.johnson@example.com'));
+  assert.ok(!notifs1[0].preview.includes('NF-7001'));
+
+  // B. Push provider transient failure -> Automatic SMS fallback
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({
+      channel: 'push',
+      config: { simulateFailure: true, failureType: 'transient', autoDeliver: false }
+    });
+
+  // Add collector for departure
+  pupil.collectors.push({ id: 1, name: 'David Johnson', relation: 'Father', until: 'Ongoing', active: true });
+  await pupil.save();
+
+  const depRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7001',
+      type: 'departure',
+      collectorId: 1,
+      verification: 'Photo matched'
+    });
+  assert.equal(depRes.status, 201);
+
+  // Notifications should have both the failed PUSH and successful fallback SMS
+  const notifs2 = await Notification.find({ eventId: depRes.body.eventId }).sort({ createdAt: 1 });
+  assert.equal(notifs2.length, 2);
+
+  const pushNotif = notifs2.find(n => n.channel === 'PUSH');
+  const smsNotif = notifs2.find(n => n.channel === 'SMS');
+
+  assert.ok(pushNotif);
+  assert.equal(pushNotif.status, 'failed');
+  assert.equal(pushNotif.failureCategory, 'transient');
+  assert.ok(pushNotif.nextRetryAt !== null);
+
+  assert.ok(smsNotif);
+  assert.equal(smsNotif.isFallback, true);
+  assert.equal(smsNotif.fallbackForChannel, 'PUSH');
+  assert.equal(smsNotif.status, 'delivered');
+
+  // C. WhatsApp Gating:
+  // Guardian requests WhatsApp without confirmed opt-in/templates/provider -> WhatsApp is gated / suppressed
+  const prefReqRes = await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      channels: ['whatsapp', 'sms'],
+      whatsappOptIn: {
+        optedIn: false // Not opted in yet
+      }
+    });
+  assert.equal(prefReqRes.status, 200);
+
+  // Create second pupil to test WhatsApp gating
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Leo Johnson',
+      id: 'NF-7002',
+      className: 'Grade 1A',
+      guardian: 'David Johnson'
+    });
+  await PupilGuardian.create({
+    id: 'PG-7002',
+    pupilId: 'NF-7002',
+    guardianId: guardian.id,
+    relationship: 'Father',
+    isLegalGuardian: true,
+    status: 'active',
+    legalStatusApprovedBySchool: true
+  });
+
+  // Re-enable push provider
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({
+      channel: 'push',
+      config: { simulateFailure: false, autoDeliver: true }
+    });
+
+  const arrResLeo = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({ pupilId: 'NF-7002', type: 'arrival' });
+  assert.equal(arrResLeo.status, 201);
+
+  const leoNotifs = await Notification.find({ eventId: arrResLeo.body.eventId });
+  const waSuppressed = leoNotifs.find(n => n.channel === 'WHATSAPP');
+  assert.ok(waSuppressed);
+  assert.equal(waSuppressed.status, 'suppressed');
+  assert.ok(waSuppressed.errorReason.includes('WhatsApp requires verified guardian opt-in'));
+
+  // Now properly confirm WhatsApp opt-in, template, provider, cost, and delivery
+  const optInRes = await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      channels: ['whatsapp', 'sms'],
+      whatsappOptIn: {
+        optedIn: true,
+        templateConfirmed: true,
+        providerConfirmed: true,
+        costAcknowledged: true,
+        deliveryConfirmed: true
+      }
+    });
+  assert.equal(optInRes.status, 200);
+  assert.equal(optInRes.body.whatsappOptIn.optedIn, true);
+
+  // Setup Leo collector
+  const pLeo = await Pupil.findOne({ id: 'NF-7002' });
+  pLeo.collectors.push({ id: 1, name: 'David Johnson', relation: 'Father', until: 'Ongoing', active: true });
+  await pLeo.save();
+
+  const depResLeo = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7002',
+      type: 'departure',
+      collectorId: 1,
+      verification: 'Photo matched'
+    });
+  assert.equal(depResLeo.status, 201);
+
+  const leoDepNotifs = await Notification.find({ eventId: depResLeo.body.eventId });
+  const waSuccess = leoDepNotifs.find(n => n.channel === 'WHATSAPP');
+  assert.ok(waSuccess);
+  assert.equal(waSuccess.status, 'delivered');
+
+  // D. Provider acceptance vs delivered distinction:
+  // Configure SMS provider with autoDeliver: false (accepted by provider, but not yet delivered)
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({
+      channel: 'sms',
+      config: { simulateFailure: false, autoDeliver: false }
+    });
+
+  await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      channels: ['sms']
+    });
+
+  // Create third pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Chloe Johnson',
+      id: 'NF-7003',
+      className: 'Kindergarten',
+      guardian: 'David Johnson'
+    });
+  await PupilGuardian.create({
+    id: 'PG-7003',
+    pupilId: 'NF-7003',
+    guardianId: guardian.id,
+    relationship: 'Father',
+    isLegalGuardian: true,
+    status: 'active',
+    legalStatusApprovedBySchool: true
+  });
+
+  const arrResChloe = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({ pupilId: 'NF-7003', type: 'arrival' });
+  assert.equal(arrResChloe.status, 201);
+
+  const chloeNotif = await Notification.findOne({ eventId: arrResChloe.body.eventId, channel: 'SMS' });
+  assert.ok(chloeNotif);
+  // Must NOT label provider acceptance as delivery
+  assert.equal(chloeNotif.status, 'accepted_by_provider');
+  assert.equal(chloeNotif.deliveryReported, false);
+
+  // E. Guardian pauses non-critical notifications without altering school records:
+  const pauseRes = await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      channels: ['sms'],
+      notificationsPaused: true
+    });
+  assert.equal(pauseRes.status, 200);
+  assert.equal(pauseRes.body.notificationsPaused, true);
+
+  // Verify guardian cannot mutate school pupil records
+  const pupilRecordBefore = await Pupil.findOne({ id: 'NF-7003' });
+  assert.equal(pupilRecordBefore.className, 'Kindergarten');
+
+  // Setup Chloe departure
+  const pChloe = await Pupil.findOne({ id: 'NF-7003' });
+  pChloe.collectors.push({ id: 1, name: 'David Johnson', relation: 'Father', until: 'Ongoing', active: true });
+  await pChloe.save();
+
+  const depResChloe = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-7003',
+      type: 'departure',
+      collectorId: 1,
+      verification: 'Photo matched'
+    });
+  assert.equal(depResChloe.status, 201);
+
+  const pausedNotif = await Notification.findOne({ eventId: depResChloe.body.eventId });
+  assert.ok(pausedNotif);
+  assert.equal(pausedNotif.status, 'suppressed');
+  assert.equal(pausedNotif.failureCategory, 'opt_out');
+  assert.ok(pausedNotif.errorReason.includes('paused'));
+
+  // School pupil record remains unchanged
+  const pupilRecordAfter = await Pupil.findOne({ id: 'NF-7003' });
+  assert.equal(pupilRecordAfter.className, 'Kindergarten');
+
+  // Unpause for subsequent tests
+  await request
+    .put('/api/guardian/preferences')
+    .set('Cookie', guardianCookie)
+    .send({
+      channels: ['push', 'sms'],
+      notificationsPaused: false
+    });
+
+  // F. All configured channels fail -> Trigger and maintain a school-visible alert
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({
+      channel: 'push',
+      config: { simulateFailure: true, failureType: 'transient', autoDeliver: false }
+    });
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({
+      channel: 'sms',
+      config: { simulateFailure: true, failureType: 'transient', autoDeliver: false }
+    });
+
+  // Create fourth pupil
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Tariq Johnson',
+      id: 'NF-7004',
+      className: 'Grade 5B',
+      guardian: 'David Johnson'
+    });
+  await PupilGuardian.create({
+    id: 'PG-7004',
+    pupilId: 'NF-7004',
+    guardianId: guardian.id,
+    relationship: 'Father',
+    isLegalGuardian: true,
+    status: 'active',
+    legalStatusApprovedBySchool: true
+  });
+
+  const arrResTariq = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({ pupilId: 'NF-7004', type: 'arrival' });
+  assert.equal(arrResTariq.status, 201);
+
+  // Check that school-visible alert is created
+  const alertRes = await request
+    .get('/api/notifications/alerts')
+    .set('Cookie', adminCookie);
+  assert.equal(alertRes.status, 200);
+  const activeAlert = alertRes.body.alerts.find(a => a.pupilId === 'NF-7004');
+  assert.ok(activeAlert);
+  assert.equal(activeAlert.status, 'active');
+  assert.ok(activeAlert.reason.includes('All notification channels failed'));
+  assert.ok(activeAlert.failedChannels.includes('PUSH'));
+  assert.ok(activeAlert.failedChannels.includes('SMS'));
+
+  // Also check state.alerts returns the active alert
+  const stateRes = await request
+    .get('/api/state')
+    .set('Cookie', adminCookie);
+  assert.ok(stateRes.body.alerts.some(a => a.id === activeAlert.id));
+
+  // G. Bounded backoff retry:
+  const failedNotif = await Notification.findOne({
+    eventId: arrResTariq.body.eventId,
+    channel: 'SMS',
+    status: 'failed'
+  });
+  assert.ok(failedNotif);
+  assert.equal(failedNotif.attemptCount, 1);
+  assert.ok(failedNotif.nextRetryAt !== null);
+
+  // Fix SMS provider before retry
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({
+      channel: 'sms',
+      config: { simulateFailure: false, autoDeliver: true }
+    });
+
+  const retryRes = await request
+    .post(`/api/notifications/${failedNotif.id}/retry`)
+    .set('Cookie', adminCookie);
+  assert.equal(retryRes.status, 200);
+  assert.equal(retryRes.body.notification.status, 'delivered');
+  assert.equal(retryRes.body.notification.attemptCount, 2);
+
+  // Ensure school alert is resolved after successful retry
+  const resolvedAlert = await SchoolNotificationAlert.findOne({ id: activeAlert.id });
+  assert.equal(resolvedAlert.status, 'resolved');
+
+  // Ensure retry is bounded and duplicate messages avoided when already delivered
+  const secondRetryRes = await request
+    .post(`/api/notifications/${failedNotif.id}/retry`)
+    .set('Cookie', adminCookie);
+  assert.equal(secondRetryRes.status, 200);
+  assert.ok(secondRetryRes.body.message.includes('already accepted or delivered'));
+
+  // Reset provider configs
+  await request
+    .post('/api/test/notification-provider-config')
+    .set('Cookie', adminCookie)
+    .send({ reset: true });
 });
