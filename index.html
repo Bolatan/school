@@ -37,6 +37,7 @@
         <button class="button button-small button-outline admin-tab-btn" data-admin-tab="escalation">Escalation Contacts</button>
         <button class="button button-small button-outline admin-tab-btn" data-admin-tab="retention">Retention Settings</button>
         <button class="button button-small button-outline admin-tab-btn" data-admin-tab="audit">Sensitive Audit Trail</button>
+        <button class="button button-small button-outline admin-tab-btn" data-admin-tab="safeguarding">Security & Incident Process</button>
         <button class="button button-small button-outline admin-tab-btn" data-admin-tab="nfr">System & NFR Governance</button>
       </div>
 
@@ -123,6 +124,56 @@
           </div>
         </div>
         <div class="table-wrap"><table class="directory-table"><thead><tr><th>TIMESTAMP</th><th>ACTOR</th><th>ACTION</th><th>TARGET OBJECT</th><th>REASON / DETAILS</th></tr></thead><tbody id="adminAuditRows"></tbody></table></div>
+      </div>
+
+      <!-- Admin Tab Content: Security & Incident Process -->
+      <div class="admin-tab-content hidden" id="adminTab-safeguarding">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+          <div>
+            <h2 style="margin:0;font-size:15px">Safeguarding & Security Incident Management</h2>
+            <p style="margin:2px 0 0;font-size:11px;color:#64748b">Incident protocols for lost devices, compromised accounts, incorrect alerts, and suspected unauthorized pickups.</p>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="button button-outline button-small" id="refreshSafeguardingBtn">↺ Refresh</button>
+            <button class="button button-primary button-small" id="reportIncidentBtn">⚠ Report Incident</button>
+          </div>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
+          <div class="panel" style="padding:14px;border:1px solid #fee2e2;background:#fff5f5;border-radius:8px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <strong style="color:#991b1b;font-size:13px">Active Security Alerts</strong>
+              <span id="securityAlertsBadge" style="background:#ef4444;color:#fff;border-radius:10px;padding:2px 8px;font-size:11px;font-weight:bold">0 Active</span>
+            </div>
+            <div id="securityAlertsList" style="display:flex;flex-direction:column;gap:8px;max-height:220px;overflow-y:auto"></div>
+          </div>
+
+          <div class="panel" style="padding:14px;border:1px solid #e2e8f0;background:#f8fafc;border-radius:8px">
+            <strong style="font-size:13px;color:#1e293b">Safeguarding Protocols & Escalation</strong>
+            <ul style="font-size:11px;color:#475569;margin:8px 0 0;padding-left:18px;line-height:1.6">
+              <li><b>Lost Device:</b> Immediately marks terminal status to 'lost' and blocks future sign-ins.</li>
+              <li><b>Compromised Account:</b> Invalidates all active sessions and deactivates staff account.</li>
+              <li><b>Suspected Unauthorized Pickup:</b> Escalates immediately to safeguarding officers & locks release.</li>
+              <li><b>Incorrect Alert:</b> Initiates guardian contact correction and non-destructive linked audit entry.</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table class="directory-table">
+            <thead>
+              <tr>
+                <th>INCIDENT ID</th>
+                <th>TYPE & SEVERITY</th>
+                <th>TITLE & DETAILS</th>
+                <th>REPORTED BY</th>
+                <th>STATUS</th>
+                <th>ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="securityIncidentRows"></tbody>
+          </table>
+        </div>
       </div>
 
       <!-- Admin Tab Content: System & NFR Governance -->

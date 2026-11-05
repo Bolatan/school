@@ -1118,8 +1118,182 @@
     loadAdminEscalation();
     loadAdminRetention();
     loadAdminAudit();
+    loadSafeguardingAndIncidents();
     loadSystemNfrGovernance();
   }
+
+  // Load Safeguarding Incidents and Security Alerts
+  async function loadSafeguardingAndIncidents() {
+    try {
+      const [alertsRes, incidentsRes] = await Promise.all([
+        api('/api/safeguarding/alerts').catch(() => ({ alerts: [] })),
+        api('/api/safeguarding/incidents').catch(() => ({ incidents: [] }))
+      ]);
+
+      const alerts = alertsRes.alerts || [];
+      const incidents = incidentsRes.incidents || [];
+
+      // Render alerts
+      const activeAlerts = alerts.filter(a => !a.acknowledged);
+      const alertsBadge = $('#securityAlertsBadge');
+      if (alertsBadge) {
+        alertsBadge.textContent = `${activeAlerts.length} Active`;
+        alertsBadge.style.background = activeAlerts.length ? '#ef4444' : '#16a34a';
+      }
+
+      const alertsList = $('#securityAlertsList');
+      if (alertsList) {
+        if (!alerts.length) {
+          alertsList.innerHTML = '<span style="font-size:11px;color:#64748b">No security alerts recorded.</span>';
+        } else {
+          alertsList.innerHTML = alerts.slice(0, 5).map(a => `
+            <div style="background:#fff;border:1px solid ${a.acknowledged ? '#e2e8f0' : '#fca5a5'};border-radius:6px;padding:8px;font-size:11px">
+              <div style="display:flex;justify-content:space-between;align-items:center">
+                <b style="color:${a.severity === 'critical' ? '#991b1b' : a.severity === 'high' ? '#b91c1c' : '#b45309'}">⚠ ${escapeHtml(a.title)}</b>
+                ${a.acknowledged ? '<span style="color:#16a34a">✓ Acknowledged</span>' : `<button class="button button-small button-outline ack-alert-btn" data-alert-id="${a.id}" style="font-size:10px;padding:1px 6px">Ack</button>`}
+              </div>
+              <p style="margin:4px 0 0;color:#475569">${escapeHtml(a.details)}</p>
+              <small style="color:#94a3b8">${new Date(a.createdAt).toLocaleTimeString()} · Target: ${escapeHtml(a.identifier || 'system')}</small>
+            </div>
+          `).join('');
+
+          $$('.ack-alert-btn').forEach(b => {
+            b.onclick = async () => {
+              try {
+                await api(`/api/safeguarding/alerts/${b.dataset.alertId}/acknowledge`, {});
+                toast('Alert acknowledged.');
+                loadSafeguardingAndIncidents();
+              } catch (e) {
+                toast(e.message, '!');
+              }
+            };
+          });
+        }
+      }
+
+      // Render incidents table
+      const tbody = $('#securityIncidentRows');
+      if (tbody) {
+        if (!incidents.length) {
+          tbody.innerHTML = '<tr><td colspan="6">No safeguarding incidents reported.</td></tr>';
+        } else {
+          tbody.innerHTML = incidents.map(inc => `
+            <tr>
+              <td><span class="pupil-id">${escapeHtml(inc.id)}</span></td>
+              <td>${badge(inc.incidentType.replace('_', ' '), inc.severity === 'critical' || inc.severity === 'high' ? 'status-departed' : 'status-pending')}<br><small style="color:#64748b">Sev: ${escapeHtml(inc.severity)}</small></td>
+              <td><b>${escapeHtml(inc.title)}</b><br><small style="color:#475569">${escapeHtml(inc.description)}</small>${inc.targetId ? `<br><small style="color:#2563eb">Target: ${escapeHtml(inc.targetType || 'item')}: ${escapeHtml(inc.targetId)}</small>` : ''}</td>
+              <td>${escapeHtml(inc.reportedBy)}<br><small style="color:#94a3b8">${new Date(inc.createdAt).toLocaleString()}</small></td>
+              <td>${badge(inc.status, inc.status === 'resolved' ? 'status-approved' : 'status-pending')}</td>
+              <td>
+                ${inc.status !== 'resolved' ? `<button class="button button-small button-outline resolve-incident-btn" data-inc-id="${inc.id}">Resolve</button>` : `<small style="color:#16a34a">Resolved: ${escapeHtml(inc.resolutionNotes || 'Done')}</small>`}
+              </td>
+            </tr>
+          `).join('');
+
+          $$('.resolve-incident-btn').forEach(b => {
+            b.onclick = () => openResolveIncidentModal(b.dataset.incId);
+          });
+        }
+      }
+    } catch {}
+  }
+
+  function openResolveIncidentModal(incidentId) {
+    openModal(`
+      <h2 id="modalTitle">Resolve Safeguarding Incident</h2>
+      <p class="modal-intro">Preserve resolution details for incident audit compliance.</p>
+      <form id="resolveIncidentForm" class="form-grid">
+        <div class="form-field full">
+          <label>Resolution Notes & Remediation Summary *</label>
+          <textarea id="resolveNotes" rows="3" required placeholder="Explain findings, collector/device verification, and corrective actions taken..." style="width:100%;padding:8px;border:1px solid #cbd5e1;border-radius:6px"></textarea>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelResolve">Cancel</button>
+          <button type="submit" class="button button-primary">Confirm Resolution</button>
+        </div>
+      </form>
+    `);
+    $('#cancelResolve').onclick = closeModal;
+    $('#resolveIncidentForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const notes = $('#resolveNotes').value.trim();
+      try {
+        await api(`/api/safeguarding/incidents/${incidentId}/resolve`, { resolutionNotes: notes });
+        toast('Incident resolved and audit log preserved.');
+        closeModal();
+        loadSafeguardingAndIncidents();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  function openReportIncidentModal() {
+    openModal(`
+      <h2 id="modalTitle">Report Safeguarding Incident</h2>
+      <p class="modal-intro">Document security incidents with immediate escalation and automated safeguarding actions.</p>
+      <form id="reportIncidentForm" class="form-grid">
+        <div class="form-field">
+          <label>Incident Type *</label>
+          <select id="incType" required class="gate-dropdown" style="width:100%">
+            <option value="lost_device">Lost Device (immediate device block)</option>
+            <option value="compromised_account">Compromised Staff Account (session revoke)</option>
+            <option value="unauthorized_pickup">Suspected Unauthorized Pickup</option>
+            <option value="incorrect_alert">Incorrect Alert Notification</option>
+            <option value="suspicious_scan_pattern">Suspicious Scan Pattern</option>
+            <option value="other">Other Safeguarding Concern</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Severity *</label>
+          <select id="incSeverity" class="gate-dropdown" style="width:100%">
+            <option value="critical">Critical</option>
+            <option value="high" selected>High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+        </div>
+        <div class="form-field full">
+          <label>Incident Title *</label>
+          <input type="text" id="incTitle" required placeholder="e.g. Handheld terminal lost at North Gate...">
+        </div>
+        <div class="form-field full">
+          <label>Target Identifier (Device Name / User Email / Pupil ID)</label>
+          <input type="text" id="incTargetId" placeholder="e.g. DEV-001 or staff@northfield.school">
+        </div>
+        <div class="form-field full">
+          <label>Detailed Safeguarding Description *</label>
+          <textarea id="incDesc" rows="3" required placeholder="Describe what occurred, who was involved, and current status..."></textarea>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelReport">Cancel</button>
+          <button type="submit" class="button button-primary">Submit & Escalate</button>
+        </div>
+      </form>
+    `);
+    $('#cancelReport').onclick = closeModal;
+    $('#reportIncidentForm').onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        const payload = {
+          incidentType: $('#incType').value,
+          severity: $('#incSeverity').value,
+          title: $('#incTitle').value.trim(),
+          targetId: $('#incTargetId').value.trim(),
+          description: $('#incDesc').value.trim()
+        };
+        await api('/api/safeguarding/incidents', payload);
+        toast('Safeguarding incident reported and escalated.');
+        closeModal();
+        loadSafeguardingAndIncidents();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  $('#reportIncidentBtn')?.addEventListener('click', openReportIncidentModal);
+  $('#refreshSafeguardingBtn')?.addEventListener('click', loadSafeguardingAndIncidents);
 
   // Load System & NFR Governance Status
   async function loadSystemNfrGovernance() {

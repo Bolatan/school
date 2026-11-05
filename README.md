@@ -163,6 +163,19 @@ Targets should be confirmed against pilot conditions and provider capabilities b
 - **AttendanceEvent:** pupil, type, timestamps, actor, device, campus, source, collector, verification method, correction link, reason
 - **Notification:** event, guardian, channel, provider reference, status, timestamps, failure category
 - **AuditEntry:** actor, action, object, timestamp, reason, before/after references as appropriate
+- **SecurityIncident:** id, incident type, severity, title, description, reporter, target, campus, status, actions taken, escalation contacts, resolution notes
+- **SecurityAlert:** id, alert type, severity, title, details, identifier, count, acknowledgment metadata
+
+## 7. Security and safeguarding controls
+
+- **QR lookup key vs Credential:** The QR code is a random lookup key, not an authentication credential; scan is only one signal in the verification chain.
+- **On-screen photo & collector verification:** Staff visually confirms the person at the gate against the pupil photo. For departure, staff verifies the collector against the approved list and school policy.
+- **Revocable tokens & scan rate-limiting:** QR identifiers can be revoked without mutating historical attendance records; unknown and repeated scans are rate-limited with proactive alerts on unusual patterns.
+- **Staff device security:** Staff devices use device PIN/biometric lock, encrypted storage, configurable session timeouts, and remote account/device revocation terminating active sessions promptly.
+- **Server-enforced role authorization:** Role-based authorization is enforced strictly on the server across admin, manager, viewer, and guardian roles, not merely in the app interface.
+- **Privileged changes & failed access auditing:** Privileged administrative actions, data exports, failed sign-in attempts, and blocked unauthorized operations are comprehensively audited and alerted.
+- **PII and token protection:** Pupil names and card tokens are strictly protected and never exposed in public URLs, analytics, error stacks, or support logs.
+- **Safeguarding incident process:** Standard operating incident procedures are established for lost devices, compromised accounts, incorrect alerts, and suspected unauthorized pickups with direct escalation to designated safeguarding contacts.
 
 ## MVP scope and exclusions
 
