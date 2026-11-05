@@ -242,12 +242,55 @@ const Campus = mongoose.model('Campus', campusSchema);
 const SchoolClass = mongoose.model('SchoolClass', schoolClassSchema);
 const Device = mongoose.model('Device', deviceSchema);
 const NotificationTemplate = mongoose.model('NotificationTemplate', notificationTemplateSchema);
+const securityIncidentSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  incidentType: {
+    type: String,
+    required: true,
+    enum: ['lost_device', 'compromised_account', 'incorrect_alert', 'unauthorized_pickup', 'suspicious_scan_pattern', 'other']
+  },
+  severity: { type: String, enum: ['critical', 'high', 'medium', 'low'], default: 'high' },
+  title: { type: String, required: true },
+  description: { type: String, required: true },
+  reportedBy: { type: String, required: true }, // staff email / name
+  reporterUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  targetType: { type: String, default: '' }, // 'device', 'user', 'pupil', 'alert', 'scanner'
+  targetId: { type: String, default: '' },
+  campus: { type: String, default: 'All campuses' },
+  status: { type: String, enum: ['open', 'investigating', 'contained', 'resolved'], default: 'open' },
+  actionTaken: { type: String, default: '' },
+  escalatedTo: [{ type: String }], // Names or roles of escalation contacts notified
+  resolvedAt: { type: Date, default: null },
+  resolvedBy: { type: String, default: null },
+  resolutionNotes: { type: String, default: '' }
+}, { timestamps: true });
+
+const securityAlertSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  alertType: {
+    type: String,
+    required: true,
+    enum: ['unusual_scan_pattern', 'repeated_unknown_scans', 'scan_rate_limited', 'repeated_failed_logins', 'failed_mfa', 'unauthorized_access_attempt', 'lost_device_activity']
+  },
+  severity: { type: String, enum: ['critical', 'high', 'medium', 'low'], default: 'medium' },
+  title: { type: String, required: true },
+  details: { type: String, required: true },
+  ip: { type: String, default: '' },
+  identifier: { type: String, default: '' }, // token hash / device / email
+  count: { type: Number, default: 1 },
+  acknowledged: { type: Boolean, default: false },
+  acknowledgedAt: { type: Date, default: null },
+  acknowledgedBy: { type: String, default: null }
+}, { timestamps: true });
+
 const EscalationContact = mongoose.model('EscalationContact', escalationContactSchema);
 const Card = mongoose.model('Card', cardSchema);
 const Guardian = mongoose.model('Guardian', guardianSchema);
 const PupilGuardian = mongoose.model('PupilGuardian', pupilGuardianSchema);
 const CorrectionRequest = mongoose.model('CorrectionRequest', correctionRequestSchema);
 const SchoolSetting = mongoose.model('SchoolSetting', schoolSettingSchema);
+const SecurityIncident = mongoose.model('SecurityIncident', securityIncidentSchema);
+const SecurityAlert = mongoose.model('SecurityAlert', securityAlertSchema);
 
 module.exports = {
   User,
@@ -266,5 +309,7 @@ module.exports = {
   SchoolClass,
   Device,
   NotificationTemplate,
-  EscalationContact
+  EscalationContact,
+  SecurityIncident,
+  SecurityAlert
 };

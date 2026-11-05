@@ -22,7 +22,7 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "mongodb-memory-server": "^9.3.0",
-    "supertest": "^7.0.0"
+    "mongodb-memory-server": "^9.5.0",
+    "supertest": "^7.3.1"
   }
 }

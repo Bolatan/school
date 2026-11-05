@@ -14,7 +14,10 @@ const {
   Guardian,
   PupilGuardian,
   CorrectionRequest,
-  Card
+  Card,
+  Device,
+  SecurityIncident,
+  SecurityAlert
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
@@ -1968,4 +1971,197 @@ test('Non-Functional Requirements: Availability, Performance, Security, Privacy,
   assert.ok(lastRecordedEvent.utcTimestamp.endsWith('Z'));
   assert.ok(lastRecordedEvent.time);
   assert.ok(lastRecordedEvent.date);
+});
+
+test('Security and Safeguarding: Rate-limiting, unusual pattern alerting, privileged audit, PII protection, and incident process', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Unknown & Repeated Scans: Pattern Alerting & Audit Logging
+  for (let i = 0; i < 5; i++) {
+    const unknownRes = await request
+      .post('/api/cards/scan')
+      .set('Cookie', adminCookie)
+      .send({ code: `UNKNOWN_CODE_${i}_${Date.now()}` });
+    assert.equal(unknownRes.body.outcome, 'unknown_code');
+  }
+
+  // Verify SecurityAlert was created for repeated unknown scans
+  const scanAlert = await SecurityAlert.findOne({ alertType: 'repeated_unknown_scans' }).sort({ createdAt: -1 });
+  assert.ok(scanAlert, 'Security alert should be generated for repeated unknown card scans');
+  assert.ok(scanAlert.title.includes('Unusual scan pattern'));
+
+  // 2. Repeated Failed Login Attempts: Audit Logging & Security Alert
+  const badLoginTarget = `attacker_${Date.now()}@example.com`;
+  for (let i = 0; i < 5; i++) {
+    const badLoginRes = await request
+      .post('/api/login')
+      .send({ email: badLoginTarget, password: 'WrongPassword!123' });
+    assert.equal(badLoginRes.status, 401);
+  }
+
+  // Verify failed logins logged in AuditEntry and SecurityAlert created
+  const failedAudit = await AuditEntry.findOne({ action: 'failed_login_attempt', objectId: badLoginTarget });
+  assert.ok(failedAudit, 'Failed login should be logged in AuditEntry');
+
+  const failedLoginAlert = await SecurityAlert.findOne({ alertType: 'repeated_failed_logins', identifier: badLoginTarget });
+  assert.ok(failedLoginAlert, 'Security alert should be created for repeated failed logins');
+  assert.equal(failedLoginAlert.count, 5);
+
+  // 3. Server-side RBAC Enforcement & Security Alerting
+  const viewerUser = await User.findOne({ role: 'viewer', active: true });
+  let effectiveViewerCookie;
+  if (viewerUser) {
+    const { hash, salt } = require('./authUtils').passwordHash('GatewiseStrong!99');
+    viewerUser.passwordHash = hash;
+    viewerUser.salt = salt;
+    await viewerUser.save();
+    effectiveViewerCookie = await login(viewerUser.email, 'GatewiseStrong!99');
+  } else {
+    await request
+      .post('/api/users')
+      .set('Cookie', adminCookie)
+      .send({
+        email: 'viewer.guard@northfield.school',
+        name: 'Viewer Guard',
+        role: 'viewer',
+        password: 'GatewiseStrong!99',
+        assignedCampus: 'Primary campus'
+      });
+    effectiveViewerCookie = await login('viewer.guard@northfield.school', 'GatewiseStrong!99');
+  }
+
+  // Viewer attempts privileged admin action (POST /api/users)
+  const blockedAttempt = await request
+    .post('/api/users')
+    .set('Cookie', effectiveViewerCookie)
+    .send({ email: 'hacker@northfield.school', name: 'Hacker', role: 'admin', password: 'GatewiseStrong!99' });
+  assert.equal(blockedAttempt.status, 403);
+
+  // Verify AuditEntry & SecurityAlert for unauthorized action
+  const unauthAudit = await AuditEntry.findOne({ action: 'unauthorized_role_access_blocked' }).sort({ createdAt: -1 });
+  assert.ok(unauthAudit);
+  assert.ok(unauthAudit.reason.includes('viewer'));
+
+  const unauthAlert = await SecurityAlert.findOne({ alertType: 'unauthorized_access_attempt' }).sort({ createdAt: -1 });
+  assert.ok(unauthAlert);
+  assert.equal(unauthAlert.severity, 'high');
+
+  // 4. Incident Management: Reporting, Automated Safeguarding & Resolution
+  // Case A: Lost Device Incident -> automatically revokes and marks device lost
+  const devId = `DEV-LOST-${Date.now()}`;
+  await Device.create({
+    id: devId,
+    name: devId,
+    type: 'handheld',
+    assignedCampus: 'Primary campus',
+    status: 'active'
+  });
+
+  const lostIncRes = await request
+    .post('/api/safeguarding/incidents')
+    .set('Cookie', adminCookie)
+    .send({
+      incidentType: 'lost_device',
+      severity: 'critical',
+      title: 'Handheld scanner lost near bus drop-off',
+      description: 'Device was misplaced during dismissal rush.',
+      targetType: 'device',
+      targetId: devId
+    });
+  assert.equal(lostIncRes.status, 201);
+  assert.equal(lostIncRes.body.incident.status, 'open');
+  assert.ok(lostIncRes.body.incident.escalatedTo.length > 0);
+
+  // Check device was immediately marked as lost
+  const updatedDev = await Device.findOne({ id: devId });
+  assert.equal(updatedDev.status, 'lost');
+
+  // Case B: Compromised Account Incident -> automatically terminates sessions & revokes account
+  const compUserEmail = `staff.comp.${Date.now()}@northfield.school`;
+  await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      email: compUserEmail,
+      name: 'Compromised Staff',
+      role: 'manager',
+      password: 'GatewiseStrong!99',
+      assignedCampus: 'Primary campus'
+    });
+
+  const compCookie = await login(compUserEmail, 'GatewiseStrong!99');
+  assert.ok(compCookie);
+
+  const compIncRes = await request
+    .post('/api/safeguarding/incidents')
+    .set('Cookie', adminCookie)
+    .send({
+      incidentType: 'compromised_account',
+      severity: 'critical',
+      title: 'Phishing credential compromise suspected',
+      description: 'Staff member reported unusual login notification.',
+      targetType: 'user',
+      targetId: compUserEmail
+    });
+  assert.equal(compIncRes.status, 201);
+
+  // Verify target user is disabled and session is terminated
+  const compUser = await User.findOne({ email: compUserEmail });
+  assert.equal(compUser.active, false);
+
+  // Attempting state with old session cookie must now fail (401)
+  const sessionCheck = await request
+    .get('/api/state')
+    .set('Cookie', compCookie);
+  assert.equal(sessionCheck.status, 401);
+
+  // Case C: Suspected Unauthorized Pickup Incident & Incident Resolution
+  const pickupIncRes = await request
+    .post('/api/safeguarding/incidents')
+    .set('Cookie', adminCookie)
+    .send({
+      incidentType: 'unauthorized_pickup',
+      severity: 'critical',
+      title: 'Unrecognized individual attempted child handover',
+      description: 'Individual matched no approved collector profile; gate staff halted release.',
+      targetType: 'pupil',
+      targetId: 'NF-1042'
+    });
+  assert.equal(pickupIncRes.status, 201);
+  const incId = pickupIncRes.body.incident.id;
+
+  // Resolve incident with preserved resolution notes
+  const resolveRes = await request
+    .post(`/api/safeguarding/incidents/${incId}/resolve`)
+    .set('Cookie', adminCookie)
+    .send({
+      resolutionNotes: 'Verified with legal guardian by phone. Unapproved party turned away safely.'
+    });
+  assert.equal(resolveRes.status, 200);
+  assert.equal(resolveRes.body.incident.status, 'resolved');
+  assert.equal(resolveRes.body.incident.resolutionNotes, 'Verified with legal guardian by phone. Unapproved party turned away safely.');
+
+  // Verify AuditEntry preserved resolution details
+  const resolveAudit = await AuditEntry.findOne({ action: 'resolve_security_incident', objectId: incId });
+  assert.ok(resolveAudit);
+  assert.ok(resolveAudit.reason.includes('Verified with legal guardian'));
+
+  // 5. Alert acknowledgment
+  const ackRes = await request
+    .post(`/api/safeguarding/alerts/${scanAlert.id}/acknowledge`)
+    .set('Cookie', adminCookie)
+    .send({});
+  assert.equal(ackRes.status, 200);
+  assert.equal(ackRes.body.alert.acknowledged, true);
+
+  // 6. Masked tokens in audit logs (preventing raw card token leakage)
+  const reissueRes = await request
+    .post('/api/cards/NF-1042/reissue')
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Security replacement test' });
+  assert.equal(reissueRes.status, 201);
+
+  const reissueAudit = await AuditEntry.findOne({ action: 'reissue_pupil_card', objectId: reissueRes.body.card.id });
+  assert.ok(reissueAudit);
+  assert.ok(reissueAudit.reason.includes('...'), 'Raw token in audit logs should be masked with truncation');
 });

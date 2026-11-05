@@ -24,7 +24,9 @@ const {
   SchoolClass,
   Device,
   NotificationTemplate,
-  EscalationContact
+  EscalationContact,
+  SecurityIncident,
+  SecurityAlert
 } = require('./models');
 const {
   DEMO_EMAIL,
@@ -53,6 +55,14 @@ const IMPORT_STAGES = new Map();
 const IMPORT_COLUMNS = ["pupil_id", "pupil_name", "class_name", "guardian_name"];
 const MAX_IMPORT_BYTES = 8 * 1024 * 1024;
 const MAX_IMPORT_ROWS = 5000;
+
+// Rate limiting and security monitoring state
+const SCAN_ATTEMPTS = new Map(); // key: ip/device/user -> [{ timestamp, tokenHash, outcome }]
+const FAILED_LOGIN_ATTEMPTS = new Map(); // key: email/ip -> [{ timestamp }]
+const SCAN_RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
+const SCAN_RATE_LIMIT_MAX = 30; // Max 30 scans per minute per client
+const UNKNOWN_SCAN_ALERT_THRESHOLD = 5; // Alert if 5 unknown or rapid scans within window
+const FAILED_LOGIN_ALERT_THRESHOLD = 5; // Alert if 5 failed logins within window
 
 app.use(cors({ origin: true, credentials: true }));
 // In serverless runtimes (e.g. Vercel), req.body may already be parsed
@@ -95,6 +105,27 @@ function requireAuth(roles = ['admin', 'manager', 'viewer']) {
         return res.status(401).json({ error: 'Sign in to continue.' });
       }
       if (!roles.includes(user.role)) {
+        // Record and alert on unauthorized server-level role access attempt
+        await AuditEntry.create({
+          userId: user._id,
+          action: 'unauthorized_role_access_blocked',
+          objectType: 'api_route',
+          objectId: req.path,
+          reason: `User ${user.email} (${user.role}) attempted restricted endpoint ${req.method} ${req.path}; required roles: [${roles.join(', ')}]`,
+          createdAt: new Date()
+        });
+
+        // Trigger SecurityAlert for suspicious privileged access attempt
+        await SecurityAlert.create({
+          id: `alert-unauth-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          alertType: 'unauthorized_access_attempt',
+          severity: 'high',
+          title: 'Unauthorized privileged action attempted',
+          details: `User ${user.email} with role '${user.role}' attempted unauthorized access to ${req.method} ${req.path}`,
+          identifier: user.email,
+          ip: req.ip || req.connection.remoteAddress || 'unknown'
+        });
+
         return res.status(403).json({ error: 'You do not have permission to do that.' });
       }
       req.user = user;
@@ -323,10 +354,45 @@ app.post('/api/login', async (req, res) => {
     const devicePin = req.body.devicePin ? String(req.body.devicePin).trim() : null;
     const deviceName = req.body.device ? String(req.body.device).trim() : null;
 
+    const now = Date.now();
+    const loginKey = email || (req.ip || req.connection.remoteAddress || 'unknown');
+    let attempts = FAILED_LOGIN_ATTEMPTS.get(loginKey) || [];
+    attempts = attempts.filter(t => (now - t) < 15 * 60 * 1000); // 15-minute sliding window
+
     const user = await User.findOne({ email, active: true });
     if (!user || !verifyPassword(password, user.salt, user.passwordHash)) {
+      attempts.push(now);
+      FAILED_LOGIN_ATTEMPTS.set(loginKey, attempts);
+
+      // Record failed access attempt in audit trail (excluding passwords / sensitive payload)
+      await AuditEntry.create({
+        userId: user ? user._id : null,
+        action: 'failed_login_attempt',
+        objectType: 'auth',
+        objectId: email ? email.slice(0, 50) : 'unknown',
+        reason: `Failed sign-in attempt for email ${email || 'anonymous'}; countInWindow=${attempts.length}`,
+        createdAt: new Date()
+      });
+
+      // Alert if repeated failed access attempts threshold exceeded
+      if (attempts.length >= FAILED_LOGIN_ALERT_THRESHOLD) {
+        await SecurityAlert.create({
+          id: `alert-login-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          alertType: 'repeated_failed_logins',
+          severity: 'high',
+          title: 'Repeated failed access attempts detected',
+          details: `Target email/account ${email || 'unknown'} has experienced ${attempts.length} failed sign-in attempts in 15 minutes.`,
+          identifier: email,
+          count: attempts.length,
+          ip: req.ip || req.connection.remoteAddress || 'unknown'
+        });
+      }
+
       return res.status(401).json({ error: 'Email or password is incorrect.' });
     }
+
+    // Reset failed login attempts on successful credentials
+    FAILED_LOGIN_ATTEMPTS.delete(loginKey);
 
     // Check lost/revoked device prompt check if device is specified
     if (deviceName) {
@@ -1309,6 +1375,163 @@ app.post('/api/admin/export/:type', requireAuth(['admin']), async (req, res) => 
   }
 });
 
+// 10. SAFEGUARDING & SECURITY INCIDENT MANAGEMENT
+// Incidents: lost devices, compromised accounts, incorrect alerts, suspected unauthorized pickups, unusual scan patterns
+app.get('/api/safeguarding/incidents', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const statusFilter = req.query.status ? String(req.query.status) : null;
+    const typeFilter = req.query.type ? String(req.query.type) : null;
+    const query = {};
+    if (statusFilter && statusFilter !== 'all') query.status = statusFilter;
+    if (typeFilter && typeFilter !== 'all') query.incidentType = typeFilter;
+
+    const incidents = await SecurityIncident.find(query).sort({ createdAt: -1 });
+    res.json({ ok: true, incidents });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/safeguarding/incidents', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const { incidentType, severity, title, description, targetType, targetId, campus, actionTaken } = req.body;
+    if (!incidentType || !title || !description) {
+      return res.status(400).json({ error: 'Incident type, title, and description are required.' });
+    }
+
+    const validTypes = ['lost_device', 'compromised_account', 'incorrect_alert', 'unauthorized_pickup', 'suspicious_scan_pattern', 'other'];
+    if (!validTypes.includes(incidentType)) {
+      return res.status(400).json({ error: `Invalid incident type. Must be one of: ${validTypes.join(', ')}` });
+    }
+
+    // Auto-escalate to high-priority escalation contacts
+    const activeContacts = await EscalationContact.find({ active: true }).sort({ priority: 1 });
+    const escalatedTo = activeContacts.map(c => `${c.name} (${c.role} - ${c.phone})`);
+
+    const id = `INC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const incident = await SecurityIncident.create({
+      id,
+      incidentType,
+      severity: severity || 'high',
+      title: String(title).trim(),
+      description: String(description).trim(),
+      reportedBy: req.user.email || req.user.name,
+      reporterUserId: req.user._id,
+      targetType: targetType || '',
+      targetId: targetId || '',
+      campus: campus || 'All campuses',
+      status: 'open',
+      actionTaken: actionTaken || '',
+      escalatedTo
+    });
+
+    // If incident is a lost device, immediately revoke device if found
+    if (incidentType === 'lost_device' && targetId) {
+      const dev = await Device.findOne({ $or: [{ id: targetId }, { name: targetId }] });
+      if (dev && dev.status !== 'lost' && dev.status !== 'revoked') {
+        dev.status = 'lost';
+        dev.revokedAt = new Date();
+        dev.revokedReason = `Marked lost via Safeguarding Incident ${incident.id}: ${title}`;
+        await dev.save();
+      }
+    }
+
+    // If incident is compromised account, immediately revoke user account & terminate active sessions
+    if (incidentType === 'compromised_account' && targetId) {
+      const targetUser = await User.findOne({ $or: [{ email: targetId.toLowerCase() }, { _id: mongoose.isValidObjectId(targetId) ? targetId : null }] });
+      if (targetUser && targetUser.active) {
+        targetUser.active = false;
+        targetUser.revokedAt = new Date();
+        targetUser.revokedReason = `Revoked via Safeguarding Incident ${incident.id}: ${title}`;
+        await targetUser.save();
+        await Session.deleteMany({ userId: targetUser._id });
+      }
+    }
+
+    // Mandatory privileged action audit log
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'report_security_incident',
+      objectType: 'security_incident',
+      objectId: incident.id,
+      reason: `Reported ${incident.severity} incident [${incidentType}]: ${incident.title}; escalated=${escalatedTo.length} contacts`,
+      createdAt: new Date()
+    });
+
+    res.status(201).json({ ok: true, incident });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/safeguarding/incidents/:id/resolve', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { resolutionNotes } = req.body;
+    if (!resolutionNotes) {
+      return res.status(400).json({ error: 'Resolution notes are required to resolve a safeguarding incident.' });
+    }
+
+    const incident = await SecurityIncident.findOne({ id: req.params.id });
+    if (!incident) {
+      return res.status(404).json({ error: 'Incident not found.' });
+    }
+
+    incident.status = 'resolved';
+    incident.resolvedAt = new Date();
+    incident.resolvedBy = req.user.email || req.user.name;
+    incident.resolutionNotes = String(resolutionNotes).trim();
+    await incident.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'resolve_security_incident',
+      objectType: 'security_incident',
+      objectId: incident.id,
+      reason: `Resolved incident ${incident.id}; notes=${incident.resolutionNotes}`,
+      createdAt: new Date()
+    });
+
+    res.json({ ok: true, incident });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Security alerts retrieval and acknowledge
+app.get('/api/safeguarding/alerts', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const alerts = await SecurityAlert.find().sort({ createdAt: -1 }).limit(100);
+    res.json({ ok: true, alerts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/safeguarding/alerts/:id/acknowledge', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const alert = await SecurityAlert.findOne({ id: req.params.id });
+    if (!alert) return res.status(404).json({ error: 'Security alert not found.' });
+
+    alert.acknowledged = true;
+    alert.acknowledgedAt = new Date();
+    alert.acknowledgedBy = req.user.email || req.user.name;
+    await alert.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'acknowledge_security_alert',
+      objectType: 'security_alert',
+      objectId: alert.id,
+      reason: `Acknowledged security alert ${alert.alertType}: ${alert.title}`,
+      createdAt: new Date()
+    });
+
+    res.json({ ok: true, alert });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // 9. MULTI-FACTOR AUTHENTICATION SETUP & TOGGLE
 app.post('/api/admin/mfa/setup', requireAuth(['admin']), async (req, res) => {
   try {
@@ -1908,8 +2131,44 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
       return res.status(400).json({ outcome: 'unknown_code', message: 'No QR code provided.' });
     }
 
+    // Rate limiting & unusual pattern detection
+    const now = Date.now();
+    const scanClientKey = req.user ? req.user._id.toString() : (req.ip || 'scanner');
+    let scanHistory = SCAN_ATTEMPTS.get(scanClientKey) || [];
+    scanHistory = scanHistory.filter(s => (now - s.timestamp) < SCAN_RATE_LIMIT_WINDOW_MS);
+
+    // Rate-limit excessive rapid scans
+    if (scanHistory.length >= SCAN_RATE_LIMIT_MAX) {
+      await AuditEntry.create({
+        userId: req.user ? req.user._id : null,
+        action: 'scan_rate_limited',
+        objectType: 'scan_rate_limiter',
+        objectId: scanClientKey,
+        reason: `Exceeded rate limit of ${SCAN_RATE_LIMIT_MAX} scans/minute (count=${scanHistory.length})`,
+        createdAt: new Date()
+      });
+
+      await SecurityAlert.create({
+        id: `alert-ratelimit-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+        alertType: 'scan_rate_limited',
+        severity: 'medium',
+        title: 'Scan rate limit triggered',
+        details: `Client ${scanClientKey} exceeded ${SCAN_RATE_LIMIT_MAX} scans per minute. Rate limiting active.`,
+        identifier: scanClientKey,
+        count: scanHistory.length,
+        ip: req.ip || req.connection.remoteAddress || 'unknown'
+      });
+
+      return res.status(429).json({
+        outcome: 'rate_limited',
+        error: 'Scan rate limit exceeded. Please pause briefly before scanning additional cards.'
+      });
+    }
+
     // Strip optional prefix like GW: if present
     const cleanToken = rawCode.replace(/^GW:/i, '').trim();
+    // Create non-reversible token hash for privacy-safe audit logging without exposing raw card token
+    const tokenHashPreview = crypto.createHash('sha256').update(cleanToken).digest('hex').slice(0, 12);
 
     // 1. Look up card by token or pupil ID fallback
     let card = await Card.findOne({ cardToken: cleanToken });
@@ -1934,11 +2193,44 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
     }
 
     if (!card && !pupil) {
+      scanHistory.push({ timestamp: now, tokenHash: tokenHashPreview, outcome: 'unknown_code' });
+      SCAN_ATTEMPTS.set(scanClientKey, scanHistory);
+
+      const unknownScansInWindow = scanHistory.filter(s => s.outcome === 'unknown_code');
+
+      await AuditEntry.create({
+        userId: req.user ? req.user._id : null,
+        action: 'scan_unknown_card_code',
+        objectType: 'card_scan',
+        objectId: `hash_${tokenHashPreview}`,
+        reason: `Unrecognized card scan detected at ${campus}; tokenHash=${tokenHashPreview}; unknownCountInWindow=${unknownScansInWindow.length}`,
+        createdAt: new Date()
+      });
+
+      // Unusual pattern alerting: repeated unknown scans in short window
+      if (unknownScansInWindow.length >= UNKNOWN_SCAN_ALERT_THRESHOLD) {
+        await SecurityAlert.create({
+          id: `alert-scanpattern-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          alertType: 'repeated_unknown_scans',
+          severity: 'high',
+          title: 'Unusual scan pattern: Repeated unrecognized cards',
+          details: `Terminal/user ${req.user ? req.user.email : scanClientKey} attempted ${unknownScansInWindow.length} unknown card scans within 1 minute. Possible card brute-force or faulty badge batch.`,
+          identifier: scanClientKey,
+          count: unknownScansInWindow.length,
+          ip: req.ip || req.connection.remoteAddress || 'unknown'
+        });
+      }
+
       return res.json({
         outcome: 'unknown_code',
-        message: 'Unrecognized card QR code. Pupil not found in school registry.'
+        message: 'Unrecognized card QR code. Pupil not found in school registry.',
+        unknownCount: unknownScansInWindow.length
       });
     }
+
+    // Record scan outcome in history
+    scanHistory.push({ timestamp: now, tokenHash: tokenHashPreview, outcome: 'valid' });
+    SCAN_ATTEMPTS.set(scanClientKey, scanHistory);
 
     // Check revoked card status
     if (card && card.status === 'revoked') {
@@ -2101,13 +2393,14 @@ app.post('/api/cards/:pupilId/reissue', requireAuth(['admin']), async (req, res)
     // Preserve historical attendance records without mutation
     // AttendanceEvent collection is untouched!
 
-    // Audit log entry
+    // Audit log entry (mask raw card tokens to protect PII/token exposure)
+    const maskedPrevTokens = prevCardTokens.map(t => `${t.slice(0, 8)}...`);
     await AuditEntry.create({
       userId: req.user._id,
       action: 'reissue_pupil_card',
       objectType: 'card',
       objectId: newCard.id,
-      reason: `Reissued card for pupil ${pupilId}; replaced_tokens=[${prevCardTokens.join(', ')}]; reason=${reason}`,
+      reason: `Reissued card for pupil ${pupilId}; replaced_tokens=[${maskedPrevTokens.join(', ')}]; reason=${reason}`,
       createdAt: new Date()
     });
 
@@ -2152,12 +2445,13 @@ app.post('/api/cards/:cardId/revoke', requireAuth(['admin']), async (req, res) =
     // Preserve historical attendance records without mutation
     // AttendanceEvent collection is untouched!
 
+    const maskedCardToken = `${card.cardToken.slice(0, 8)}...`;
     await AuditEntry.create({
       userId: req.user._id,
       action: 'revoke_pupil_card',
       objectType: 'card',
       objectId: card.id,
-      reason: `Revoked card for pupil ${card.pupilId}; token=${card.cardToken}; reason=${reason}`,
+      reason: `Revoked card for pupil ${card.pupilId}; token=${maskedCardToken}; reason=${reason}`,
       createdAt: new Date()
     });
 
