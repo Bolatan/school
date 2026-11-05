@@ -11,8 +11,81 @@
     <div class="sidebar-bottom"><div class="help-card"><span class="help-icon">?</span><strong>Need a hand?</strong><p>Check the quick guide for your gate team.</p><button id="helpBtn">Open quick guide <span>↗</span></button></div><div class="profile"><div class="avatar avatar-blue">AM</div><div><strong>Amara Okafor</strong><small>School administrator</small></div><button class="more-button" aria-label="Profile menu">···</button></div></div>
   </aside>
   <main class="main-area"><header class="topbar"><button class="mobile-menu" id="mobileMenu" aria-label="Open menu">☰</button><div class="breadcrumb">Northfield Academy <span>/</span> <b id="crumbPage">Overview</b></div><div class="top-actions"><span class="connection"><i></i> MongoDB connected</span><button class="icon-button" id="notificationsBtn" aria-label="Notifications">♧<span class="notification-dot"></span></button><button class="today-chip" id="todayLabel"></button></div></header>
-    <section class="page active" id="page-dashboard"><div class="page-heading"><div><div class="eyebrow" id="dateEyebrow">SCHOOL DAY <span class="live-label"><i></i> LIVE</span></div><h1>Good morning, Amara <span class="wave">✳</span></h1><p>Here’s what’s happening at Northfield today.</p></div><button class="button button-primary" data-goto="scan"><span>＋</span> Log an arrival</button></div>
-      <div class="stat-grid"><article class="stat-card"><div class="stat-top"><span>Present on campus</span><span class="stat-icon mint">♙</span></div><div class="stat-value" id="presentCount">0 <small>/ 248</small></div><div class="stat-foot"><span class="trend">↗ <b>+12</b></span> compared with yesterday</div><div class="stat-progress"><i id="presentProgress"></i></div></article><article class="stat-card"><div class="stat-top"><span>Arrivals today</span><span class="stat-icon blue">↘</span></div><div class="stat-value" id="arrivalsCount">0</div><div class="stat-foot"><span class="soft-dot green-dot"></span> Last arrival <b id="lastArrival">—</b></div><div class="mini-bars"><i style="height:35%"></i><i style="height:58%"></i><i style="height:44%"></i><i style="height:72%"></i><i style="height:50%"></i><i style="height:85%"></i><i style="height:68%"></i><i style="height:100%"></i><i style="height:73%"></i><i style="height:91%"></i><i style="height:64%"></i><i style="height:80%"></i></div></article><article class="stat-card"><div class="stat-top"><span>Departures today</span><span class="stat-icon lilac">↗</span></div><div class="stat-value" id="departuresCount">0</div><div class="stat-foot"><span class="soft-dot purple-dot"></span> Dismissal starts <b>2:30 PM</b></div><div class="mini-bars purple-bars"><i style="height:25%"></i><i style="height:30%"></i><i style="height:20%"></i><i style="height:38%"></i><i style="height:29%"></i><i style="height:42%"></i><i style="height:26%"></i><i style="height:36%"></i><i style="height:30%"></i><i style="height:45%"></i><i style="height:37%"></i><i style="height:32%"></i></div></article><article class="stat-card"><div class="stat-top"><span>Needs attention</span><span class="stat-icon amber">!</span></div><div class="stat-value" id="attentionCount">3</div><div class="stat-foot"><span class="amber-text">2 pickup requests</span><span class="separator">·</span> 1 card issue</div><button class="text-link" data-goto="pickup">Review exceptions <span>→</span></button></article></div>
+    <section class="page active" id="page-dashboard"><div class="page-heading"><div><div class="eyebrow" id="dateEyebrow">SCHOOL DAY <span class="live-label"><i></i> LIVE</span></div><h1>Good morning, Amara <span class="wave">✳</span></h1><p>Here’s what’s happening at Northfield today.</p></div><div class="heading-actions"><button class="button button-outline" id="dashExportReportBtn">↓ Export Attendance Report</button><button class="button button-outline" id="dashDailyReconcileBtn">⚖ Daily Reconciliation</button><button class="button button-primary" data-goto="scan"><span>＋</span> Log an arrival</button></div></div>
+      <div class="stat-grid live-stat-grid" style="grid-template-columns:repeat(6, 1fr)">
+        <article class="stat-card live-card clickable-stat" data-live-filter="expected"><div class="stat-top"><span>Expected pupils</span><span class="stat-icon blue">♙</span></div><div class="stat-value" id="liveExpectedCount">0</div><div class="stat-foot">Total enrolled roster</div></article>
+        <article class="stat-card live-card clickable-stat" data-live-filter="arrived"><div class="stat-top"><span>Arrived</span><span class="stat-icon mint">↘</span></div><div class="stat-value" id="liveArrivedCount">0</div><div class="stat-foot">Checked in today</div></article>
+        <article class="stat-card live-card clickable-stat" data-live-filter="departed"><div class="stat-top"><span>Departed</span><span class="stat-icon lilac">↗</span></div><div class="stat-value" id="liveDepartedCount">0</div><div class="stat-foot">Released safely</div></article>
+        <article class="stat-card live-card clickable-stat" data-live-filter="not_yet_arrived"><div class="stat-top"><span>Not yet arrived</span><span class="stat-icon amber">◷</span></div><div class="stat-value" id="liveNotArrivedCount">0</div><div class="stat-foot">Pending morning arrival</div></article>
+        <article class="stat-card live-card clickable-stat" data-live-filter="still_on_site"><div class="stat-top"><span>Still on site</span><span class="stat-icon mint">✓</span></div><div class="stat-value" id="liveStillOnSiteCount">0</div><div class="stat-foot">Present on campus now</div></article>
+        <article class="stat-card live-card clickable-stat" data-live-filter="exceptions"><div class="stat-top"><span>Exceptions</span><span class="stat-icon amber">!</span></div><div class="stat-value" id="liveExceptionsCount">0</div><div class="stat-foot">Manual / missing / pending</div></article>
+      </div>
+
+      <!-- Live Roster & Attendance Dashboard Panel -->
+      <section class="panel" style="margin-bottom:16px">
+        <div class="panel-heading">
+          <div>
+            <h2>Live Attendance & Rosters</h2>
+            <p>Real-time view with role checks, manual/offline indicators, and notification outcomes</p>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="button button-outline button-small" id="refreshLiveBtn">↻ Refresh live</button>
+            <button class="button button-outline button-small" id="exportFilteredAttendanceBtn">↓ Export Filtered Attendance</button>
+          </div>
+        </div>
+        <div class="filter-row" style="flex-wrap:wrap;gap:8px;padding:8px 0 12px">
+          <div class="search-box" style="flex:1;min-width:180px">
+            <span>⌕</span>
+            <input id="liveSearchInput" placeholder="Search by pupil name, ID, class..." aria-label="Search live pupils">
+          </div>
+          <select id="liveCampusFilter" class="gate-dropdown" style="border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;font-size:10px" title="Filter by campus">
+            <option value="All campuses">All campuses</option>
+          </select>
+          <select id="liveClassFilter" class="gate-dropdown" style="border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;font-size:10px" title="Filter by class">
+            <option value="All classes">All classes</option>
+          </select>
+          <select id="liveSessionFilter" class="gate-dropdown" style="border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;font-size:10px" title="Filter by session">
+            <option value="All sessions">All sessions</option>
+          </select>
+          <select id="liveStatusFilter" class="gate-dropdown" style="border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;font-size:10px" title="Filter by status">
+            <option value="All statuses">All statuses</option>
+            <option value="expected">Expected</option>
+            <option value="arrived">Arrived</option>
+            <option value="departed">Departed</option>
+            <option value="not_yet_arrived">Not yet arrived</option>
+            <option value="still_on_site">Still on site</option>
+            <option value="exceptions">Exceptions</option>
+          </select>
+          <select id="liveEventTypeFilter" class="gate-dropdown" style="border:1px solid #e2e8f0;border-radius:6px;padding:6px 10px;font-size:10px" title="Filter by event type">
+            <option value="All event types">All event types</option>
+            <option value="arrival">Arrival</option>
+            <option value="departure">Departure</option>
+            <option value="manual_arrival">Manual arrival</option>
+            <option value="manual_departure">Manual departure</option>
+            <option value="authorized_exception">Authorized exception</option>
+            <option value="correction">Correction</option>
+          </select>
+          <span class="result-count" id="liveResultCount"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="directory-table">
+            <thead>
+              <tr>
+                <th>PUPIL</th>
+                <th>CLASS</th>
+                <th>STATUS</th>
+                <th>FIRST ARRIVAL</th>
+                <th>LAST DEPARTURE</th>
+                <th>INDICATORS</th>
+                <th>NOTIFICATION OUTCOME</th>
+              </tr>
+            </thead>
+            <tbody id="liveReportRows"></tbody>
+          </table>
+        </div>
+        <div class="empty-state hidden" id="emptyLive">No pupils match the selected filters.</div>
+      </section>
+
       <div class="content-grid"><section class="panel arrivals-panel"><div class="panel-heading"><div><h2>Today’s arrivals</h2><p>Live pupil check-ins</p></div><button class="button button-outline button-small" data-goto="activity">View all <span>→</span></button></div><div class="filter-row"><div class="search-box"><span>⌕</span><input id="arrivalSearch" placeholder="Search pupils..." aria-label="Search pupils"></div><button class="filter-button" id="classFilter">All classes <span>⌄</span></button></div><div class="table-wrap"><table><thead><tr><th>PUPIL</th><th>CLASS</th><th>ARRIVAL</th><th>STATUS</th></tr></thead><tbody id="arrivalRows"></tbody></table></div><div class="empty-state hidden" id="emptyArrivals">No matching pupils found.</div></section><section class="panel activity-panel"><div class="panel-heading"><div><h2>Recent activity</h2><p>Updates from your school gates</p></div><button class="kebab" aria-label="More options">···</button></div><div class="activity-list" id="recentActivity"></div><button class="activity-footer" data-goto="activity">See full activity log <span>→</span></button></section></div>
       <section class="guardian-banner"><div class="banner-symbol">✳</div><div><strong>Notification setup required</strong><p>Events are saved in MongoDB. Connect a messaging provider before guardian alerts can be sent.</p></div><div class="banner-metric"><b id="alertsSent">0</b><small>real alerts sent</small></div><span class="banner-check banner-warning">!</span></section>
     </section>

@@ -242,6 +242,24 @@ const Campus = mongoose.model('Campus', campusSchema);
 const SchoolClass = mongoose.model('SchoolClass', schoolClassSchema);
 const Device = mongoose.model('Device', deviceSchema);
 const NotificationTemplate = mongoose.model('NotificationTemplate', notificationTemplateSchema);
+const scanAttemptSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  pupilId: { type: String, required: true, ref: 'Pupil' },
+  clientEventId: { type: String, default: null },
+  cardToken: { type: String, default: null },
+  mode: { type: String, default: 'arrival' },
+  outcome: { type: String, required: true },
+  reason: { type: String, default: '' },
+  campus: { type: String, default: 'Primary campus' },
+  gate: { type: String, default: 'Main gate' },
+  device: { type: String, default: 'Primary Gate Terminal' },
+  staff: { type: String, default: 'Staff' },
+  date: { type: String, required: true },
+  time: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+
+const ScanAttempt = mongoose.model('ScanAttempt', scanAttemptSchema);
 const EscalationContact = mongoose.model('EscalationContact', escalationContactSchema);
 const Card = mongoose.model('Card', cardSchema);
 const Guardian = mongoose.model('Guardian', guardianSchema);
@@ -266,5 +284,6 @@ module.exports = {
   SchoolClass,
   Device,
   NotificationTemplate,
-  EscalationContact
+  EscalationContact,
+  ScanAttempt
 };

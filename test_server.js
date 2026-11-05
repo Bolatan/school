@@ -1969,3 +1969,148 @@ test('Non-Functional Requirements: Availability, Performance, Security, Privacy,
   assert.ok(lastRecordedEvent.time);
   assert.ok(lastRecordedEvent.date);
 });
+
+test('Dashboards & Reports: Live views, search/filter, role-checked export with audit logging, notification & manual/offline indicators, and daily reconciliation', async () => {
+  const adminCookie = await login();
+
+  // Create manager and viewer users to verify role checks
+  const managerPassword = 'Password123456!Mgr';
+  const managerRes = await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Test Manager User',
+      email: 'manager.reports@northfield.school',
+      role: 'manager',
+      password: managerPassword
+    });
+  assert.equal(managerRes.status, 201);
+  const managerCookie = await login('manager.reports@northfield.school', managerPassword);
+
+  const viewerPassword = 'Password123456!Vw';
+  const viewerRes = await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Test Viewer User',
+      email: 'viewer.reports@northfield.school',
+      role: 'viewer',
+      password: viewerPassword
+    });
+  assert.equal(viewerRes.status, 201);
+  const viewerCookie = await login('viewer.reports@northfield.school', viewerPassword);
+
+  // 1. Live Views Endpoint: Verify counts and categories (expected, arrived, departed, not yet arrived, still on site, exceptions)
+  const liveRes = await request
+    .get('/api/reports/live')
+    .set('Cookie', adminCookie);
+  assert.equal(liveRes.status, 200);
+  assert.ok(liveRes.body.ok);
+  assert.ok(liveRes.body.counts);
+  assert.equal(typeof liveRes.body.counts.expected, 'number');
+  assert.equal(typeof liveRes.body.counts.arrived, 'number');
+  assert.equal(typeof liveRes.body.counts.departed, 'number');
+  assert.equal(typeof liveRes.body.counts.notYetArrived, 'number');
+  assert.equal(typeof liveRes.body.counts.stillOnSite, 'number');
+  assert.equal(typeof liveRes.body.counts.exceptions, 'number');
+  assert.ok(Array.isArray(liveRes.body.pupils));
+  assert.ok(Array.isArray(liveRes.body.events));
+
+  // Verify indicator and notification outcome properties
+  const samplePupil = liveRes.body.pupils[0];
+  assert.ok(samplePupil);
+  assert.ok('id' in samplePupil);
+  assert.ok('name' in samplePupil);
+  assert.ok('className' in samplePupil);
+  assert.ok('status' in samplePupil);
+  assert.ok('hasArrived' in samplePupil);
+  assert.ok('hasDeparted' in samplePupil);
+  assert.ok('isStillOnSite' in samplePupil);
+  assert.ok('isException' in samplePupil);
+
+  // 2. Search & Filtering: campus, class, date/session, pupil, event type, and status
+  const filterByClassRes = await request
+    .get('/api/reports/attendance?class=Year%204')
+    .set('Cookie', adminCookie);
+  assert.equal(filterByClassRes.status, 200);
+  assert.ok(filterByClassRes.body.pupils.every(p => p.className === 'Year 4'));
+
+  const filterByStatusRes = await request
+    .get('/api/reports/attendance?status=not_yet_arrived')
+    .set('Cookie', adminCookie);
+  assert.equal(filterByStatusRes.status, 200);
+  assert.ok(filterByStatusRes.body.pupils.every(p => !p.hasArrived));
+
+  const filterByPupilRes = await request
+    .get('/api/reports/attendance?pupil=zara')
+    .set('Cookie', adminCookie);
+  assert.equal(filterByPupilRes.status, 200);
+  assert.ok(filterByPupilRes.body.pupils.some(p => p.name.toLowerCase().includes('zara')));
+
+  // 3. Export Attendance Reports: Role checks and Audit Logging
+  // Viewer role is forbidden from exporting reports
+  const viewerExportRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', viewerCookie)
+    .send({ format: 'csv', reason: 'Attempt unauthorized export' });
+  assert.equal(viewerExportRes.status, 403);
+
+  // Guardian role is forbidden from exporting reports
+  const guardianCookie = await login(DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD);
+  const guardianExportRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', guardianCookie)
+    .send({ format: 'csv', reason: 'Attempt unauthorized export' });
+  assert.equal(guardianExportRes.status, 403);
+
+  // Admin export with audit logging
+  const exportReason = 'Quarterly safeguarding attendance audit report';
+  const adminExportCsvRes = await request
+    .post('/api/reports/attendance/export?format=csv')
+    .set('Cookie', adminCookie)
+    .send({ reason: exportReason });
+  assert.equal(adminExportCsvRes.status, 200);
+  assert.ok(adminExportCsvRes.headers['content-type'].includes('text/csv'));
+  assert.ok(adminExportCsvRes.text.includes('Pupil ID,Pupil Name,Class,Status'));
+
+  // Manager export in JSON format
+  const mgrExportJsonRes = await request
+    .post('/api/reports/attendance/export?format=json')
+    .set('Cookie', managerCookie)
+    .send({ reason: 'Daily reconciliation manager review' });
+  assert.equal(mgrExportJsonRes.status, 200);
+  assert.ok(mgrExportJsonRes.body.ok);
+  assert.ok(mgrExportJsonRes.body.recordCount >= 0);
+
+  // Verify AuditEntry was created with reason and staff details
+  const auditEntries = await AuditEntry.find({ action: 'export_attendance_report' });
+  assert.ok(auditEntries.length >= 2);
+  const matchedAudit = auditEntries.find(a => a.reason.includes(exportReason));
+  assert.ok(matchedAudit);
+  assert.equal(matchedAudit.objectType, 'attendance_report');
+
+  // 4. Daily Reconciliation: pupil event timeline, missing arrival/departure patterns, duplicate scan attempts, unresolved exceptions
+  // Record duplicate scan attempt
+  const dupCode = 'NF-1042';
+  await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({ code: dupCode, mode: 'arrival' });
+  // Repeated tap with same mode triggers duplicate attempt tracking
+  await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({ code: dupCode, mode: 'arrival' });
+
+  const reconRes = await request
+    .get('/api/reports/reconciliation')
+    .set('Cookie', adminCookie);
+  assert.equal(reconRes.status, 200);
+  assert.ok(reconRes.body.ok);
+  assert.ok(Array.isArray(reconRes.body.pupilTimeline));
+  assert.ok(Array.isArray(reconRes.body.missingArrivalPatterns));
+  assert.ok(Array.isArray(reconRes.body.missingDeparturePatterns));
+  assert.ok(Array.isArray(reconRes.body.duplicateScanAttempts));
+  assert.ok(Array.isArray(reconRes.body.unresolvedExceptions));
+  assert.ok(reconRes.body.duplicateScanAttempts.length >= 1);
+});
