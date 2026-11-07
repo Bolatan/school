@@ -88,13 +88,29 @@ const pupilSchema = new mongoose.Schema({
 
 const notificationSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
-  eventId: { type: String, required: true },
-  pupilId: { type: String, required: true },
+  eventId: { type: String, required: true, index: true },
+  pupilId: { type: String, required: true, index: true },
+  guardianId: { type: String, default: null, index: true },
   guardianName: { type: String, required: true },
-  channel: { type: String, required: true },
+  channel: {
+    type: String,
+    required: true,
+    enum: ['PUSH', 'SMS', 'WHATSAPP', 'EMAIL']
+  },
   recipient: { type: String, required: true },
   message: { type: String, default: '' },
-  status: { type: String, default: 'Sent' },
+  privacySafePreview: { type: String, default: '' },
+  status: {
+    type: String,
+    required: true,
+    default: 'accepted_by_provider'
+  },
+  providerReference: { type: String, default: null },
+  failureCategory: { type: String, default: null },
+  failureReason: { type: String, default: null },
+  retryCount: { type: Number, default: 0 },
+  lastRetryAt: { type: Date, default: null },
+  idempotencyKey: { type: String, default: null, index: true },
   sentAt: { type: String, required: true }
 }, { timestamps: true });
 
@@ -202,6 +218,11 @@ const guardianSchema = new mongoose.Schema({
   consentAcceptedAt: { type: Date, default: null },
   status: { type: String, enum: ['invited', 'active', 'suspended'], default: 'invited' },
   preferredChannels: [{ type: String, enum: ['sms', 'whatsapp', 'push', 'email'] }],
+  pausedNonCriticalAlerts: { type: Boolean, default: false },
+  pausedAt: { type: Date, default: null },
+  whatsappOptIn: { type: Boolean, default: false },
+  whatsappOptInAt: { type: Date, default: null },
+  pushToken: { type: String, default: null },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null }
 }, { timestamps: true });
 

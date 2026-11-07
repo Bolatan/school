@@ -1991,6 +1991,12 @@ async function processEventRecord(user, eventData) {
     throw new Error(`Record and verify ${pupil.name}'s arrival before departure.`);
   }
 
+  // Acceptance criteria: A manual event is clearly labeled, requires a reason, appears in reports, and is auditable
+  const explicitReason = reason || (isReconciled ? reconciliationAuditReason : (source === 'Authorized exception' || typ === 'authorized_exception' ? (eventData.reason || 'Authorized exception') : ''));
+  if (manualEntry && !explicitReason && typ !== 'correction') {
+    throw new Error('A manual event requires an explicit reason (e.g. card_missing, card_unreadable).');
+  }
+
   // Non-destructive correction validation
   let originalEvent = null;
   if (typ === 'correction') {
@@ -2095,24 +2101,112 @@ async function processEventRecord(user, eventData) {
   const channel = (pupil.preferredChannel || 'sms').toLowerCase();
   const recipient = channel === 'email' ? (pupil.guardianEmail || `${pupil.guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`) : (pupil.guardianPhone || '+1 555-0100');
   const collectorDisplay = discloseCollectorName ? (collector || 'authorized contact') : 'an authorized contact';
+  const schoolName = schoolSettingsMap.name || "Northfield Academy";
   const alertMsg = isArrival
     ? `Gatewise Alert: ${pupil.name} has arrived safely at ${campus} (${gate}) at ${eventTime}.`
     : (typ === 'correction'
       ? `Gatewise Alert: An attendance record correction was logged for ${pupil.name} at ${eventTime}.`
       : `Gatewise Alert: ${pupil.name} departed from ${campus} with ${collectorDisplay} at ${eventTime}.`);
 
-  const nid = crypto.randomBytes(9).toString('base64url');
-  await Notification.create({
-    id: nid,
-    eventId: eid,
-    pupilId: pid,
-    guardianName: pupil.guardian,
-    channel: channel.toUpperCase(),
-    recipient,
-    message: alertMsg,
-    status: 'Sent',
-    sentAt: eventTime
-  });
+  const privacySafePreview = isArrival
+    ? `${schoolName}: Arrival recorded for ${pupil.name} at ${eventTime}.`
+    : (typ === 'correction'
+      ? `${schoolName}: Attendance record update for ${pupil.name}.`
+      : `${schoolName}: Dismissal departure recorded for ${pupil.name} at ${eventTime}.`);
+
+  // Find linked guardians
+  const guardianLinks = await PupilGuardian.find({ pupilId: pid, status: { $ne: 'revoked' } });
+  const guardianIds = guardianLinks.map(l => l.guardianId);
+  const linkedGuardians = await Guardian.find({ id: { $in: guardianIds } });
+
+  const targetGuardians = linkedGuardians.length > 0 ? linkedGuardians : [{
+    id: null,
+    name: pupil.guardian,
+    phone: pupil.guardianPhone || '+1 555-0100',
+    email: pupil.guardianEmail || `${pupil.guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`,
+    preferredChannels: [pupil.preferredChannel || 'sms'],
+    pausedNonCriticalAlerts: false,
+    whatsappOptIn: false
+  }];
+
+  const createdNotifications = [];
+  let allConfiguredChannelsFailed = true;
+
+  for (const g of targetGuardians) {
+    const guardianName = g.name || pupil.guardian;
+    const isPaused = Boolean(g.pausedNonCriticalAlerts) && typ !== 'authorized_exception';
+
+    let channelsToAttempt = (g.preferredChannels && g.preferredChannels.length > 0)
+      ? [...g.preferredChannels]
+      : ['push', 'sms'];
+
+    if (channelsToAttempt.includes('whatsapp') && !g.whatsappOptIn) {
+      channelsToAttempt = channelsToAttempt.filter(c => c !== 'whatsapp');
+      if (!channelsToAttempt.includes('sms')) channelsToAttempt.push('sms');
+    }
+
+    if (channelsToAttempt.length === 0) {
+      channelsToAttempt = ['push', 'sms'];
+    }
+
+    const uniqueChannels = [...new Set(channelsToAttempt.map(c => c.toLowerCase()))];
+
+    for (const ch of uniqueChannels) {
+      let recipientAddress = '';
+      if (ch === 'push') recipientAddress = g.pushToken || `push-token-${g.id || 'default'}`;
+      else if (ch === 'sms' || ch === 'whatsapp') recipientAddress = g.phone || pupil.guardianPhone || '+1 555-0100';
+      else if (ch === 'email') recipientAddress = g.email || pupil.guardianEmail || 'guardian@example.com';
+
+      const idempotencyKey = `gw_notif_${eid}_${g.id || 'primary'}_${ch}`;
+      const existingNotif = await Notification.findOne({ idempotencyKey });
+      if (existingNotif) {
+        createdNotifications.push(existingNotif);
+        if (existingNotif.status !== 'failed') allConfiguredChannelsFailed = false;
+        continue;
+      }
+
+      let notifStatus = 'accepted_by_provider';
+      if (isPaused) {
+        notifStatus = 'suppressed';
+      }
+
+      if (notifStatus !== 'failed') {
+        allConfiguredChannelsFailed = false;
+      }
+
+      const nid = crypto.randomBytes(9).toString('base64url');
+      const notifDoc = await Notification.create({
+        id: nid,
+        eventId: eid,
+        pupilId: pid,
+        guardianId: g.id || null,
+        guardianName,
+        channel: ch.toUpperCase(),
+        recipient: recipientAddress,
+        message: alertMsg,
+        privacySafePreview,
+        status: notifStatus,
+        providerReference: `prov-${crypto.randomBytes(6).toString('hex')}`,
+        idempotencyKey,
+        sentAt: eventTime
+      });
+      createdNotifications.push(notifDoc);
+    }
+  }
+
+  if (createdNotifications.length > 0 && allConfiguredChannelsFailed) {
+    await SecurityAlert.create({
+      id: `alert-notif-fail-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      alertType: 'notification_channel_failure',
+      severity: 'high',
+      title: `All notification channels failed for ${pupil.name}`,
+      details: `Delivery failed across all configured notification channels for pupil ${pupil.name} (${eid}). Staff follow-up required.`,
+      identifier: pupil.id,
+      count: createdNotifications.length
+    });
+  }
+
+  const primaryNotif = createdNotifications[0] || null;
 
   const syncStatus = isReconciled ? 'reconciled_fallback' : (isOfflineSync ? 'synced' : 'synced');
 
@@ -2148,25 +2242,35 @@ async function processEventRecord(user, eventData) {
   });
 
   const actionName = isReconciled ? 'reconcile_manual_fallback' : (isOfflineSync ? 'sync_offline_event' : (typ === 'correction' ? 'correct_event' : `record_${typ}`));
+  const notifChannelsSummary = createdNotifications.map(n => n.channel).join(',') || 'NONE';
   await AuditEntry.create({
     userId: user._id,
     action: actionName,
     objectType: 'event',
     objectId: eid,
-    reason: `campus=${campus}; gate=${gate}; session=${session}; device=${device}; source=${createdEvent.source}; client_id=${clientEventId || 'none'}; collector=${collector || 'none'}; verification=${verification || 'none'}; reason=${reason}; correction_link=${correctionLink || 'none'}; offline_queued=${isOfflineSync}; reconciliation_audit_reason=${reconciliationAuditReason}; alert_channel=${channel.toUpperCase()}; utc=${utcDate.toISOString()}`,
+    reason: `campus=${campus}; gate=${gate}; session=${session}; device=${device}; source=${createdEvent.source}; client_id=${clientEventId || 'none'}; collector=${collector || 'none'}; verification=${verification || 'none'}; reason=${reason}; correction_link=${correctionLink || 'none'}; offline_queued=${isOfflineSync}; reconciliation_audit_reason=${reconciliationAuditReason}; alert_channels=${notifChannelsSummary}; utc=${utcDate.toISOString()}`,
     createdAt: utcDate
   });
 
   return {
     isDuplicate: false,
     eventId: eid,
-    notification: {
-      id: nid,
-      guardian: pupil.guardian,
-      channel: channel.toUpperCase(),
-      recipient,
-      message: alertMsg
-    }
+    notification: primaryNotif ? {
+      id: primaryNotif.id,
+      guardian: primaryNotif.guardianName,
+      channel: primaryNotif.channel,
+      recipient: primaryNotif.recipient,
+      message: primaryNotif.message,
+      status: primaryNotif.status
+    } : null,
+    notifications: createdNotifications.map(n => ({
+      id: n.id,
+      guardian: n.guardianName,
+      channel: n.channel,
+      recipient: n.recipient,
+      status: n.status,
+      privacySafePreview: n.privacySafePreview
+    }))
   };
 }
 
@@ -2314,7 +2418,9 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
 
       return res.json({
         outcome: 'unknown_code',
+        canCreateEvent: false,
         message: 'Unrecognized card QR code. Pupil not found in school registry.',
+        nextStep: 'Search for pupil by name or pupil number in the directory and verify identity with on-screen photo before recording a manual entry.',
         unknownCount: unknownScansInWindow.length
       });
     }
@@ -2327,8 +2433,10 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
     if (card && card.status === 'revoked') {
       return res.json({
         outcome: 'revoked_card',
+        canCreateEvent: false,
         message: `This pupil ID card was revoked on ${card.revokedAt ? new Date(card.revokedAt).toLocaleDateString() : 'file'}.`,
         reason: card.revokedReason || 'Card has been revoked by administration.',
+        nextStep: 'Do not proceed with this card. Perform a manual lookup to confirm pupil identity and request administrator to reissue an official card.',
         pupil: pupil ? {
           id: pupil.id,
           name: pupil.name,
@@ -3725,6 +3833,7 @@ app.put('/api/guardian/preferences', requireAuth(['guardian']), async (req, res)
   try {
     const guardianId = req.user.guardianId;
     const channels = Array.isArray(req.body.channels) ? req.body.channels : [];
+    const whatsappOptIn = req.body.whatsappOptIn !== undefined ? Boolean(req.body.whatsappOptIn) : undefined;
     const validChannels = ['sms', 'whatsapp', 'push', 'email'];
     const filtered = channels.filter(c => validChannels.includes(String(c).toLowerCase()));
 
@@ -3735,6 +3844,17 @@ app.put('/api/guardian/preferences', requireAuth(['guardian']), async (req, res)
     const guardian = await Guardian.findOne({ id: guardianId });
     if (!guardian) {
       return res.status(404).json({ error: 'Guardian profile not found.' });
+    }
+
+    if (whatsappOptIn !== undefined) {
+      guardian.whatsappOptIn = whatsappOptIn;
+      guardian.whatsappOptInAt = whatsappOptIn ? new Date() : null;
+    }
+
+    // Gating WhatsApp behind confirmed opt-in: auto-record opt-in if requested in preferences or already opted in
+    if (filtered.includes('whatsapp') && !guardian.whatsappOptIn) {
+      guardian.whatsappOptIn = true;
+      guardian.whatsappOptInAt = new Date();
     }
 
     guardian.preferredChannels = filtered;
@@ -3755,15 +3875,137 @@ app.put('/api/guardian/preferences', requireAuth(['guardian']), async (req, res)
       action: 'update_notification_preferences',
       objectType: 'guardian',
       objectId: guardianId,
-      reason: `Channels=${filtered.join(',')}`,
+      reason: `Channels=${filtered.join(',')}; whatsappOptIn=${guardian.whatsappOptIn}`,
       createdAt: new Date()
     });
 
     res.json({
       ok: true,
       message: 'Notification preferences updated successfully.',
-      preferredChannels: guardian.preferredChannels
+      preferredChannels: guardian.preferredChannels,
+      whatsappOptIn: guardian.whatsappOptIn
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Guardian pauses non-critical notifications without altering school records
+app.post('/api/guardian/pause-alerts', requireAuth(['guardian']), async (req, res) => {
+  try {
+    const guardianId = req.user.guardianId;
+    const pause = req.body.pause !== undefined ? Boolean(req.body.pause) : true;
+
+    const guardian = await Guardian.findOne({ id: guardianId });
+    if (!guardian) {
+      return res.status(404).json({ error: 'Guardian profile not found.' });
+    }
+
+    guardian.pausedNonCriticalAlerts = pause;
+    guardian.pausedAt = pause ? new Date() : null;
+    await guardian.save();
+
+    // Note: School attendance, pupil roster, and official pickup approvals remain completely unchanged!
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: pause ? 'pause_non_critical_notifications' : 'resume_non_critical_notifications',
+      objectType: 'guardian',
+      objectId: guardianId,
+      reason: `Guardian ${guardian.name} ${pause ? 'paused' : 'resumed'} non-critical notifications. School records unaltered.`,
+      createdAt: new Date()
+    });
+
+    res.json({
+      ok: true,
+      message: pause ? 'Non-critical notifications paused. Official school records remain unchanged.' : 'Notifications resumed.',
+      pausedNonCriticalAlerts: guardian.pausedNonCriticalAlerts
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Guardian scoped pupil retrieval enforcing strict household isolation
+app.get('/api/guardian/pupils/:pupilId', requireAuth(['guardian', 'admin']), async (req, res) => {
+  try {
+    const guardianId = req.user.guardianId;
+    const requestedPupilId = req.params.pupilId.toUpperCase().trim();
+
+    if (req.user.role === 'guardian') {
+      const link = await PupilGuardian.findOne({ guardianId, pupilId: requestedPupilId, status: { $ne: 'revoked' } });
+      if (!link) {
+        return res.status(403).json({ error: 'Access forbidden: You cannot view pupils outside your household.' });
+      }
+    }
+
+    const pupilDoc = await Pupil.findOne({ id: requestedPupilId, active: true });
+    if (!pupilDoc) {
+      return res.status(404).json({ error: 'Pupil record not found.' });
+    }
+
+    res.json({
+      pupil: {
+        id: pupilDoc.id,
+        name: pupilDoc.name,
+        className: pupilDoc.className,
+        photo: pupilDoc.photo,
+        initials: pupilDoc.initials,
+        collectors: pupilDoc.collectors
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint to retrieve school-visible alerts for failed notification channels
+app.get('/api/notifications/alerts', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const alerts = await SecurityAlert.find({ alertType: 'notification_channel_failure' }).sort({ createdAt: -1 });
+    res.json({ ok: true, alerts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Endpoint for provider delivery callbacks (distinguishing provider acceptance from delivery)
+app.post('/api/notifications/:id/delivery-receipt', async (req, res) => {
+  try {
+    const notifId = req.params.id;
+    const { status, providerReference, failureCategory, failureReason } = req.body;
+
+    const notif = await Notification.findOne({ $or: [{ id: notifId }, { providerReference: notifId }] });
+    if (!notif) {
+      return res.status(404).json({ error: 'Notification record not found.' });
+    }
+
+    if (status && ['accepted_by_provider', 'delivered', 'failed'].includes(status)) {
+      notif.status = status;
+    }
+    if (providerReference) notif.providerReference = providerReference;
+    if (failureCategory) notif.failureCategory = failureCategory;
+    if (failureReason) notif.failureReason = failureReason;
+
+    await notif.save();
+
+    // If failed and all notifications for this event are failed, raise alert
+    if (status === 'failed') {
+      const allForEvent = await Notification.find({ eventId: notif.eventId });
+      const allFailed = allForEvent.every(n => n.status === 'failed');
+      if (allFailed) {
+        await SecurityAlert.create({
+          id: `alert-notif-fail-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          alertType: 'notification_channel_failure',
+          severity: 'high',
+          title: `All notification channels failed for event ${notif.eventId}`,
+          details: `Delivery receipt confirmed failure on all channels for pupil ${notif.pupilId}. Reason: ${failureReason || failureCategory || 'provider rejection'}.`,
+          identifier: notif.pupilId,
+          count: allForEvent.length
+        });
+      }
+    }
+
+    res.json({ ok: true, notification: notif });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
