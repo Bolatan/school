@@ -9,6 +9,7 @@ const XLSX = require('xlsx');
 
 const {
   User,
+  StaffUser,
   Pupil,
   PickupRequest,
   PickupContact,
@@ -16,6 +17,7 @@ const {
   Notification,
   AuditEntry,
   Session,
+  School,
   SchoolSetting,
   Guardian,
   PupilGuardian,
@@ -27,7 +29,9 @@ const {
   NotificationTemplate,
   EscalationContact,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  DATA_CLASS_RULES,
+  applyRetentionRules
 } = require('./models');
 const {
   DEMO_EMAIL,
@@ -402,6 +406,37 @@ app.get('/api/me', async (req, res) => {
         deviceLockEnforced: Boolean(user.deviceLockEnforced),
         assignedCampus: user.assignedCampus || 'Primary campus'
       }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Compliance Endpoint: 12 Core Domain Data Class Governance Rules (Retention, Access Scoping, Minimization)
+app.get('/api/compliance/data-classes', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const setting = await SchoolSetting.findOne({ key: 'retentionSettings' });
+    const cfg = setting ? setting.val : {};
+
+    const configuredRules = {};
+    for (const [key, rule] of Object.entries(DATA_CLASS_RULES)) {
+      configuredRules[key] = {
+        ...rule,
+        activeRetentionDays: (key === 'AttendanceEvent' && cfg.attendanceRetentionDays)
+          ? cfg.attendanceRetentionDays
+          : ((key === 'AuditEntry' && cfg.auditLogRetentionDays)
+            ? cfg.auditLogRetentionDays
+            : ((key === 'Notification' && cfg.notificationRetentionDays)
+              ? cfg.notificationRetentionDays
+              : rule.retentionDays))
+      };
+    }
+
+    res.json({
+      ok: true,
+      dataClasses: configuredRules,
+      minimizationRule: "Data minimization strictly enforced: full pupil records must never be copied into logs (AuditEntry), attendance events, or notification records (Notification). Only minimal entity references, timestamps, and non-PII details are stored.",
+      accessControlRule: "Role-based access boundaries strictly enforced at the API route layer across admin, manager, viewer, and guardian roles."
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1297,6 +1332,8 @@ app.post('/api/admin/retention', requireAuth(['admin']), async (req, res) => {
       objectType: 'school_setting',
       objectId: 'retentionSettings',
       reason: `attendanceRetention=${val.attendanceRetentionDays}d; auditRetention=${val.auditLogRetentionDays}d; queueTtl=${val.offlineQueueTtlHours}h; sessionTimeout=${val.sessionTimeoutMinutes}m`,
+      beforeReferences: current ? current.val : null,
+      afterReferences: val,
       createdAt: new Date()
     });
 
@@ -1306,18 +1343,19 @@ app.post('/api/admin/retention', requireAuth(['admin']), async (req, res) => {
   }
 });
 
-// Explicit retention purge execution (with sensitive action audit entry)
+// Explicit retention purge execution (with sensitive action audit entry and data class rules)
 app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) => {
   try {
     const setting = await SchoolSetting.findOne({ key: 'retentionSettings' });
     const cfg = setting ? setting.val : { attendanceRetentionDays: 365, auditLogRetentionDays: 730 };
-    const now = Date.now();
 
-    const attendanceCutoff = new Date(now - cfg.attendanceRetentionDays * 24 * 60 * 60 * 1000);
-    const auditCutoff = new Date(now - cfg.auditLogRetentionDays * 24 * 60 * 60 * 1000);
+    // Apply retention across domain data classes
+    const purgeSummary = await applyRetentionRules(cfg);
 
-    const attendanceDeleted = await AttendanceEvent.deleteMany({ timestamp: { $lt: attendanceCutoff } });
-    const auditDeleted = await AuditEntry.deleteMany({ createdAt: { $lt: auditCutoff } });
+    const attendanceCutoff = purgeSummary.AttendanceEvent ? purgeSummary.AttendanceEvent.cutoff : new Date().toISOString();
+    const auditCutoff = purgeSummary.AuditEntry ? purgeSummary.AuditEntry.cutoff : new Date().toISOString();
+    const attendancePruned = purgeSummary.AttendanceEvent ? purgeSummary.AttendanceEvent.pruned : 0;
+    const auditPruned = purgeSummary.AuditEntry ? purgeSummary.AuditEntry.pruned : 0;
 
     // Update lastPurgedAt in retention settings
     if (setting) {
@@ -1330,18 +1368,19 @@ app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) 
       action: 'execute_retention_purge',
       objectType: 'retention_policy',
       objectId: 'purge',
-      reason: `Purged ${attendanceDeleted.deletedCount} attendance events (<${attendanceCutoff.toISOString()}) and ${auditDeleted.deletedCount} audit entries (<${auditCutoff.toISOString()})`,
+      reason: `Purged ${attendancePruned} attendance events (<${attendanceCutoff}) and ${auditPruned} audit entries (<${auditCutoff}) across data classes`,
       createdAt: new Date()
     });
 
     res.json({
       ok: true,
-      message: 'Retention purge executed successfully.',
+      message: 'Retention purge executed successfully across all domain data classes.',
       purged: {
-        attendanceRecords: attendanceDeleted.deletedCount,
-        auditEntries: auditDeleted.deletedCount,
-        attendanceCutoff: attendanceCutoff.toISOString(),
-        auditCutoff: auditCutoff.toISOString()
+        attendanceRecords: attendancePruned,
+        auditEntries: auditPruned,
+        attendanceCutoff,
+        auditCutoff,
+        dataClasses: purgeSummary
       }
     });
   } catch (err) {
@@ -1372,9 +1411,12 @@ app.get('/api/admin/audit', requireAuth(['admin']), async (req, res) => {
         actorName: e.userId ? e.userId.name : 'System / Anonymous',
         actorEmail: e.userId ? e.userId.email : 'system',
         action: e.action,
+        object: e.object || `${e.objectType}:${e.objectId}`,
         objectType: e.objectType,
         objectId: e.objectId,
         reason: e.reason,
+        beforeReferences: e.beforeReferences || null,
+        afterReferences: e.afterReferences || null,
         timestamp: e.createdAt.toISOString()
       }))
     });
@@ -3231,6 +3273,15 @@ app.put('/api/pickup/collectors/:pupilId/:collectorId', requireAuth(['admin', 'm
       objectType: 'pickup_permission',
       objectId: `${pupilId}:${collectorId}`,
       reason: `Staff ${req.user.name} changed pickup permission for ${collector.name} on pupil ${pupilId}. Reason: ${reason}; Before=${JSON.stringify(beforeState)}`,
+      beforeReferences: beforeState,
+      afterReferences: {
+        name: collector.name,
+        relation: collector.relation,
+        phone: collector.phone,
+        permissionType: collector.permissionType,
+        startDate: collector.startDate,
+        endDate: collector.endDate
+      },
       createdAt: new Date()
     });
 

@@ -2616,3 +2616,117 @@ test('Key flows & Notifications acceptance criteria verification', async () => {
   const pupilDocAfterPause = await Pupil.findOne({ id: 'NF-1042' });
   assert.equal(pupilDocAfterPause.active, true);
 });
+
+test('Core Domain Data Classes, Retention, Minimization, and Access Scoping verification', async () => {
+  const models = require('./models');
+  const {
+    School,
+    Campus,
+    Pupil,
+    Guardian,
+    PupilGuardian,
+    PickupContact,
+    Card,
+    StaffUser,
+    Device,
+    AttendanceEvent,
+    Notification,
+    AuditEntry,
+    DATA_CLASS_RULES,
+    applyRetentionRules
+  } = models;
+
+  // 1. Verify all 12 core domain data classes are exported and instantiateable
+  const expectedDataClasses = [
+    'School',
+    'Campus',
+    'Pupil',
+    'Guardian',
+    'PupilGuardian',
+    'PickupContact',
+    'Card',
+    'StaffUser',
+    'Device',
+    'AttendanceEvent',
+    'Notification',
+    'AuditEntry'
+  ];
+
+  for (const dc of expectedDataClasses) {
+    assert.ok(models[dc], `Model ${dc} must be exported`);
+    assert.ok(DATA_CLASS_RULES[dc], `DATA_CLASS_RULES must include rule for ${dc}`);
+    assert.ok(DATA_CLASS_RULES[dc].allowedRoles && DATA_CLASS_RULES[dc].allowedRoles.length > 0, `${dc} must have allowedRoles`);
+    assert.ok(DATA_CLASS_RULES[dc].dataMinimizationNotice, `${dc} must have dataMinimizationNotice`);
+    assert.ok(DATA_CLASS_RULES[dc].accessScope, `${dc} must define accessScope`);
+  }
+
+  // 2. Query /api/compliance/data-classes endpoint as admin
+  const adminCookie = await login('admin@northfield.school', 'GatewiseDemo!26');
+  const dataClassesRes = await request
+    .get('/api/compliance/data-classes')
+    .set('Cookie', adminCookie);
+  assert.equal(dataClassesRes.status, 200);
+  assert.equal(dataClassesRes.body.ok, true);
+  assert.ok(dataClassesRes.body.dataClasses);
+  assert.ok(dataClassesRes.body.minimizationRule.includes('Data minimization strictly enforced'));
+  for (const dc of expectedDataClasses) {
+    assert.ok(dataClassesRes.body.dataClasses[dc], `API output must include rule for ${dc}`);
+  }
+
+  // 3. Verify role access scoping on /api/compliance/data-classes (guardian or viewer should be forbidden)
+  const guardianCookie = await login('tomi.adeyemi@guardian.northfield.school', 'GatewiseDemo!26');
+  const guardianForbiddenRes = await request
+    .get('/api/compliance/data-classes')
+    .set('Cookie', guardianCookie);
+  assert.equal(guardianForbiddenRes.status, 403);
+
+  // 4. Verify data minimization: logs and notification records avoid copying entire pupil record
+  // Fetch an attendance event
+  const sampleEvent = await AttendanceEvent.findOne().lean();
+  assert.ok(sampleEvent);
+  // Ensure full pupil object is NOT embedded (only pupilId / pupil reference)
+  assert.equal(typeof sampleEvent.pupilId, 'string');
+  assert.equal(sampleEvent.guardian, undefined);
+  assert.equal(sampleEvent.guardianPhone, undefined);
+
+  // Fetch an audit entry
+  const sampleAudit = await AuditEntry.findOne().lean();
+  assert.ok(sampleAudit);
+  assert.ok(sampleAudit.action);
+  assert.equal(sampleAudit.className, undefined);
+  assert.equal(sampleAudit.photo, undefined);
+
+  // Fetch a notification
+  const sampleNotif = await Notification.findOne().lean();
+  if (sampleNotif) {
+    assert.equal(typeof sampleNotif.pupilId, 'string');
+    assert.equal(sampleNotif.photo, undefined);
+    assert.equal(sampleNotif.address, undefined);
+  }
+
+  // 5. Test applyRetentionRules directly
+  const retentionOutcome = await applyRetentionRules({
+    attendanceRetentionDays: 365,
+    auditLogRetentionDays: 730,
+    notificationRetentionDays: 90,
+    pickupContactRetentionDays: 365,
+    cardRetentionDays: 730
+  });
+  assert.ok(retentionOutcome.AttendanceEvent);
+  assert.ok(retentionOutcome.AuditEntry);
+  assert.ok(retentionOutcome.Notification);
+  assert.ok(retentionOutcome.PickupContact);
+  assert.ok(retentionOutcome.Card);
+  assert.equal(typeof retentionOutcome.AttendanceEvent.pruned, 'number');
+  assert.equal(typeof retentionOutcome.AuditEntry.pruned, 'number');
+
+  // 6. Test retention purge endpoint applies across domain data classes
+  const purgeRes = await request
+    .post('/api/admin/retention/purge')
+    .set('Cookie', adminCookie);
+  assert.equal(purgeRes.status, 200);
+  assert.equal(purgeRes.body.ok, true);
+  assert.ok(purgeRes.body.purged.dataClasses);
+  assert.ok(purgeRes.body.purged.dataClasses.AttendanceEvent);
+  assert.ok(purgeRes.body.purged.dataClasses.AuditEntry);
+});
