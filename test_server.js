@@ -6,18 +6,29 @@ const mongoose = require('mongoose');
 
 const { app, seedInitialData } = require('./server');
 const {
-  User,
+  School,
+  Campus,
   Pupil,
-  PickupRequest,
-  AttendanceEvent,
-  AuditEntry,
   Guardian,
   PupilGuardian,
-  CorrectionRequest,
+  PickupContact,
   Card,
+  StaffUser,
+  User,
   Device,
+  AttendanceEvent,
+  Notification,
+  AuditEntry,
+  Session,
+  PickupRequest,
+  SchoolSetting,
+  CorrectionRequest,
+  SchoolClass,
+  NotificationTemplate,
+  EscalationContact,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  DATA_CLASS_RULES
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
@@ -2164,4 +2175,122 @@ test('Security and Safeguarding: Rate-limiting, unusual pattern alerting, privil
   const reissueAudit = await AuditEntry.findOne({ action: 'reissue_pupil_card', objectId: reissueRes.body.card.id });
   assert.ok(reissueAudit);
   assert.ok(reissueAudit.reason.includes('...'), 'Raw token in audit logs should be masked with truncation');
+});
+
+test('Data Model Specifications: All 12 data classes, field schemas, data minimization, and retention/access rules', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Verify DATA_CLASS_RULES covers all 12 requested entities
+  const requiredDataClasses = [
+    'School', 'Campus', 'Pupil', 'Guardian', 'PupilGuardian',
+    'PickupContact', 'Card', 'StaffUser', 'Device',
+    'AttendanceEvent', 'Notification', 'AuditEntry'
+  ];
+  for (const dc of requiredDataClasses) {
+    assert.ok(DATA_CLASS_RULES[dc], `DATA_CLASS_RULES must specify rules for ${dc}`);
+    assert.ok(DATA_CLASS_RULES[dc].classification);
+    assert.ok(DATA_CLASS_RULES[dc].accessRoles);
+    assert.ok(DATA_CLASS_RULES[dc].privacyMinimization);
+  }
+
+  // 2. Query /api/admin/retention/data-classes endpoint
+  const dataClassRes = await request
+    .get('/api/admin/retention/data-classes')
+    .set('Cookie', adminCookie);
+  assert.equal(dataClassRes.status, 200);
+  assert.ok(dataClassRes.body.ok);
+  assert.ok(dataClassRes.body.dataClassRules.School);
+  assert.ok(dataClassRes.body.dataClassRules.PickupContact);
+  assert.ok(dataClassRes.body.dataClassRules.StaffUser);
+
+  // 3. School model: name, policy settings, timezone, notification configuration
+  const schoolRes = await request
+    .get('/api/admin/school')
+    .set('Cookie', adminCookie);
+  assert.equal(schoolRes.status, 200);
+  assert.ok(schoolRes.body.school);
+  assert.equal(schoolRes.body.school.name, 'Northfield Academy');
+  assert.ok(schoolRes.body.school.timezone);
+  assert.ok(schoolRes.body.school.policySettings);
+  assert.ok(schoolRes.body.school.notificationConfiguration);
+
+  // 4. PickupContact model: pupil, name, relationship, verification data/reference, effective dates, status
+  const pupil = await Pupil.findOne({ id: 'NF-1042' });
+  assert.ok(pupil);
+  const contactsRes = await request
+    .get(`/api/pupils/${pupil.id}/pickup-contacts`)
+    .set('Cookie', adminCookie);
+  assert.equal(contactsRes.status, 200);
+  assert.ok(contactsRes.body.contacts.length >= 1);
+  const pc = contactsRes.body.contacts[0];
+  assert.equal(pc.pupilId, pupil.id);
+  assert.ok(pc.name);
+  assert.ok(pc.relationship);
+  assert.ok(pc.verificationData);
+  assert.ok(pc.effectiveDates);
+  assert.ok(pc.status);
+
+  // Create new PickupContact via API
+  const newPcRes = await request
+    .post(`/api/pupils/${pupil.id}/pickup-contacts`)
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Uncle Tunde',
+      relationship: 'Uncle',
+      phone: '+44 7700 900555',
+      verificationData: { method: 'ID card checked', idDocumentGuidance: 'National ID verified' },
+      effectiveDates: { until: '2027-12-31' },
+      permissionType: 'time_limited'
+    });
+  assert.equal(newPcRes.status, 201);
+  assert.equal(newPcRes.body.contact.name, 'Uncle Tunde');
+  assert.equal(newPcRes.body.contact.relationship, 'Uncle');
+
+  // 5. Verify data minimization: Notification and AuditEntry avoid copying the entire pupil record
+  // Trigger arrival event
+  const testPid = 'NF-1315';
+  await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({ pupilId: testPid, type: 'arrival' });
+
+  const notif = await Notification.findOne({ pupilId: testPid }).sort({ createdAt: -1 });
+  assert.ok(notif);
+  // Ensure Notification only stores minimal fields and does NOT contain entire pupil document
+  assert.equal(notif.pupilId, testPid);
+  assert.equal(notif.name, undefined);
+  assert.equal(notif.initials, undefined);
+  assert.equal(notif.color, undefined);
+  assert.equal(notif.collectors, undefined);
+  assert.equal(notif.guardianPhone, undefined);
+
+  // Check AuditEntry for this event
+  const audit = await AuditEntry.findOne({ action: 'record_arrival', objectId: notif.eventId });
+  assert.ok(audit);
+  assert.equal(audit.initials, undefined);
+  assert.equal(audit.collectors, undefined);
+  assert.equal(audit.photo, undefined);
+
+  // 6. Test retention purge across multiple data classes (events, audit, notifications, expired pickup contacts)
+  // Create an expired pickup contact in the past
+  const pastDate = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000);
+  await PickupContact.create({
+    id: `pc-expired-${Date.now()}`,
+    pupilId: testPid,
+    name: 'Old Collector',
+    relationship: 'Temporary Neighbor',
+    status: 'expired',
+    updatedAt: pastDate
+  });
+
+  const purgeRes = await request
+    .post('/api/admin/retention/purge')
+    .set('Cookie', adminCookie)
+    .send({});
+  assert.equal(purgeRes.status, 200);
+  assert.ok(purgeRes.body.purged);
+  assert.ok(purgeRes.body.purged.attendanceRecords !== undefined);
+  assert.ok(purgeRes.body.purged.auditEntries !== undefined);
+  assert.ok(purgeRes.body.purged.notifications !== undefined);
+  assert.ok(purgeRes.body.purged.pickupContacts !== undefined);
 });

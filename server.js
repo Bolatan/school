@@ -8,25 +8,29 @@ const { parse } = require('csv-parse/sync');
 const XLSX = require('xlsx');
 
 const {
-  User,
+  School,
+  Campus,
   Pupil,
-  PickupRequest,
+  Guardian,
+  PupilGuardian,
+  PickupContact,
+  Card,
+  StaffUser,
+  User,
+  Device,
   AttendanceEvent,
   Notification,
   AuditEntry,
   Session,
+  PickupRequest,
   SchoolSetting,
-  Guardian,
-  PupilGuardian,
   CorrectionRequest,
-  Card,
-  Campus,
   SchoolClass,
-  Device,
   NotificationTemplate,
   EscalationContact,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  DATA_CLASS_RULES
 } = require('./models');
 const {
   DEMO_EMAIL,
@@ -1193,18 +1197,152 @@ app.put('/api/admin/escalation-contacts/:id', requireAuth(['admin']), async (req
 });
 
 // 6. RETENTION SETTINGS & DATA RETENTION PRUNING
+// Expose data class rules and access matrix
+app.get('/api/admin/retention/data-classes', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    res.json({
+      ok: true,
+      dataClassRules: DATA_CLASS_RULES
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// School entity endpoint
+app.get('/api/admin/school', requireAuth(['admin', 'manager', 'viewer', 'guardian']), async (req, res) => {
+  try {
+    let school = await School.findOne({ id: 'school-main' });
+    if (!school) {
+      school = await School.findOne();
+    }
+    res.json({ ok: true, school });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/admin/school', requireAuth(['admin']), async (req, res) => {
+  try {
+    const { name, policySettings, timezone, notificationConfiguration } = req.body;
+    let school = await School.findOne({ id: 'school-main' });
+    if (!school) {
+      school = await School.create({
+        id: 'school-main',
+        name: name || 'Northfield Academy',
+        timezone: timezone || 'Europe/London',
+        policySettings: policySettings || {},
+        notificationConfiguration: notificationConfiguration || {}
+      });
+    } else {
+      if (name) school.name = String(name).trim();
+      if (timezone) school.timezone = String(timezone).trim();
+      if (policySettings) school.policySettings = { ...school.policySettings, ...policySettings };
+      if (notificationConfiguration) school.notificationConfiguration = { ...school.notificationConfiguration, ...notificationConfiguration };
+      await school.save();
+    }
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'update_school',
+      objectType: 'school',
+      objectId: school.id,
+      reason: `Updated school ${school.name}`,
+      createdAt: new Date()
+    });
+
+    res.json({ ok: true, school });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PickupContact endpoints
+app.get('/api/pupils/:pupilId/pickup-contacts', requireAuth(['admin', 'manager', 'guardian']), async (req, res) => {
+  try {
+    const pupilId = req.params.pupilId.toUpperCase().trim();
+    if (req.user.role === 'guardian') {
+      const link = await PupilGuardian.findOne({ guardianId: req.user.guardianId, pupilId, status: { $ne: 'revoked' } });
+      if (!link) {
+        return res.status(403).json({ error: 'You are only authorized to view pickup contacts for linked pupils.' });
+      }
+    }
+    const contacts = await PickupContact.find({ pupilId }).sort({ createdAt: -1 });
+    res.json({ ok: true, contacts });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/pupils/:pupilId/pickup-contacts', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pupilId = req.params.pupilId.toUpperCase().trim();
+    const { name, relationship, phone, email, verificationData, effectiveDates, permissionType } = req.body;
+    if (!name || !relationship) {
+      return res.status(400).json({ error: 'Name and relationship are required.' });
+    }
+
+    const pupil = await Pupil.findOne({ id: pupilId, active: true });
+    if (!pupil) return res.status(404).json({ error: 'Pupil not found.' });
+
+    const contactId = `pc-${pupilId}-${Date.now()}`;
+    const newContact = await PickupContact.create({
+      id: contactId,
+      pupil: pupil._id,
+      pupilId,
+      name: String(name).trim(),
+      relationship: String(relationship).trim(),
+      relation: String(relationship).trim(),
+      phone: phone ? String(phone).trim() : '',
+      email: email ? String(email).trim().toLowerCase() : '',
+      verificationData: verificationData || { method: 'Photo matched', idDocumentGuidance: 'Government photo ID check required' },
+      effectiveDates: effectiveDates || { startDate: new Date(), until: 'Ongoing' },
+      permissionType: permissionType || 'ongoing',
+      status: 'active',
+      active: true,
+      createdBy: req.user.name
+    });
+
+    // Also sync to pupil.collectors for backwards compatibility
+    const nextColId = await getNextCollectorId(pupil);
+    pupil.collectors.push({
+      id: nextColId,
+      name: newContact.name,
+      relation: newContact.relationship,
+      until: newContact.effectiveDates?.until || 'Ongoing',
+      active: true
+    });
+    await pupil.save();
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'create_pickup_contact',
+      objectType: 'pickup_contact',
+      objectId: newContact.id,
+      reason: `Added pickup contact ${newContact.name} (${newContact.relationship}) for ${pupilId}`,
+      createdAt: new Date()
+    });
+
+    res.status(201).json({ ok: true, contact: newContact });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/admin/retention', requireAuth(['admin']), async (req, res) => {
   try {
     const setting = await SchoolSetting.findOne({ key: 'retentionSettings' });
     const retentionSettings = setting ? setting.val : {
       attendanceRetentionDays: 365,
       auditLogRetentionDays: 730,
+      notificationRetentionDays: 90,
+      pickupContactRetentionDays: 365,
       offlineQueueTtlHours: 24,
       sessionTimeoutMinutes: 480,
       autoPurgeEnabled: true,
       lastPurgedAt: null
     };
-    res.json({ retentionSettings });
+    res.json({ retentionSettings, dataClassRules: DATA_CLASS_RULES });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1248,14 +1386,33 @@ app.post('/api/admin/retention', requireAuth(['admin']), async (req, res) => {
 app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) => {
   try {
     const setting = await SchoolSetting.findOne({ key: 'retentionSettings' });
-    const cfg = setting ? setting.val : { attendanceRetentionDays: 365, auditLogRetentionDays: 730 };
+    const cfg = setting ? setting.val : {
+      attendanceRetentionDays: 365,
+      auditLogRetentionDays: 730,
+      notificationRetentionDays: 90,
+      pickupContactRetentionDays: 365
+    };
     const now = Date.now();
 
-    const attendanceCutoff = new Date(now - cfg.attendanceRetentionDays * 24 * 60 * 60 * 1000);
-    const auditCutoff = new Date(now - cfg.auditLogRetentionDays * 24 * 60 * 60 * 1000);
+    const attendanceRetentionDays = Number(cfg.attendanceRetentionDays) || 365;
+    const auditLogRetentionDays = Number(cfg.auditLogRetentionDays) || 730;
+    const notificationRetentionDays = Number(cfg.notificationRetentionDays) || 90;
+    const pickupContactRetentionDays = Number(cfg.pickupContactRetentionDays) || 365;
+
+    const attendanceCutoff = new Date(now - attendanceRetentionDays * 24 * 60 * 60 * 1000);
+    const auditCutoff = new Date(now - auditLogRetentionDays * 24 * 60 * 60 * 1000);
+    const notificationCutoff = new Date(now - notificationRetentionDays * 24 * 60 * 60 * 1000);
+    const pickupContactCutoff = new Date(now - pickupContactRetentionDays * 24 * 60 * 60 * 1000);
 
     const attendanceDeleted = await AttendanceEvent.deleteMany({ timestamp: { $lt: attendanceCutoff } });
     const auditDeleted = await AuditEntry.deleteMany({ createdAt: { $lt: auditCutoff } });
+    const notificationDeleted = await Notification.deleteMany({ createdAt: { $lt: notificationCutoff } });
+    const pickupContactsDeleted = await PickupContact.deleteMany({
+      $or: [
+        { status: 'expired', updatedAt: { $lt: pickupContactCutoff } },
+        { status: 'revoked', revokedAt: { $lt: pickupContactCutoff } }
+      ]
+    });
 
     // Update lastPurgedAt in retention settings
     if (setting) {
@@ -1268,7 +1425,7 @@ app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) 
       action: 'execute_retention_purge',
       objectType: 'retention_policy',
       objectId: 'purge',
-      reason: `Purged ${attendanceDeleted.deletedCount} attendance events (<${attendanceCutoff.toISOString()}) and ${auditDeleted.deletedCount} audit entries (<${auditCutoff.toISOString()})`,
+      reason: `Purged ${attendanceDeleted.deletedCount} attendance, ${auditDeleted.deletedCount} audit, ${notificationDeleted.deletedCount} notifications, ${pickupContactsDeleted.deletedCount} pickup contacts`,
       createdAt: new Date()
     });
 
@@ -1278,8 +1435,12 @@ app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) 
       purged: {
         attendanceRecords: attendanceDeleted.deletedCount,
         auditEntries: auditDeleted.deletedCount,
+        notifications: notificationDeleted.deletedCount,
+        pickupContacts: pickupContactsDeleted.deletedCount,
         attendanceCutoff: attendanceCutoff.toISOString(),
-        auditCutoff: auditCutoff.toISOString()
+        auditCutoff: auditCutoff.toISOString(),
+        notificationCutoff: notificationCutoff.toISOString(),
+        pickupContactCutoff: pickupContactCutoff.toISOString()
       }
     });
   } catch (err) {
