@@ -167,12 +167,14 @@
 
     if (user.role === 'guardian') {
       $('[data-page="dashboard"]').classList.add('hidden');
+      $('[data-page="liveReports"]')?.classList.add('hidden');
       $('[data-page="pupils"]').classList.add('hidden');
       $('[data-page="pickup"]').classList.add('hidden');
       $('[data-page="activity"]').classList.add('hidden');
       navigate('guardianPortal');
     } else {
       $('[data-page="dashboard"]').classList.remove('hidden');
+      $('[data-page="liveReports"]')?.classList.remove('hidden');
       $('[data-page="pupils"]').classList.remove('hidden');
       $('[data-page="pickup"]').classList.remove('hidden');
       $('[data-page="activity"]').classList.remove('hidden');
@@ -196,13 +198,14 @@
     if(page==='scan'&&(signedInUser?.role==='viewer'||signedInUser?.role==='guardian')){toast('Access restricted.','!');return}
     $$('.page').forEach(p=>p.classList.toggle('active',p.id===`page-${page}`));
     $$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
-    $('#crumbPage').textContent=({dashboard:'Overview',scan:'Scan & log',pupils:'Pupils',pickup:'Pickup approvals',activity:'Activity log',users:'User management',admin:'Administration',guardianPortal:'My Children'})[page]||'Overview';
+    $('#crumbPage').textContent=({dashboard:'Overview',liveReports:'Live views & Reports',scan:'Scan & log',pupils:'Pupils',pickup:'Pickup approvals',activity:'Activity log',users:'User management',admin:'Administration',guardianPortal:'My Children'})[page]||'Overview';
     $('#sidebar').classList.remove('open');
     window.scrollTo(0,0);
     if(page==='users')renderUsers();
     if(page==='admin')loadAdminWorkspace();
     if(page==='guardianPortal')loadGuardianPortal();
     if(page==='pickup')loadAdminCorrections();
+    if(page==='liveReports')loadLiveReports();
   }
   function render(){renderDashboard();renderPupils();renderPickup();renderActivity();if(signedInUser?.role==='guardian')loadGuardianPortal();}
   function updateOfflineStatusUI() {
@@ -3446,6 +3449,214 @@
       toast(err.message, '!');
     }
   }
+
+  // Live Reports & Views Implementation
+  async function loadLiveReports() {
+    try {
+      const campus = $('#liveFilterCampus')?.value || 'All campuses';
+      const className = $('#liveFilterClass')?.value || 'All classes';
+      const session = $('#liveFilterSession')?.value || 'All sessions';
+      const status = $('#liveFilterStatus')?.value || 'all';
+      const pupil = $('#liveFilterPupil')?.value || '';
+
+      const queryParams = new URLSearchParams();
+      if (campus && campus !== 'All campuses') queryParams.set('campus', campus);
+      if (className && className !== 'All classes') queryParams.set('className', className);
+      if (session && session !== 'All sessions') queryParams.set('session', session);
+      if (status && status !== 'all') queryParams.set('status', status);
+      if (pupil) queryParams.set('pupil', pupil);
+
+      const res = await api(`/api/reports/live?${queryParams.toString()}`);
+      if (!res.ok) return;
+
+      const { summary, pupils: livePupils } = res;
+      $('#liveExpectedCount').textContent = summary.expected;
+      $('#liveArrivedCount').textContent = summary.arrived;
+      $('#liveDepartedCount').textContent = summary.departed;
+      $('#liveNotYetArrivedCount').textContent = summary.notYetArrived;
+      $('#liveStillOnSiteCount').textContent = summary.stillOnSite;
+      $('#liveExceptionsCount').textContent = summary.exceptions;
+
+      // Populate class filter dropdown options if empty
+      const classSelect = $('#liveFilterClass');
+      if (classSelect && classSelect.options.length <= 1 && pupils.length) {
+        const classNames = [...new Set(pupils.map(p => p.className))].sort();
+        classNames.forEach(c => {
+          const opt = document.createElement('option');
+          opt.value = c;
+          opt.textContent = c;
+          classSelect.appendChild(opt);
+        });
+      }
+
+      $('#liveResultCount').textContent = `Showing ${livePupils.length} pupils`;
+
+      const tbody = $('#liveReportRows');
+      if (!tbody) return;
+
+      if (!livePupils.length) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;padding:24px;color:#94a3b8">No pupils match the selected live filters.</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = livePupils.map(p => {
+        let statusBadge = '<span class="status-pill status-neutral">Not arrived</span>';
+        if (p.liveStatus === 'departed') {
+          statusBadge = '<span class="status-pill status-departed">Departed</span>';
+        } else if (p.liveStatus === 'still_on_site' || p.liveStatus === 'arrived') {
+          statusBadge = '<span class="status-pill status-present">On campus</span>';
+        }
+        if (p.hasException) {
+          statusBadge += ' <span class="status-pill" style="background:#fee2e2;color:#b91c1c;margin-left:4px">Exception</span>';
+        }
+
+        // Indicators
+        const indicators = [];
+        if (p.indicators.manual) {
+          indicators.push('<span class="manual-tag">Manual</span>');
+        }
+        if (p.indicators.offline) {
+          indicators.push('<span class="manual-tag" style="background:#fef3c7;color:#92400e;border-color:#fde68a">Offline</span>');
+        }
+        if (p.indicators.notificationOutcome === 'delivered') {
+          indicators.push('<span title="Guardian notification delivered" style="color:#16a34a;font-weight:700">✓ Sent</span>');
+        } else if (p.indicators.notificationOutcome === 'accepted_by_provider') {
+          indicators.push('<span title="Accepted by SMS/Push provider" style="color:#0284c7;font-weight:600">◷ Provider</span>');
+        } else if (p.indicators.notificationOutcome === 'failed') {
+          indicators.push('<span title="All notification channels failed" style="color:#dc2626;font-weight:700">⚠ Notif Failed</span>');
+        } else if (p.indicators.notificationOutcome === 'suppressed') {
+          indicators.push('<span title="Notification suppressed per guardian preferences" style="color:#94a3b8">Suppressed</span>');
+        }
+
+        const latestDetails = p.latestEvent ? `
+          <small style="color:#475569">
+            <b>${escapeHtml(p.latestEvent.type)}</b> @ ${escapeHtml(p.latestEvent.time)}
+            ${p.latestEvent.collector ? `<br>Collector: ${escapeHtml(p.latestEvent.collector)}` : ''}
+            ${p.latestEvent.reason ? `<br>Reason: ${escapeHtml(p.latestEvent.reason)}` : ''}
+          </small>
+        ` : '<span style="color:#94a3b8">—</span>';
+
+        return `
+          <tr>
+            <td><b>${escapeHtml(p.pupilName)}</b><br><small style="color:#8a8fa3">${escapeHtml(p.pupilId)} · ${escapeHtml(p.guardian)}</small></td>
+            <td>${escapeHtml(p.className)}</td>
+            <td>${statusBadge}</td>
+            <td>${escapeHtml(p.firstArrivalTime || '—')}</td>
+            <td>${escapeHtml(p.lastDepartureTime || '—')}</td>
+            <td>${indicators.length ? indicators.join(' ') : '—'}</td>
+            <td>${latestDetails}</td>
+          </tr>
+        `;
+      }).join('');
+    } catch (err) {
+      toast(err.message, '!');
+    }
+  }
+
+  // Export Attendance Report Modal
+  async function openExportAttendanceReportModal() {
+    if (signedInUser?.role !== 'admin' && signedInUser?.role !== 'manager') {
+      toast('Only administrators and managers can export attendance reports.', '!');
+      return;
+    }
+    openModal(`
+      <h2 id="modalTitle">Export Attendance Report</h2>
+      <p class="modal-intro">Export auditable attendance records with role checks and mandatory audit logging.</p>
+      <form id="exportAttendanceForm" class="form-grid">
+        <div class="form-field">
+          <label>Export Format</label>
+          <select name="format" class="gate-dropdown" style="width:100%">
+            <option value="csv">CSV (Spreadsheet)</option>
+            <option value="json">JSON (Data archive)</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Campus</label>
+          <select name="campus" class="gate-dropdown" style="width:100%">
+            <option value="All campuses">All campuses</option>
+            <option value="Primary campus">Primary campus</option>
+            <option value="Secondary campus">Secondary campus</option>
+          </select>
+        </div>
+        <div class="form-field full">
+          <label>Date (YYYY-MM-DD)</label>
+          <input name="date" type="text" value="${today}" placeholder="e.g. 2026-11-07">
+        </div>
+        <p class="form-help full" style="font-size:10px;color:#64748b">
+          Security policy: Attendance exports are tracked in the school audit log with user timestamp and parameters.
+        </p>
+        <div class="modal-actions">
+          <button type="button" class="button button-outline" id="cancelExportReport">Cancel</button>
+          <button type="submit" class="button button-primary">Download Export ↓</button>
+        </div>
+      </form>
+    `);
+    $('#cancelExportReport').onclick = closeModal;
+    $('#exportAttendanceForm').onsubmit = async ev => {
+      ev.preventDefault();
+      const f = new FormData(ev.currentTarget);
+      const format = f.get('format') || 'csv';
+      const campus = f.get('campus') || 'All campuses';
+      const date = f.get('date') || today;
+
+      try {
+        if (format === 'csv') {
+          const response = await fetch('/api/reports/attendance/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ format: 'csv', campus, date })
+          });
+          if (!response.ok) {
+            const errJson = await response.json().catch(() => ({}));
+            throw new Error(errJson.error || 'Export failed');
+          }
+          const blob = await response.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `attendance-report-${date}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          closeModal();
+          toast('Attendance report CSV downloaded.');
+        } else {
+          const res = await api('/api/reports/attendance/export', { format: 'json', campus, date });
+          const blob = new Blob([JSON.stringify(res, null, 2)], { type: 'application/json' });
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `attendance-report-${date}.json`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          closeModal();
+          toast(`Attendance report JSON downloaded (${res.count} records).`);
+        }
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  // Bind live report events
+  $('#liveRefreshBtn')?.addEventListener('click', loadLiveReports);
+  $('#exportAttendanceReportBtn')?.addEventListener('click', openExportAttendanceReportModal);
+  $('#liveFilterCampus')?.addEventListener('change', loadLiveReports);
+  $('#liveFilterClass')?.addEventListener('change', loadLiveReports);
+  $('#liveFilterSession')?.addEventListener('change', loadLiveReports);
+  $('#liveFilterStatus')?.addEventListener('change', loadLiveReports);
+  $('#liveFilterPupil')?.addEventListener('input', loadLiveReports);
+
+  $$('[data-live-status-card]').forEach(card => {
+    card.addEventListener('click', () => {
+      const status = card.dataset.liveStatusCard;
+      if ($('#liveFilterStatus')) {
+        $('#liveFilterStatus').value = status;
+        loadLiveReports();
+      }
+    });
+  });
 
   $('#dailyReconcileReportBtn')?.addEventListener('click', openDailyReconciliationModal);
   $('#viewProcessorsBtn')?.addEventListener('click', openProcessorsModal);

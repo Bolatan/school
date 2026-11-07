@@ -7,10 +7,118 @@
 <body><div class="auth-screen" id="authScreen"><form class="auth-card" id="loginForm"><a class="brand auth-brand"><span class="brand-mark">G</span><span><b>gatewise</b><small>SCHOOL SAFETY</small></span></a><div class="eyebrow">SCHOOL & GUARDIAN PORTAL</div><h1>Welcome back</h1><p class="auth-copy">Sign in to manage today’s school arrivals and dismissals.</p><label for="loginEmail">Work or Guardian email</label><input id="loginEmail" name="email" type="email" autocomplete="username" required><label for="loginPassword">Password</label><input id="loginPassword" name="password" type="password" autocomplete="current-password" required><div class="auth-error hidden" id="loginError"></div><button class="button button-primary auth-submit" type="submit">Sign in <span>→</span></button><div class="demo-login" style="margin-top:10px"><b>Demo Accounts</b><div>Staff Admin: <code>admin@northfield.school</code> / <code>GatewiseDemo!26</code></div><div style="margin-top:3px">Demo Guardian: <code>tomi.adeyemi@guardian.northfield.school</code> / <code>GatewiseDemo!26</code></div><div style="margin-top:6px;border-top:1px dashed #e2e8f0;padding-top:6px;display:flex;justify-content:space-between;align-items:center"><span>Have a guardian invite code?</span><button type="button" class="text-link" id="startOnboardingFromLogin" style="font-size:10px;color:#4f46e5;font-weight:700">Enter Invite Code ↗</button></div></div></form></div><div class="app-shell">
   <aside class="sidebar" id="sidebar"><a class="brand" href="#dashboard"><span class="brand-mark">G</span><span><b>gatewise</b><small>SCHOOL SAFETY</small></span></a>
     <div class="school-switch"><div class="school-icon">N</div><div><strong>Northfield Academy</strong><small>Primary campus</small></div><span class="chevron">⌄</span></div>
-    <div class="nav-label">WORKSPACE</div><nav class="main-nav" aria-label="Main navigation"><button class="nav-item active" data-page="dashboard"><span class="nav-icon">▦</span>Overview</button><button class="nav-item" data-page="scan"><span class="nav-icon">▧</span>Scan & log <span class="nav-badge">LIVE</span></button><button class="nav-item" data-page="pupils"><span class="nav-icon">♧</span>Pupils</button><button class="nav-item" data-page="pickup"><span class="nav-icon">♙</span>Pickup approvals</button><button class="nav-item" data-page="activity"><span class="nav-icon">◷</span>Activity log</button><button class="nav-item hidden" id="guardianPortalNav" data-page="guardianPortal"><span class="nav-icon">♡</span>My Children</button><button class="nav-item hidden" id="adminNav" data-page="admin"><span class="nav-icon">⚙</span>Administration</button><button class="nav-item hidden" id="userNav" data-page="users"><span class="nav-icon">♙</span>User management</button></nav>
+    <div class="nav-label">WORKSPACE</div><nav class="main-nav" aria-label="Main navigation"><button class="nav-item active" data-page="dashboard"><span class="nav-icon">▦</span>Overview</button><button class="nav-item" data-page="liveReports"><span class="nav-icon">📊</span>Live Reports</button><button class="nav-item" data-page="scan"><span class="nav-icon">▧</span>Scan & log <span class="nav-badge">LIVE</span></button><button class="nav-item" data-page="pupils"><span class="nav-icon">♧</span>Pupils</button><button class="nav-item" data-page="pickup"><span class="nav-icon">♙</span>Pickup approvals</button><button class="nav-item" data-page="activity"><span class="nav-icon">◷</span>Activity log</button><button class="nav-item hidden" id="guardianPortalNav" data-page="guardianPortal"><span class="nav-icon">♡</span>My Children</button><button class="nav-item hidden" id="adminNav" data-page="admin"><span class="nav-icon">⚙</span>Administration</button><button class="nav-item hidden" id="userNav" data-page="users"><span class="nav-icon">♙</span>User management</button></nav>
     <div class="sidebar-bottom"><div class="help-card"><span class="help-icon">?</span><strong>Need a hand?</strong><p>Check the quick guide for your gate team.</p><button id="helpBtn">Open quick guide <span>↗</span></button></div><div class="profile"><div class="avatar avatar-blue">AM</div><div><strong>Amara Okafor</strong><small>School administrator</small></div><button class="more-button" aria-label="Profile menu">···</button></div></div>
   </aside>
   <main class="main-area"><header class="topbar"><button class="mobile-menu" id="mobileMenu" aria-label="Open menu">☰</button><div class="breadcrumb">Northfield Academy <span>/</span> <b id="crumbPage">Overview</b></div><div class="top-actions"><span class="connection"><i></i> MongoDB connected</span><button class="icon-button" id="notificationsBtn" aria-label="Notifications">♧<span class="notification-dot"></span></button><button class="today-chip" id="todayLabel"></button></div></header>
+    <section class="page" id="page-liveReports">
+      <div class="page-heading">
+        <div>
+          <div class="eyebrow">DASHBOARDS & REPORTS <span class="live-label"><i></i> LIVE</span></div>
+          <h1>Live views & Attendance reports</h1>
+          <p>Real-time headcount, movement breakdowns, indicators, and traceable exports.</p>
+        </div>
+        <div class="heading-actions">
+          <button class="button button-outline" id="liveRefreshBtn">↺ Refresh</button>
+          <button class="button button-primary" id="exportAttendanceReportBtn">↓ Export Attendance Report</button>
+        </div>
+      </div>
+
+      <div class="stat-grid" style="grid-template-columns: repeat(6, 1fr); margin-bottom: 20px;">
+        <article class="stat-card" style="padding:14px;cursor:pointer" data-live-status-card="expected">
+          <div class="stat-top"><span>Expected pupils</span><span class="stat-icon mint">♙</span></div>
+          <div class="stat-value" id="liveExpectedCount">0</div>
+          <small style="color:#64748b">Active roster</small>
+        </article>
+        <article class="stat-card" style="padding:14px;cursor:pointer" data-live-status-card="arrived">
+          <div class="stat-top"><span>Arrived</span><span class="stat-icon blue">↘</span></div>
+          <div class="stat-value" id="liveArrivedCount">0</div>
+          <small style="color:#64748b">Checked in</small>
+        </article>
+        <article class="stat-card" style="padding:14px;cursor:pointer" data-live-status-card="departed">
+          <div class="stat-top"><span>Departed</span><span class="stat-icon lilac">↗</span></div>
+          <div class="stat-value" id="liveDepartedCount">0</div>
+          <small style="color:#64748b">Handed over</small>
+        </article>
+        <article class="stat-card" style="padding:14px;cursor:pointer" data-live-status-card="not_yet_arrived">
+          <div class="stat-top"><span>Not yet arrived</span><span class="stat-icon amber">◷</span></div>
+          <div class="stat-value" id="liveNotYetArrivedCount">0</div>
+          <small style="color:#64748b">Pending gate</small>
+        </article>
+        <article class="stat-card" style="padding:14px;cursor:pointer" data-live-status-card="still_on_site">
+          <div class="stat-top"><span>Still on site</span><span class="stat-icon mint">🏢</span></div>
+          <div class="stat-value" id="liveStillOnSiteCount">0</div>
+          <small style="color:#64748b">In building</small>
+        </article>
+        <article class="stat-card" style="padding:14px;cursor:pointer" data-live-status-card="exceptions">
+          <div class="stat-top"><span>Exceptions</span><span class="stat-icon amber" style="background:#fee2e2;color:#b91c1c">!</span></div>
+          <div class="stat-value" id="liveExceptionsCount">0</div>
+          <small style="color:#64748b">Requires review</small>
+        </article>
+      </div>
+
+      <section class="panel">
+        <div class="panel-heading" style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px">
+          <div>
+            <h2>Pupil Attendance Timeline & Status</h2>
+            <p>Filter by campus, class, session, pupil, event type, and status</p>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <select id="liveFilterCampus" class="gate-dropdown" style="padding:4px 8px;font-size:11px">
+              <option value="All campuses">All campuses</option>
+              <option value="Primary campus">Primary campus</option>
+              <option value="Secondary campus">Secondary campus</option>
+            </select>
+            <select id="liveFilterClass" class="gate-dropdown" style="padding:4px 8px;font-size:11px">
+              <option value="All classes">All classes</option>
+            </select>
+            <select id="liveFilterSession" class="gate-dropdown" style="padding:4px 8px;font-size:11px">
+              <option value="All sessions">All sessions</option>
+              <option value="Morning Arrival">Morning Arrival</option>
+              <option value="Standard Day">Standard Day</option>
+              <option value="Afternoon Dismissal">Afternoon Dismissal</option>
+            </select>
+            <select id="liveFilterStatus" class="gate-dropdown" style="padding:4px 8px;font-size:11px">
+              <option value="all">All statuses</option>
+              <option value="expected">Expected</option>
+              <option value="arrived">Arrived</option>
+              <option value="departed">Departed</option>
+              <option value="not_yet_arrived">Not yet arrived</option>
+              <option value="still_on_site">Still on site</option>
+              <option value="exceptions">Exceptions</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="filter-row" style="margin-top:10px">
+          <div class="search-box">
+            <span>⌕</span>
+            <input id="liveFilterPupil" placeholder="Filter by pupil name or ID..." aria-label="Search pupils in live view">
+          </div>
+          <span class="result-count" id="liveResultCount">Loading live data...</span>
+        </div>
+
+        <div class="table-wrap">
+          <table class="directory-table">
+            <thead>
+              <tr>
+                <th>PUPIL</th>
+                <th>CLASS</th>
+                <th>STATUS</th>
+                <th>ARRIVAL</th>
+                <th>DEPARTURE</th>
+                <th>INDICATORS</th>
+                <th>LATEST DETAILS</th>
+              </tr>
+            </thead>
+            <tbody id="liveReportRows">
+              <tr><td colspan="7" style="text-align:center;padding:20px;color:#94a3b8">Loading real-time attendance...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </section>
+
     <section class="page active" id="page-dashboard"><div class="page-heading"><div><div class="eyebrow" id="dateEyebrow">SCHOOL DAY <span class="live-label"><i></i> LIVE</span></div><h1>Good morning, Amara <span class="wave">✳</span></h1><p>Here’s what’s happening at Northfield today.</p></div><button class="button button-primary" data-goto="scan"><span>＋</span> Log an arrival</button></div>
       <div class="stat-grid"><article class="stat-card"><div class="stat-top"><span>Present on campus</span><span class="stat-icon mint">♙</span></div><div class="stat-value" id="presentCount">0 <small>/ 248</small></div><div class="stat-foot"><span class="trend">↗ <b>+12</b></span> compared with yesterday</div><div class="stat-progress"><i id="presentProgress"></i></div></article><article class="stat-card"><div class="stat-top"><span>Arrivals today</span><span class="stat-icon blue">↘</span></div><div class="stat-value" id="arrivalsCount">0</div><div class="stat-foot"><span class="soft-dot green-dot"></span> Last arrival <b id="lastArrival">—</b></div><div class="mini-bars"><i style="height:35%"></i><i style="height:58%"></i><i style="height:44%"></i><i style="height:72%"></i><i style="height:50%"></i><i style="height:85%"></i><i style="height:68%"></i><i style="height:100%"></i><i style="height:73%"></i><i style="height:91%"></i><i style="height:64%"></i><i style="height:80%"></i></div></article><article class="stat-card"><div class="stat-top"><span>Departures today</span><span class="stat-icon lilac">↗</span></div><div class="stat-value" id="departuresCount">0</div><div class="stat-foot"><span class="soft-dot purple-dot"></span> Dismissal starts <b>2:30 PM</b></div><div class="mini-bars purple-bars"><i style="height:25%"></i><i style="height:30%"></i><i style="height:20%"></i><i style="height:38%"></i><i style="height:29%"></i><i style="height:42%"></i><i style="height:26%"></i><i style="height:36%"></i><i style="height:30%"></i><i style="height:45%"></i><i style="height:37%"></i><i style="height:32%"></i></div></article><article class="stat-card"><div class="stat-top"><span>Needs attention</span><span class="stat-icon amber">!</span></div><div class="stat-value" id="attentionCount">3</div><div class="stat-foot"><span class="amber-text">2 pickup requests</span><span class="separator">·</span> 1 card issue</div><button class="text-link" data-goto="pickup">Review exceptions <span>→</span></button></article></div>
       <div class="content-grid"><section class="panel arrivals-panel"><div class="panel-heading"><div><h2>Today’s arrivals</h2><p>Live pupil check-ins</p></div><button class="button button-outline button-small" data-goto="activity">View all <span>→</span></button></div><div class="filter-row"><div class="search-box"><span>⌕</span><input id="arrivalSearch" placeholder="Search pupils..." aria-label="Search pupils"></div><button class="filter-button" id="classFilter">All classes <span>⌄</span></button></div><div class="table-wrap"><table><thead><tr><th>PUPIL</th><th>CLASS</th><th>ARRIVAL</th><th>STATUS</th></tr></thead><tbody id="arrivalRows"></tbody></table></div><div class="empty-state hidden" id="emptyArrivals">No matching pupils found.</div></section><section class="panel activity-panel"><div class="panel-heading"><div><h2>Recent activity</h2><p>Updates from your school gates</p></div><button class="kebab" aria-label="More options">···</button></div><div class="activity-list" id="recentActivity"></div><button class="activity-footer" data-goto="activity">See full activity log <span>→</span></button></section></div>

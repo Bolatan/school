@@ -27,7 +27,8 @@ const {
   NotificationTemplate,
   EscalationContact,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  ScanAttempt
 } = require('./models');
 const {
   DEMO_EMAIL,
@@ -2354,9 +2355,29 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
         ip: req.ip || req.connection.remoteAddress || 'unknown'
       });
 
+      await ScanAttempt.create({
+        id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        tokenHash: '',
+        clientEventId: req.body.clientEventId || null,
+        pupilId: null,
+        staffId: req.user ? req.user._id : null,
+        staffEmail: req.user ? req.user.email : '',
+        campus,
+        gate: req.body.gate || 'Main gate',
+        mode,
+        session,
+        outcome: 'rate_limited',
+        isDuplicate: false,
+        details: 'Rate limit exceeded'
+      });
+
       return res.status(429).json({
         outcome: 'rate_limited',
-        error: 'Scan rate limit exceeded. Please pause briefly before scanning additional cards.'
+        canCreateEvent: false,
+        error: 'Scan rate limit exceeded. Please pause briefly before scanning additional cards.',
+        message: 'Scan rate limit exceeded. Please pause briefly before scanning additional cards.',
+        nextAction: 'Pause scanning for 60 seconds or switch to manual directory lookup.',
+        nextStep: 'Wait 60 seconds for the rate-limiting cooldown window to expire before re-attempting card scans, or use manual directory lookup.'
       });
     }
 
@@ -2416,10 +2437,27 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
         });
       }
 
+      await ScanAttempt.create({
+        id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        tokenHash: tokenHashPreview,
+        clientEventId: req.body.clientEventId || null,
+        pupilId: null,
+        staffId: req.user ? req.user._id : null,
+        staffEmail: req.user ? req.user.email : '',
+        campus,
+        gate: req.body.gate || 'Main gate',
+        mode,
+        session,
+        outcome: 'unknown_code',
+        isDuplicate: false,
+        details: 'Unknown card QR token'
+      });
+
       return res.json({
         outcome: 'unknown_code',
         canCreateEvent: false,
         message: 'Unrecognized card QR code. Pupil not found in school registry.',
+        nextAction: 'Search for pupil by name or pupil number in the directory.',
         nextStep: 'Search for pupil by name or pupil number in the directory and verify identity with on-screen photo before recording a manual entry.',
         unknownCount: unknownScansInWindow.length
       });
@@ -2431,11 +2469,28 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
 
     // Check revoked card status
     if (card && card.status === 'revoked') {
+      await ScanAttempt.create({
+        id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        tokenHash: tokenHashPreview,
+        clientEventId: req.body.clientEventId || null,
+        pupilId: pupil ? pupil.id : null,
+        staffId: req.user ? req.user._id : null,
+        staffEmail: req.user ? req.user.email : '',
+        campus,
+        gate: req.body.gate || 'Main gate',
+        mode,
+        session,
+        outcome: 'revoked_card',
+        isDuplicate: false,
+        details: card.revokedReason || 'Card revoked'
+      });
+
       return res.json({
         outcome: 'revoked_card',
         canCreateEvent: false,
         message: `This pupil ID card was revoked on ${card.revokedAt ? new Date(card.revokedAt).toLocaleDateString() : 'file'}.`,
         reason: card.revokedReason || 'Card has been revoked by administration.',
+        nextAction: 'Do not use this card; perform manual lookup and request card reissue.',
         nextStep: 'Do not proceed with this card. Perform a manual lookup to confirm pupil identity and request administrator to reissue an official card.',
         pupil: pupil ? {
           id: pupil.id,
@@ -2448,9 +2503,28 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
     }
 
     if (!pupil) {
+      await ScanAttempt.create({
+        id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        tokenHash: tokenHashPreview,
+        clientEventId: req.body.clientEventId || null,
+        pupilId: null,
+        staffId: req.user ? req.user._id : null,
+        staffEmail: req.user ? req.user.email : '',
+        campus,
+        gate: req.body.gate || 'Main gate',
+        mode,
+        session,
+        outcome: 'unknown_code',
+        isDuplicate: false,
+        details: 'Inactive or missing pupil document'
+      });
+
       return res.json({
         outcome: 'unknown_code',
-        message: 'Pupil record associated with this card is inactive or not found.'
+        canCreateEvent: false,
+        message: 'Pupil record associated with this card is inactive or not found.',
+        nextAction: 'Search pupil directory or escalate to school administration.',
+        nextStep: 'Search pupil directory or escalate to school administration.'
       });
     }
 
@@ -2512,9 +2586,28 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
     const prevEvent = await AttendanceEvent.findOne({ pupilId: pupil.id, date: todayDate }).sort({ createdAt: -1 });
 
     if (mode === 'arrival' && prevEvent && (prevEvent.type === 'arrival' || prevEvent.type === 'manual_arrival')) {
+      await ScanAttempt.create({
+        id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        tokenHash: tokenHashPreview,
+        clientEventId: req.body.clientEventId || null,
+        pupilId: pupil.id,
+        staffId: req.user ? req.user._id : null,
+        staffEmail: req.user ? req.user.email : '',
+        campus,
+        gate: req.body.gate || 'Main gate',
+        mode,
+        session,
+        outcome: 'already_recorded',
+        isDuplicate: true,
+        details: `Arrival already recorded at ${prevEvent.time}`
+      });
+
       return res.json({
         outcome: 'already_recorded',
+        canCreateEvent: false,
         message: `${pupil.name} already has arrival recorded today at ${prevEvent.time}.`,
+        nextAction: 'Pupil is already marked as arrived. Check existing entry if correction is needed.',
+        nextStep: 'Do not log a second arrival. View the existing arrival event or submit a non-destructive correction if details were recorded incorrectly.',
         pupil: pupilInfo,
         existingEvent: {
           id: prevEvent.id,
@@ -2526,9 +2619,28 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
     }
 
     if (mode === 'departure' && prevEvent && (prevEvent.type === 'departure' || prevEvent.type === 'manual_departure' || prevEvent.type === 'authorized_exception')) {
+      await ScanAttempt.create({
+        id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+        tokenHash: tokenHashPreview,
+        clientEventId: req.body.clientEventId || null,
+        pupilId: pupil.id,
+        staffId: req.user ? req.user._id : null,
+        staffEmail: req.user ? req.user.email : '',
+        campus,
+        gate: req.body.gate || 'Main gate',
+        mode,
+        session,
+        outcome: 'already_recorded',
+        isDuplicate: true,
+        details: `Departure already recorded at ${prevEvent.time}`
+      });
+
       return res.json({
         outcome: 'already_recorded',
+        canCreateEvent: false,
         message: `${pupil.name} has already departed today at ${prevEvent.time}.`,
+        nextAction: 'Pupil has already departed. Check existing departure if correction is required.',
+        nextStep: 'Do not log another departure. If the handover details need adjustment, submit a non-destructive correction with reason.',
         pupil: pupilInfo,
         existingEvent: {
           id: prevEvent.id,
@@ -2552,9 +2664,28 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
       const isMismatch = (sessionConfig.defaultMode === 'arrival' && mode === 'departure') ||
                          (sessionConfig.defaultMode === 'departure' && mode === 'arrival');
       if (isMismatch && req.body.confirmModeMismatch !== true) {
+        await ScanAttempt.create({
+          id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+          tokenHash: tokenHashPreview,
+          clientEventId: req.body.clientEventId || null,
+          pupilId: pupil.id,
+          staffId: req.user ? req.user._id : null,
+          staffEmail: req.user ? req.user.email : '',
+          campus,
+          gate: req.body.gate || 'Main gate',
+          mode,
+          session,
+          outcome: 'wrong_session',
+          isDuplicate: false,
+          details: `Session mismatch: ${sessionConfig.name} (${sessionConfig.defaultMode}) vs ${mode}`
+        });
+
         return res.json({
           outcome: 'wrong_session',
+          canCreateEvent: false,
           message: `Accidental mode mismatch: Session '${sessionConfig.name}' defaults to ${sessionConfig.defaultMode.toUpperCase()} operations, but current action is ${mode.toUpperCase()}.`,
+          nextAction: 'Confirm operating mode mismatch or switch to matching session.',
+          nextStep: 'Confirm operating session mode change or change the active session in the gate controls before proceeding.',
           session: sessionConfig.name,
           defaultMode: sessionConfig.defaultMode,
           currentMode: mode,
@@ -2564,9 +2695,32 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
     }
 
     // 4. Valid pupil ready for staff visual photo confirmation
+    await ScanAttempt.create({
+      id: `scan-att-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
+      tokenHash: tokenHashPreview,
+      clientEventId: req.body.clientEventId || null,
+      pupilId: pupil.id,
+      staffId: req.user ? req.user._id : null,
+      staffEmail: req.user ? req.user.email : '',
+      campus,
+      gate: req.body.gate || 'Main gate',
+      mode,
+      session,
+      outcome: 'valid_pupil',
+      isDuplicate: false,
+      details: 'Card verified'
+    });
+
     return res.json({
       outcome: 'valid_pupil',
+      canCreateEvent: true,
       message: `Card verified for ${pupil.name}. Visually confirm pupil against photo before logging handover.`,
+      nextAction: mode === 'arrival'
+        ? 'Visually confirm pupil match against photo and confirm arrival.'
+        : 'Visually confirm pupil match against photo, select approved collector, verify identity, and confirm departure.',
+      nextStep: mode === 'arrival'
+        ? 'Verify the child on-screen photo against the pupil at the gate, then confirm arrival handover.'
+        : 'Verify the pupil photo, select an approved collector from the list, check collector ID, then confirm departure.',
       pupil: pupilInfo,
       currentStatus: !prevEvent ? 'Not arrived' : (prevEvent.type === 'arrival' || prevEvent.type === 'manual_arrival' ? 'On campus' : 'Departed'),
       card: {
@@ -4359,6 +4513,203 @@ app.post('/api/settings', requireAuth(['admin']), async (req, res) => {
   }
 });
 
+// 0. Live Views Endpoint (Status breakdowns, multi-attribute filtering, indicators)
+app.get('/api/reports/live', requireAuth(), async (req, res) => {
+  try {
+    const settingsDocs = await SchoolSetting.find();
+    const schoolSettingsMap = {};
+    settingsDocs.forEach(s => { schoolSettingsMap[s.key] = s.val; });
+
+    const campusDocs = await Campus.find({ active: true });
+    const defaultCampusTimezones = {};
+    campusDocs.forEach(c => {
+      defaultCampusTimezones[c.name] = c.timezone || "Europe/London";
+    });
+
+    const user = req.user;
+    // Role scoping: If staff is tied to an assignedCampus (and not admin), they can only see their campus unless admin
+    let campusFilter = req.query.campus ? String(req.query.campus).trim() : null;
+    if (user.role !== 'admin' && user.assignedCampus && user.assignedCampus !== 'All campuses') {
+      if (!campusFilter || campusFilter === 'All campuses') {
+        campusFilter = user.assignedCampus;
+      }
+    }
+
+    const campusTimezones = schoolSettingsMap.campusTimezones || defaultCampusTimezones;
+    const campusTz = (campusFilter && campusTimezones[campusFilter]) || schoolSettingsMap.timezone || 'Europe/London';
+    const dateParam = req.query.date ? String(req.query.date).trim() : formatDateInTimezone(new Date(), campusTz);
+    const sessionFilter = req.query.session ? String(req.query.session).trim() : null;
+    const classFilter = req.query.className || req.query.class ? String(req.query.className || req.query.class).trim() : null;
+    const pupilFilter = req.query.pupil ? String(req.query.pupil).trim().toLowerCase() : null;
+    const eventTypeFilter = req.query.eventType ? String(req.query.eventType).trim() : null;
+    const statusFilter = req.query.status ? String(req.query.status).trim().toLowerCase() : null;
+
+    // Base query for active pupils
+    const pupilQuery = { active: true };
+    if (classFilter && classFilter !== 'All classes') {
+      pupilQuery.className = classFilter;
+    }
+
+    let allPupils = await Pupil.find(pupilQuery);
+
+    // Event query for the selected date
+    const eventQuery = { date: dateParam };
+    if (campusFilter && campusFilter !== 'All campuses') {
+      eventQuery.campus = campusFilter;
+    }
+    if (sessionFilter && sessionFilter !== 'All sessions') {
+      eventQuery.session = sessionFilter;
+    }
+    if (eventTypeFilter && eventTypeFilter !== 'All types') {
+      eventQuery.type = eventTypeFilter;
+    }
+
+    const events = await AttendanceEvent.find(eventQuery).sort({ createdAt: 1 });
+
+    // Retrieve notifications for these events
+    const eventIds = events.map(e => e.id);
+    const notifications = await Notification.find({ eventId: { $in: eventIds } });
+    const notificationMap = {};
+    notifications.forEach(n => {
+      if (!notificationMap[n.eventId]) notificationMap[n.eventId] = [];
+      notificationMap[n.eventId].push(n);
+    });
+
+    // Group events by pupilId
+    const pupilEventsMap = {};
+    events.forEach(e => {
+      if (!pupilEventsMap[e.pupilId]) pupilEventsMap[e.pupilId] = [];
+      pupilEventsMap[e.pupilId].push(e);
+    });
+
+    const liveRecords = [];
+    let expectedCount = 0;
+    let arrivedCount = 0;
+    let departedCount = 0;
+    let notYetArrivedCount = 0;
+    let stillOnSiteCount = 0;
+    let exceptionsCount = 0;
+
+    for (const p of allPupils) {
+      expectedCount++;
+      const pEvents = pupilEventsMap[p.id] || [];
+      const arrivals = pEvents.filter(e => e.type === 'arrival' || e.type === 'manual_arrival');
+      const departures = pEvents.filter(e => e.type === 'departure' || e.type === 'manual_departure' || e.type === 'authorized_exception');
+      const exceptions = pEvents.filter(e => e.manualEntry || e.reason === 'card_missing' || e.reason === 'card_unreadable' || e.source === 'Manual entry' || e.source === 'Manual ID lookup' || e.type === 'authorized_exception' || e.syncStatus === 'pending_sync');
+
+      let liveStatus = 'not_yet_arrived';
+      if (arrivals.length > 0) {
+        arrivedCount++;
+      }
+      if (departures.length > 0) {
+        liveStatus = 'departed';
+        departedCount++;
+      } else if (arrivals.length > 0) {
+        liveStatus = 'still_on_site';
+        stillOnSiteCount++;
+      } else {
+        notYetArrivedCount++;
+      }
+
+      if (exceptions.length > 0) {
+        exceptionsCount++;
+      }
+
+      const latestEvent = pEvents.length ? pEvents[pEvents.length - 1] : null;
+      const latestNotifs = latestEvent ? (notificationMap[latestEvent.id] || []) : [];
+      let notificationOutcome = 'none';
+      if (latestNotifs.length) {
+        if (latestNotifs.every(n => n.status === 'delivered')) {
+          notificationOutcome = 'delivered';
+        } else if (latestNotifs.some(n => n.status === 'failed')) {
+          notificationOutcome = 'failed';
+        } else if (latestNotifs.some(n => n.status === 'suppressed')) {
+          notificationOutcome = 'suppressed';
+        } else {
+          notificationOutcome = 'accepted_by_provider';
+        }
+      }
+
+      const manualIndicator = latestEvent ? Boolean(latestEvent.manualEntry || latestEvent.reason === 'card_missing' || latestEvent.reason === 'card_unreadable' || latestEvent.source?.includes('Manual') || latestEvent.source?.includes('fallback')) : false;
+      const offlineIndicator = latestEvent ? Boolean(latestEvent.offlineQueued || latestEvent.source?.includes('Offline') || latestEvent.syncStatus === 'pending_sync') : false;
+
+      const record = {
+        pupilId: p.id,
+        pupilName: p.name,
+        className: p.className,
+        guardian: p.guardian,
+        liveStatus, // 'not_yet_arrived', 'arrived', 'still_on_site', 'departed', 'exception'
+        isArrived: arrivals.length > 0,
+        isDeparted: departures.length > 0,
+        hasException: exceptions.length > 0,
+        firstArrivalTime: arrivals.length ? arrivals[0].time : null,
+        lastDepartureTime: departures.length ? departures[departures.length - 1].time : null,
+        latestEvent: latestEvent ? {
+          id: latestEvent.id,
+          type: latestEvent.type,
+          time: latestEvent.time,
+          gate: latestEvent.gate,
+          campus: latestEvent.campus,
+          session: latestEvent.session,
+          source: latestEvent.source,
+          collector: latestEvent.collector,
+          verification: latestEvent.verification,
+          reason: latestEvent.reason,
+          syncStatus: latestEvent.syncStatus
+        } : null,
+        indicators: {
+          manual: manualIndicator,
+          offline: offlineIndicator,
+          notificationOutcome, // 'none', 'delivered', 'accepted_by_provider', 'failed', 'suppressed'
+          notificationCount: latestNotifs.length
+        },
+        eventsCount: pEvents.length
+      };
+
+      // Apply filtering
+      if (pupilFilter && !(`${p.name} ${p.id}`.toLowerCase().includes(pupilFilter))) {
+        continue;
+      }
+      if (statusFilter && statusFilter !== 'all') {
+        if (statusFilter === 'expected') {
+          // All expected pupils match
+        } else if (statusFilter === 'arrived' && !record.isArrived) {
+          continue;
+        } else if (statusFilter === 'departed' && !record.isDeparted) {
+          continue;
+        } else if (statusFilter === 'not_yet_arrived' && (record.isArrived || record.isDeparted)) {
+          continue;
+        } else if (statusFilter === 'still_on_site' && (!record.isArrived || record.isDeparted)) {
+          continue;
+        } else if (statusFilter === 'exceptions' && !record.hasException) {
+          continue;
+        }
+      }
+
+      liveRecords.push(record);
+    }
+
+    res.json({
+      ok: true,
+      date: dateParam,
+      campus: campusFilter || "All campuses",
+      session: sessionFilter || "All sessions",
+      summary: {
+        expected: expectedCount,
+        arrived: arrivedCount,
+        departed: departedCount,
+        notYetArrived: notYetArrivedCount,
+        stillOnSite: stillOnSiteCount,
+        exceptions: exceptionsCount,
+        totalEvents: events.length
+      },
+      pupils: liveRecords
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/reports/exceptions', requireAuth(), async (req, res) => {
   try {
     const todayStr = formatDate(nowLocal());
@@ -4425,6 +4776,149 @@ app.get('/api/reports/exceptions', requireAuth(), async (req, res) => {
         todayAuthorizedExceptions: todayAuthorizedExceptionCount
       },
       exceptions: reportItems
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Attendance Report Export (Role-checked: Admin/Manager only, Mandatory Audit Logging)
+app.post('/api/reports/attendance/export', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const { format = 'json', campus, className, date, session, eventType, status } = req.body;
+    const settingsDocs = await SchoolSetting.find();
+    const schoolSettingsMap = {};
+    settingsDocs.forEach(s => { schoolSettingsMap[s.key] = s.val; });
+
+    const campusDocs = await Campus.find({ active: true });
+    const defaultCampusTimezones = {};
+    campusDocs.forEach(c => {
+      defaultCampusTimezones[c.name] = c.timezone || "Europe/London";
+    });
+
+    const user = req.user;
+    let campusFilter = campus ? String(campus).trim() : null;
+    if (user.role !== 'admin' && user.assignedCampus && user.assignedCampus !== 'All campuses') {
+      if (!campusFilter || campusFilter === 'All campuses') {
+        campusFilter = user.assignedCampus;
+      }
+    }
+
+    const campusTimezones = schoolSettingsMap.campusTimezones || defaultCampusTimezones;
+    const campusTz = (campusFilter && campusTimezones[campusFilter]) || schoolSettingsMap.timezone || 'Europe/London';
+    const dateParam = date ? String(date).trim() : formatDateInTimezone(new Date(), campusTz);
+
+    const eventQuery = { date: dateParam };
+    if (campusFilter && campusFilter !== 'All campuses') {
+      eventQuery.campus = campusFilter;
+    }
+    if (session && session !== 'All sessions') {
+      eventQuery.session = session;
+    }
+    if (eventType && eventType !== 'All types') {
+      eventQuery.type = eventType;
+    }
+
+    const events = await AttendanceEvent.find(eventQuery).sort({ createdAt: 1 });
+    const pupilIds = [...new Set(events.map(e => e.pupilId))];
+    const pupils = await Pupil.find({ id: { $in: pupilIds } });
+    const pupilMap = {};
+    pupils.forEach(p => { pupilMap[p.id] = p; });
+
+    // Retrieve notifications
+    const eventIds = events.map(e => e.id);
+    const notifications = await Notification.find({ eventId: { $in: eventIds } });
+    const notificationMap = {};
+    notifications.forEach(n => {
+      if (!notificationMap[n.eventId]) notificationMap[n.eventId] = [];
+      notificationMap[n.eventId].push(n);
+    });
+
+    const rows = events.map(e => {
+      const p = pupilMap[e.pupilId] || { name: 'Unknown Pupil', className: 'Unassigned', guardian: 'Unknown' };
+      const notifs = notificationMap[e.id] || [];
+      const notifStatus = notifs.length ? notifs.map(n => `${n.channel}:${n.status}`).join('; ') : 'none';
+      return {
+        eventId: e.id,
+        pupilId: e.pupilId,
+        pupilName: p.name,
+        className: p.className,
+        guardian: p.guardian,
+        type: e.type,
+        date: e.date,
+        time: e.time,
+        utcTimestamp: e.utcTimestamp || e.timestamp?.toISOString() || '',
+        campus: e.campus,
+        gate: e.gate,
+        session: e.session,
+        staff: e.staff,
+        source: e.source,
+        collector: e.collector || '',
+        verification: e.verification || '',
+        reason: e.reason || '',
+        manualEntry: Boolean(e.manualEntry),
+        offlineQueued: Boolean(e.offlineQueued),
+        syncStatus: e.syncStatus || 'synced',
+        notificationStatus: notifStatus
+      };
+    });
+
+    // Mandatory AuditEntry logging for report export
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'export_attendance_report',
+      objectType: 'attendance_report',
+      objectId: `${dateParam}_${campusFilter || 'all'}_${format}`,
+      reason: `User ${req.user.email} exported attendance report for date=${dateParam}, campus=${campusFilter || 'all'}, count=${rows.length}, format=${format}`,
+      createdAt: new Date()
+    });
+
+    if (String(format).toLowerCase() === 'csv') {
+      const headers = [
+        'Event ID', 'Pupil ID', 'Pupil Name', 'Class', 'Guardian', 'Event Type',
+        'Date', 'Time', 'UTC Timestamp', 'Campus', 'Gate', 'Session',
+        'Staff', 'Source', 'Collector', 'Verification', 'Reason',
+        'Manual Entry', 'Offline Queued', 'Sync Status', 'Notification Status'
+      ];
+      const csvRows = [headers.join(',')];
+      rows.forEach(r => {
+        const line = [
+          r.eventId,
+          r.pupilId,
+          `"${(r.pupilName || '').replace(/"/g, '""')}"`,
+          `"${(r.className || '').replace(/"/g, '""')}"`,
+          `"${(r.guardian || '').replace(/"/g, '""')}"`,
+          r.type,
+          r.date,
+          r.time,
+          r.utcTimestamp,
+          `"${(r.campus || '').replace(/"/g, '""')}"`,
+          `"${(r.gate || '').replace(/"/g, '""')}"`,
+          `"${(r.session || '').replace(/"/g, '""')}"`,
+          `"${(r.staff || '').replace(/"/g, '""')}"`,
+          `"${(r.source || '').replace(/"/g, '""')}"`,
+          `"${(r.collector || '').replace(/"/g, '""')}"`,
+          `"${(r.verification || '').replace(/"/g, '""')}"`,
+          `"${(r.reason || '').replace(/"/g, '""')}"`,
+          r.manualEntry ? 'true' : 'false',
+          r.offlineQueued ? 'true' : 'false',
+          r.syncStatus,
+          `"${(r.notificationStatus || '').replace(/"/g, '""')}"`
+        ];
+        csvRows.push(line.join(','));
+      });
+      const csvContent = csvRows.join('\r\n');
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', `attachment; filename="attendance-report-${dateParam}.csv"`);
+      return res.status(200).send(csvContent);
+    }
+
+    res.json({
+      ok: true,
+      date: dateParam,
+      campus: campusFilter || "All campuses",
+      count: rows.length,
+      report: rows
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -4744,11 +5238,31 @@ app.get('/api/reports/reconciliation', requireAuth(['admin', 'manager']), async 
             clientEventId: e.clientEventId,
             pupilId: e.pupilId,
             time: e.time,
-            type: e.type
+            type: e.type,
+            source: 'AttendanceEvent'
           });
         }
         clientEventIdsSeen.add(e.clientEventId);
       }
+    });
+
+    // Also pull persisted duplicate scan attempts from ScanAttempt collection
+    const scanAttemptsQuery = { isDuplicate: true };
+    if (campus && campus !== 'All campuses') {
+      scanAttemptsQuery.campus = campus;
+    }
+    const persistedDuplicateScans = await ScanAttempt.find(scanAttemptsQuery).sort({ createdAt: -1 });
+    persistedDuplicateScans.forEach(s => {
+      duplicateScanAttempts.push({
+        id: s.id,
+        clientEventId: s.clientEventId,
+        pupilId: s.pupilId,
+        time: s.scannedAt ? s.scannedAt.toISOString() : '',
+        type: s.mode,
+        outcome: s.outcome,
+        details: s.details,
+        source: 'ScanAttempt'
+      });
     });
 
     const timeline = [];

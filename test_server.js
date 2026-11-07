@@ -20,7 +20,8 @@ const {
   Card,
   Device,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  ScanAttempt
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
@@ -2615,4 +2616,226 @@ test('Key flows & Notifications acceptance criteria verification', async () => {
   // Official school records for pupil NF-1042 remain unchanged
   const pupilDocAfterPause = await Pupil.findOne({ id: 'NF-1042' });
   assert.equal(pupilDocAfterPause.active, true);
+});
+
+test('Dashboards and reports: Live views, multi-attribute filtering, indicators, export with role checks, and daily reconciliation', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // Create a viewer user for role check verification
+  const viewerPassword = 'StrongPassword!1234';
+  const createViewerRes = await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      email: 'viewer.report@northfield.school',
+      name: 'Viewer Reporter',
+      role: 'viewer',
+      password: viewerPassword,
+      assignedCampus: 'Primary campus'
+    });
+  assert.equal(createViewerRes.status, 201);
+  const viewerCookie = await login('viewer.report@northfield.school', viewerPassword);
+
+  // 1. Create test pupils in specific classes
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Report Pupil Alpha',
+      id: 'NF-REP01',
+      className: 'Grade 4A',
+      guardian: 'Alpha Guardian'
+    });
+
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Report Pupil Beta',
+      id: 'NF-REP02',
+      className: 'Grade 4A',
+      guardian: 'Beta Guardian'
+    });
+
+  // Record arrival for Alpha (with manual indicator)
+  const alphaArrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-REP01',
+      type: 'arrival',
+      date: '2026-11-20',
+      time: '08:15',
+      campus: 'Primary campus',
+      session: 'Morning Arrival',
+      source: 'Manual entry',
+      reason: 'card_missing',
+      clientEventId: 'rep-alpha-arr'
+    });
+  assert.equal(alphaArrivalRes.status, 201);
+
+  // Record arrival and departure for Beta
+  const betaArrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-REP02',
+      type: 'arrival',
+      date: '2026-11-20',
+      time: '08:20',
+      campus: 'Primary campus',
+      session: 'Morning Arrival',
+      source: 'Card scan',
+      clientEventId: 'rep-beta-arr'
+    });
+  assert.equal(betaArrivalRes.status, 201);
+
+  // Add approved collector for Beta
+  const pupilBeta = await Pupil.findOne({ id: 'NF-REP02' });
+  pupilBeta.collectors = [{
+    id: 1,
+    name: 'Beta Collector',
+    relation: 'Father',
+    status: 'active',
+    active: true,
+    permissionType: 'ongoing'
+  }];
+  await pupilBeta.save();
+
+  const betaDepRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-REP02',
+      type: 'departure',
+      date: '2026-11-20',
+      time: '15:00',
+      campus: 'Primary campus',
+      session: 'Afternoon Dismissal',
+      collectorId: 1,
+      source: 'Card scan',
+      clientEventId: 'rep-beta-dep'
+    });
+  assert.equal(betaDepRes.status, 201);
+
+  // 2. Test GET /api/reports/live
+  const liveRes = await request
+    .get('/api/reports/live?date=2026-11-20&campus=Primary+campus')
+    .set('Cookie', adminCookie);
+  assert.equal(liveRes.status, 200);
+  assert.ok(liveRes.body.ok);
+  assert.ok(liveRes.body.summary);
+  assert.ok(liveRes.body.summary.expected >= 2);
+  assert.ok(liveRes.body.summary.arrived >= 2);
+  assert.ok(liveRes.body.summary.departed >= 1);
+  assert.ok(liveRes.body.summary.stillOnSite >= 1);
+  assert.ok(liveRes.body.summary.exceptions >= 1); // Alpha had card_missing manual entry
+
+  const alphaRecord = liveRes.body.pupils.find(p => p.pupilId === 'NF-REP01');
+  assert.ok(alphaRecord);
+  assert.equal(alphaRecord.liveStatus, 'still_on_site');
+  assert.equal(alphaRecord.indicators.manual, true);
+
+  const betaRecord = liveRes.body.pupils.find(p => p.pupilId === 'NF-REP02');
+  assert.ok(betaRecord);
+  assert.equal(betaRecord.liveStatus, 'departed');
+
+  // Multi-attribute filter by status: departed
+  const liveDepartedRes = await request
+    .get('/api/reports/live?date=2026-11-20&status=departed')
+    .set('Cookie', adminCookie);
+  assert.equal(liveDepartedRes.status, 200);
+  assert.ok(liveDepartedRes.body.pupils.every(p => p.isDeparted));
+
+  // Multi-attribute filter by pupil search
+  const liveSearchRes = await request
+    .get('/api/reports/live?date=2026-11-20&pupil=Alpha')
+    .set('Cookie', adminCookie);
+  assert.equal(liveSearchRes.status, 200);
+  assert.equal(liveSearchRes.body.pupils.length, 1);
+  assert.equal(liveSearchRes.body.pupils[0].pupilId, 'NF-REP01');
+
+  // 3. Test Attendance Report Export: Role check & Audit logging
+  // Viewer role is blocked (403)
+  const viewerExportRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', viewerCookie)
+    .send({ date: '2026-11-20', format: 'json' });
+  assert.equal(viewerExportRes.status, 403);
+
+  // Admin export JSON
+  const adminExportJsonRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', adminCookie)
+    .send({ date: '2026-11-20', format: 'json' });
+  assert.equal(adminExportJsonRes.status, 200);
+  assert.ok(adminExportJsonRes.body.ok);
+  assert.ok(Array.isArray(adminExportJsonRes.body.report));
+  assert.ok(adminExportJsonRes.body.count >= 3);
+
+  // Admin export CSV
+  const adminExportCsvRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', adminCookie)
+    .send({ date: '2026-11-20', format: 'csv' });
+  assert.equal(adminExportCsvRes.status, 200);
+  assert.ok(adminExportCsvRes.text.includes('Event ID,Pupil ID,Pupil Name,Class'));
+  assert.ok(adminExportCsvRes.text.includes('NF-REP01'));
+  assert.ok(adminExportCsvRes.text.includes('NF-REP02'));
+
+  // Verify AuditEntry was created for the export
+  const exportAudit = await AuditEntry.findOne({ action: 'export_attendance_report' }).sort({ createdAt: -1 });
+  assert.ok(exportAudit);
+  assert.ok(exportAudit.reason.includes('exported attendance report'));
+
+  // 4. Test Scan Outcomes nextAction and nextStep on /api/cards/scan
+  const cardAlpha = await Card.findOne({ pupilId: 'NF-REP01', status: 'active' });
+  assert.ok(cardAlpha);
+
+  const scanAlphaRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: cardAlpha.cardToken,
+      mode: 'arrival'
+    });
+  assert.equal(scanAlphaRes.status, 200);
+  assert.ok(scanAlphaRes.body.nextAction);
+  assert.ok(scanAlphaRes.body.nextStep);
+
+  // Scan unknown code returns nextAction and nextStep
+  const scanUnknownRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: 'unrecognized_random_qr_code_xyz',
+      mode: 'arrival'
+    });
+  assert.equal(scanUnknownRes.status, 200);
+  assert.equal(scanUnknownRes.body.outcome, 'unknown_code');
+  assert.ok(scanUnknownRes.body.nextAction);
+  assert.ok(scanUnknownRes.body.nextStep);
+
+  // Persisted duplicate scan attempt in ScanAttempt
+  const scanDuplicateRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: cardAlpha.cardToken,
+      mode: 'arrival',
+      campus: 'Primary campus'
+    });
+  assert.equal(scanDuplicateRes.status, 200);
+
+  // 5. Test Daily Reconciliation: duplicateScanAttempts from ScanAttempt & AttendanceEvent
+  const reconRes = await request
+    .get('/api/reports/reconciliation?date=2026-11-20&campus=Primary+campus')
+    .set('Cookie', adminCookie);
+  assert.equal(reconRes.status, 200);
+  assert.ok(reconRes.body.ok);
+  assert.ok(Array.isArray(reconRes.body.pupilTimeline));
+  assert.ok(Array.isArray(reconRes.body.missingArrivalPatterns));
+  assert.ok(Array.isArray(reconRes.body.missingDeparturePatterns));
+  assert.ok(Array.isArray(reconRes.body.duplicateScanAttempts));
+  assert.ok(Array.isArray(reconRes.body.unresolvedExceptions));
 });
