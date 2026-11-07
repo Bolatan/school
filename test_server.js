@@ -17,7 +17,8 @@ const {
   Card,
   Device,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  ScanAttempt
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
@@ -2164,4 +2165,170 @@ test('Security and Safeguarding: Rate-limiting, unusual pattern alerting, privil
   const reissueAudit = await AuditEntry.findOne({ action: 'reissue_pupil_card', objectId: reissueRes.body.card.id });
   assert.ok(reissueAudit);
   assert.ok(reissueAudit.reason.includes('...'), 'Raw token in audit logs should be masked with truncation');
+});
+
+test('Dashboards and Reports: Live views, multi-attribute filtering, export with audit, and daily reconciliation', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+  const guardianCookie = await login(DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD);
+
+  // Create a viewer user to test role-based access scoping
+  const viewerEmail = 'viewer.report.test@northfield.school';
+  const createViewerRes = await request
+    .post('/api/users')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Viewer Tester',
+      email: viewerEmail,
+      role: 'viewer',
+      password: 'GatewiseDemo!26'
+    });
+  assert.equal(createViewerRes.status, 201);
+  const viewerCookie = await login(viewerEmail, 'GatewiseDemo!26');
+
+  // Seed distinct sample pupil for report testing
+  const testPupilId = 'NF-7777';
+  await Pupil.findOneAndUpdate(
+    { id: testPupilId },
+    {
+      id: testPupilId,
+      name: 'Amara LiveTest',
+      className: 'Grade 3A',
+      guardian: 'Kola LiveTest',
+      guardianPhone: '+1 555-7777',
+      preferredChannel: 'sms',
+      initials: 'AL',
+      color: 'rose',
+      active: true,
+      collectors: [{ id: 1, name: 'Kola LiveTest', relation: 'Father', until: 'Ongoing', active: true }]
+    },
+    { upsert: true, new: true }
+  );
+
+  // Record an arrival event for NF-7777
+  const arrivalRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: testPupilId,
+      type: 'arrival',
+      session: 'Morning Arrival',
+      campus: 'Primary campus',
+      gate: 'Main gate',
+      source: 'scan'
+    });
+  assert.equal(arrivalRes.status, 201);
+
+  // 1. Live Views Endpoint: /api/reports/live
+  // Admin role receives all active enrolled pupils categorized across live views
+  const liveAdminRes = await request
+    .get('/api/reports/live')
+    .set('Cookie', adminCookie);
+  assert.equal(liveAdminRes.status, 200);
+  assert.ok(liveAdminRes.body.ok);
+  assert.ok(liveAdminRes.body.summary);
+  assert.ok(liveAdminRes.body.summary.totalExpected >= 1);
+  assert.ok(liveAdminRes.body.summary.totalArrived >= 1);
+  assert.ok(liveAdminRes.body.liveViews.expected);
+  assert.ok(liveAdminRes.body.liveViews.arrived);
+  assert.ok(liveAdminRes.body.liveViews.departed);
+  assert.ok(liveAdminRes.body.liveViews.notYetArrived);
+  assert.ok(liveAdminRes.body.liveViews.stillOnSite);
+  assert.ok(liveAdminRes.body.liveViews.exceptions);
+
+  // Verify notification outcome and manual/offline indicators in live views
+  const foundPupilInLive = liveAdminRes.body.liveViews.arrived.find(p => p.pupilId === testPupilId);
+  assert.ok(foundPupilInLive);
+  assert.equal(foundPupilInLive.status, 'still_on_site');
+  assert.ok(foundPupilInLive.events.length >= 1);
+  assert.ok(foundPupilInLive.events[0].notificationOutcome);
+
+  // Multi-attribute filtering on live views: campus, class, session, pupil, status
+  const filteredLiveRes = await request
+    .get(`/api/reports/live?class=Grade%203A&campus=Primary%20campus&pupil=Amara&status=still_on_site`)
+    .set('Cookie', adminCookie);
+  assert.equal(filteredLiveRes.status, 200);
+  assert.ok(filteredLiveRes.body.filteredPupils.some(p => p.pupilId === testPupilId));
+
+  // Role scoping: Guardian accessing /api/reports/live only sees linked pupils
+  const liveGuardianRes = await request
+    .get('/api/reports/live')
+    .set('Cookie', guardianCookie);
+  assert.equal(liveGuardianRes.status, 200);
+  assert.equal(liveGuardianRes.body.role, 'guardian');
+  // Guardian should only see linked pupil NF-1042, not NF-7777
+  assert.ok(liveGuardianRes.body.summary.totalExpected >= 1);
+  assert.ok(liveGuardianRes.body.liveViews.expected.every(p => p.pupilId === 'NF-1042'));
+
+  // 2. Attendance Report Export: /api/reports/attendance/export
+  // Viewer and Guardian roles are strictly blocked (403)
+  const viewerExportRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', viewerCookie)
+    .send({ reason: 'Unauthorized viewer export attempt' });
+  assert.equal(viewerExportRes.status, 403);
+
+  const guardianExportRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', guardianCookie)
+    .send({ reason: 'Unauthorized guardian export attempt' });
+  assert.equal(guardianExportRes.status, 403);
+
+  // Admin export JSON format
+  const exportJsonRes = await request
+    .post('/api/reports/attendance/export')
+    .set('Cookie', adminCookie)
+    .send({
+      reason: 'Term 1 statutory attendance reconciliation audit',
+      format: 'json',
+      campus: 'Primary campus'
+    });
+  assert.equal(exportJsonRes.status, 200);
+  assert.ok(exportJsonRes.body.ok);
+  assert.ok(exportJsonRes.body.recordCount >= 1);
+  assert.ok(Array.isArray(exportJsonRes.body.data));
+  assert.ok(exportJsonRes.body.data[0].notificationOutcome);
+
+  // Verify mandatory AuditEntry was recorded for attendance report export
+  const exportAudit = await AuditEntry.findOne({ action: 'export_attendance_report' }).sort({ createdAt: -1 });
+  assert.ok(exportAudit);
+  assert.ok(exportAudit.reason.includes('Term 1 statutory attendance reconciliation audit'));
+
+  // Admin export CSV format
+  const exportCsvRes = await request
+    .post('/api/reports/attendance/export?format=csv')
+    .set('Cookie', adminCookie)
+    .send({
+      reason: 'CSV download for audit trail'
+    });
+  assert.equal(exportCsvRes.status, 200);
+  assert.equal(exportCsvRes.headers['content-type'].includes('text/csv'), true);
+  assert.ok(exportCsvRes.text.includes('eventId,pupilId,pupilName'));
+
+  // 3. ScanAttempt Persistence and Daily Reconciliation
+  // Trigger an invalid scan to persist ScanAttempt
+  const unknownScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({
+      code: 'UNKNOWN_TEST_CODE_9999',
+      mode: 'arrival',
+      campus: 'Primary campus'
+    });
+  assert.equal(unknownScanRes.status, 200);
+  assert.equal(unknownScanRes.body.outcome, 'unknown_code');
+
+  const persistedAttempt = await ScanAttempt.findOne({ outcome: 'unknown_code' });
+  assert.ok(persistedAttempt);
+
+  // Daily reconciliation check
+  const reconcileRes = await request
+    .get('/api/reports/reconciliation')
+    .set('Cookie', adminCookie);
+  assert.equal(reconcileRes.status, 200);
+  assert.ok(reconcileRes.body.ok);
+  assert.ok(Array.isArray(reconcileRes.body.pupilTimeline));
+  assert.ok(Array.isArray(reconcileRes.body.missingArrivalPatterns));
+  assert.ok(Array.isArray(reconcileRes.body.missingDeparturePatterns));
+  assert.ok(Array.isArray(reconcileRes.body.duplicateScanAttempts));
+  assert.ok(Array.isArray(reconcileRes.body.unresolvedExceptions));
 });

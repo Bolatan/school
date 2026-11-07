@@ -283,6 +283,25 @@ const securityAlertSchema = new mongoose.Schema({
   acknowledgedBy: { type: String, default: null }
 }, { timestamps: true });
 
+const scanAttemptSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  tokenHash: { type: String, default: null, index: true },
+  pupilId: { type: String, default: null, index: true },
+  clientEventId: { type: String, default: null, index: true },
+  outcome: { type: String, required: true }, // 'valid_pupil', 'already_recorded', 'wrong_session', 'revoked_card', 'unknown_code', 'rate_limited', etc.
+  mode: { type: String, default: 'arrival' },
+  session: { type: String, default: 'Morning Arrival' },
+  campus: { type: String, default: 'Primary campus' },
+  gate: { type: String, default: 'Main gate' },
+  device: { type: String, default: 'Primary Gate Terminal' },
+  staff: { type: String, default: 'Staff' },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  ip: { type: String, default: '' },
+  isDuplicate: { type: Boolean, default: false },
+  details: { type: String, default: '' },
+  timestamp: { type: Date, default: Date.now, index: true }
+}, { timestamps: true });
+
 const EscalationContact = mongoose.model('EscalationContact', escalationContactSchema);
 const Card = mongoose.model('Card', cardSchema);
 const Guardian = mongoose.model('Guardian', guardianSchema);
@@ -291,6 +310,7 @@ const CorrectionRequest = mongoose.model('CorrectionRequest', correctionRequestS
 const SchoolSetting = mongoose.model('SchoolSetting', schoolSettingSchema);
 const SecurityIncident = mongoose.model('SecurityIncident', securityIncidentSchema);
 const SecurityAlert = mongoose.model('SecurityAlert', securityAlertSchema);
+const ScanAttempt = mongoose.model('ScanAttempt', scanAttemptSchema);
 
 module.exports = {
   User,
@@ -311,5 +331,6 @@ module.exports = {
   NotificationTemplate,
   EscalationContact,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  ScanAttempt
 };

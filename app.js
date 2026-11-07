@@ -15,6 +15,8 @@
   const localTime = (minsAgo=0) => {const d=new Date(Date.now()-minsAgo*60000);return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});};
   const load=(key,fallback)=>{try{const v=JSON.parse(localStorage.getItem('gatewise-'+key));return v??fallback}catch{return fallback}};
   let pupils=[], events=[], requests=[], adminCorrections=[], schoolSettings={}, signedInUser=null, guardianPortalData=null, mode='arrival', classChoice='All classes', activityChoice='All events', pupilStatusChoice='All statuses';
+  let activeLiveViewTab = 'expected';
+  let liveReportData = null;
   let isOfflineSimulated = false;
   let deviceManaged = true;
   let deviceEncrypted = true;
@@ -248,7 +250,142 @@
     }
   }
 
-  function renderDashboard(){const es=todayEvents(), arrivals=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival'), deps=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception'), present=pupils.filter(p=>statusFor(p)==='On campus').length;$('#presentCount').innerHTML=`${present} <small>/ 248</small>`;$('#presentProgress').style.width=`${Math.min(100,present/248*100)}%`;$('#arrivalsCount').textContent=arrivals.length;$('#departuresCount').textContent=deps.length;$('#lastArrival').textContent=arrivals.length?arrivals.sort((a,b)=>b.createdAt-a.createdAt)[0].time:'—';$('#alertsSent').textContent=es.filter(e=>e.alert==='Sent').length;$('#attentionCount').textContent=requests.length+1;const term=($('#arrivalSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>statusFor(p)==='On campus'&&(!term||`${p.name} ${p.className}`.toLowerCase().includes(term))&&(classChoice==='All classes'||p.className===classChoice));$('#arrivalRows').innerHTML=list.slice(0,7).map(p=>{const e=lastEvent(p.id);return `<tr><td>${pupilCell(p)}</td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td class="time-cell">${escapeHtml(e?.time||'—')}</td><td>${badge('On campus','status-present')}</td></tr>`}).join('');$('#emptyArrivals').classList.toggle('hidden',list.length>0);const recent=es.slice().sort((a,b)=>b.createdAt-a.createdAt).slice(0,5);$('#recentActivity').innerHTML=recent.map(activityItem).join('')||'<div class="empty-state">No events recorded yet.</div>';updateOfflineStatusUI();}
+  async function loadLiveViewsReport() {
+    if (!isDeviceOnline()) return;
+    try {
+      const campus = $('#liveCampusFilter')?.value || 'All campuses';
+      const className = $('#liveClassFilter')?.value || 'All classes';
+      const session = $('#liveSessionFilter')?.value || 'All sessions';
+      const eventType = $('#liveEventTypeFilter')?.value || 'All events';
+      const pupilQuery = $('#livePupilSearch')?.value || '';
+
+      const queryParams = new URLSearchParams();
+      if (campus !== 'All campuses') queryParams.set('campus', campus);
+      if (className !== 'All classes') queryParams.set('class', className);
+      if (session !== 'All sessions') queryParams.set('session', session);
+      if (eventType !== 'All events') queryParams.set('eventType', eventType);
+      if (pupilQuery) queryParams.set('pupil', pupilQuery);
+
+      // Populate liveClassFilter if needed
+      const classSelect = $('#liveClassFilter');
+      if (classSelect && classSelect.options.length <= 1) {
+        const uniqueClasses = [...new Set(pupils.map(p => p.className))].sort();
+        uniqueClasses.forEach(cls => {
+          const opt = document.createElement('option');
+          opt.value = cls;
+          opt.textContent = cls;
+          classSelect.appendChild(opt);
+        });
+      }
+
+      const res = await api(`/api/reports/live?${queryParams.toString()}`);
+      liveReportData = res;
+
+      // Update badge counts
+      if ($('#liveCountExpected')) $('#liveCountExpected').textContent = res.summary.totalExpected;
+      if ($('#liveCountArrived')) $('#liveCountArrived').textContent = res.summary.totalArrived;
+      if ($('#liveCountDeparted')) $('#liveCountDeparted').textContent = res.summary.totalDeparted;
+      if ($('#liveCountNotYetArrived')) $('#liveCountNotYetArrived').textContent = res.summary.totalNotYetArrived;
+      if ($('#liveCountStillOnSite')) $('#liveCountStillOnSite').textContent = res.summary.totalStillOnSite;
+      if ($('#liveCountExceptions')) $('#liveCountExceptions').textContent = res.summary.totalExceptions;
+
+      renderLiveViewsTable();
+    } catch (err) {
+      console.warn('Could not load live views report:', err.message);
+    }
+  }
+
+  function renderLiveViewsTable() {
+    if (!liveReportData || !liveReportData.liveViews) return;
+    const viewKeyMap = {
+      expected: 'expected',
+      arrived: 'arrived',
+      departed: 'departed',
+      not_yet_arrived: 'notYetArrived',
+      still_on_site: 'stillOnSite',
+      exceptions: 'exceptions'
+    };
+    const key = viewKeyMap[activeLiveViewTab] || 'expected';
+    const list = liveReportData.liveViews[key] || [];
+
+    const rowsEl = $('#liveViewRows');
+    if (!rowsEl) return;
+
+    if (!list.length) {
+      rowsEl.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:16px;color:#94a3b8">No pupils found in '${activeLiveViewTab.replace(/_/g, ' ')}' view.</td></tr>`;
+      return;
+    }
+
+    rowsEl.innerHTML = list.map(item => {
+      const p = pupil(item.pupilId) || { name: item.pupilName, initials: initials(item.pupilName), color: 'blue', guardian: item.guardian };
+      const statusLabel = item.status === 'still_on_site' ? 'On campus' : (item.status === 'departed' ? 'Departed' : 'Not arrived');
+      const stClass = item.status === 'still_on_site' ? 'status-present' : (item.status === 'departed' ? 'status-departed' : 'status-neutral');
+
+      let timeDetail = '—';
+      if (item.firstArrivalTime && item.lastDepartureTime) {
+        timeDetail = `Arr: ${escapeHtml(item.firstArrivalTime)} · Dep: ${escapeHtml(item.lastDepartureTime)}`;
+      } else if (item.firstArrivalTime) {
+        timeDetail = `Arr: ${escapeHtml(item.firstArrivalTime)}`;
+      } else if (item.lastDepartureTime) {
+        timeDetail = `Dep: ${escapeHtml(item.lastDepartureTime)}`;
+      }
+      if (item.lastCollector) {
+        timeDetail += `<br><small style="color:#64748b">Collector: ${escapeHtml(item.lastCollector)} (${escapeHtml(item.lastVerification || 'verified')})</small>`;
+      }
+
+      // Notification outcome & manual/offline indicators
+      const lastEv = item.events && item.events.length ? item.events[item.events.length - 1] : null;
+      let notifHtml = '<span style="color:#94a3b8;font-size:9px">No alert</span>';
+      let indicatorsHtml = '';
+
+      if (lastEv) {
+        const notifStatus = lastEv.notificationOutcome || 'delivered';
+        const notifClass = notifStatus === 'pending_sync' ? 'pending_sync' : (notifStatus === 'failed' ? 'failed' : 'delivered');
+        notifHtml = `<span class="notif-pill ${notifClass}">${escapeHtml(notifStatus)}</span>`;
+
+        if (lastEv.isOffline) {
+          indicatorsHtml += `<span class="offline-pill" title="Recorded offline">OFFLINE</span> `;
+        }
+        if (lastEv.manualEntry) {
+          indicatorsHtml += `<span class="manual-pill" title="Manual entry / exception">MANUAL (${escapeHtml(lastEv.reason || 'lookup')})</span> `;
+        }
+      }
+      if (item.hasException && !indicatorsHtml.includes('MANUAL')) {
+        indicatorsHtml += `<span class="manual-pill" title="Has exception">EXCEPTION</span> `;
+      }
+      if (!indicatorsHtml) indicatorsHtml = '<span style="color:#94a3b8;font-size:9px">Standard scan</span>';
+
+      return `
+        <tr>
+          <td>${pupilCell(p)}</td>
+          <td><span class="class-pill">${escapeHtml(item.className)}</span></td>
+          <td>${badge(statusLabel, stClass)}</td>
+          <td><small>${timeDetail}</small></td>
+          <td>${notifHtml}</td>
+          <td>${indicatorsHtml}</td>
+        </tr>
+      `;
+    }).join('');
+  }
+
+  function renderDashboard(){
+    const es=todayEvents(), arrivals=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival'), deps=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception'), present=pupils.filter(p=>statusFor(p)==='On campus').length;
+    $('#presentCount').innerHTML=`${present} <small>/ 248</small>`;
+    $('#presentProgress').style.width=`${Math.min(100,present/248*100)}%`;
+    $('#arrivalsCount').textContent=arrivals.length;
+    $('#departuresCount').textContent=deps.length;
+    $('#lastArrival').textContent=arrivals.length?arrivals.sort((a,b)=>b.createdAt-a.createdAt)[0].time:'—';
+    $('#alertsSent').textContent=es.filter(e=>e.alert==='Sent').length;
+    $('#attentionCount').textContent=requests.length+1;
+    const term=($('#arrivalSearch')?.value||'').toLowerCase();
+    const list=pupils.filter(p=>statusFor(p)==='On campus'&&(!term||`${p.name} ${p.className}`.toLowerCase().includes(term))&&(classChoice==='All classes'||p.className===classChoice));
+    $('#arrivalRows').innerHTML=list.slice(0,7).map(p=>{const e=lastEvent(p.id);return `<tr><td>${pupilCell(p)}</td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td class="time-cell">${escapeHtml(e?.time||'—')}</td><td>${badge('On campus','status-present')}</td></tr>`}).join('');
+    $('#emptyArrivals').classList.toggle('hidden',list.length>0);
+    const recent=es.slice().sort((a,b)=>b.createdAt-a.createdAt).slice(0,5);
+    $('#recentActivity').innerHTML=recent.map(activityItem).join('')||'<div class="empty-state">No events recorded yet.</div>';
+    loadLiveViewsReport();
+    updateOfflineStatusUI();
+  }
   function activityItem(e){const p=pupil(e.pupilId)||{name:'Unknown pupil'};let type=e.type;const isArrival=type==='arrival'||type==='manual_arrival';const isDep=type==='departure'||type==='manual_departure'||type==='authorized_exception';const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION</span>`:'';const pendingTag=isPendingSync?`<span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">PENDING SYNC (NOT NOTIFIED)</span>`:'';const alertText=isPendingSync?'Pending sync (parents NOT notified)':(e.alert||'Sent');return `<div class="activity-item"><div class="activity-icon ${isArrival?'arrival':isDep?'departure':'request'}">${isArrival?'↘':isDep?'↗':'◷'}</div><div class="activity-copy"><b>${isArrival?'Arrival recorded':isDep?'Departure recorded':'Activity'}</b> for ${escapeHtml(p.name)}${e.collector?` with ${escapeHtml(e.collector)}`:''} ${manualTag} ${corrTag} ${pendingTag}<small>${escapeHtml(e.time)} · ${escapeHtml(e.staff)} · Guardian alert: <b>${escapeHtml(alertText)}</b></small></div></div>`;}
   function renderPupils(){const q=($('#pupilSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>{const st=statusFor(p);const matchStatus=pupilStatusChoice==='All statuses'||st===pupilStatusChoice;const matchQ=!q||`${p.name} ${p.id} ${p.className}`.toLowerCase().includes(q);const matchCls=classChoice==='All classes'||p.className===classChoice;return matchStatus&&matchQ&&matchCls;});$('#pupilResultCount').textContent=`${list.length} pupils`;$('#pupilRows').innerHTML=list.map(p=>`<tr><td>${pupilCell(p)}</td><td><span class="pupil-id">${escapeHtml(p.id)}</span></td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td>${p.collectors.length} approved</td><td>${badge(statusFor(p),statusClass(statusFor(p)))}</td><td><button class="row-menu" data-pupil-detail="${escapeHtml(p.id)}" aria-label="Pupil options">···</button></td></tr>`).join('');}
   function renderPickup(){const total=pupils.reduce((n,p)=>n+p.collectors.length,0);$('#pendingCount').textContent=requests.length;$('#approvedCount').textContent=total;$('#requestList').innerHTML=requests.length?requests.map(r=>{const p=pupil(r.pupilId)||{name:'Unknown pupil',initials:'?',color:'blue'};return `<div class="request-card"><div>${avatar(p)}</div><div class="request-details"><strong>${escapeHtml(r.name)} <span class="card-tag">· ${escapeHtml(r.relation)}</span></strong><p>Pickup for <b>${escapeHtml(p.name)}</b> · Requested by ${escapeHtml(r.requestedBy)}</p><small>${escapeHtml(r.time)} — ${escapeHtml(r.note)}</small></div>${signedInUser?.role==='viewer'?'':`<div class="request-actions"><button class="decline-button" data-request="${r.id}" data-action="decline">Decline</button><button class="approve-button" data-request="${r.id}" data-action="approve">✓ Approve</button></div>`}</div>`}).join(''):'<div class="empty-state">No pending pickup requests.</div>';const q=($('#pickupSearch')?.value||'').toLowerCase();const active=pupils.flatMap(p=>p.collectors.map(c=>({p,c}))).filter(x=>`${x.p.name} ${x.c.name} ${x.c.relation}`.toLowerCase().includes(q));$('#approvedRows').innerHTML=active.map(({p,c})=>`<tr><td>${pupilCell(p)}</td><td><b>${escapeHtml(c.name)}</b></td><td>${escapeHtml(c.relation)}</td><td>${escapeHtml(c.until||'Ongoing')}</td><td>${badge('Approved','status-approved')}</td></tr>`).join('');}
@@ -2670,33 +2807,129 @@
 
   $('#manageSessionsBtn')?.addEventListener('click', openManageSessionsModal);
   $('#startCamera').onclick = startScanner;
+  // Attendance Report Export Modal with role check and mandatory audit logging
+  async function openAttendanceExportModal() {
+    if (signedInUser?.role !== 'admin' && signedInUser?.role !== 'manager') {
+      toast('Attendance report exports are restricted to school administrators and managers.', '!');
+      return;
+    }
+
+    openModal(`
+      <h2 id="modalTitle">Export Attendance Report</h2>
+      <p class="modal-intro">Generate and export official attendance reports with role checks and mandatory audit logging.</p>
+      <form id="attendanceExportForm" class="form-grid">
+        <div class="form-field full">
+          <label>Audit Reason for Export *</label>
+          <input type="text" name="reason" placeholder="e.g. Daily attendance audit, local authority submission..." required value="Official daily school attendance audit">
+          <small style="color:#64748b;font-size:9px">Mandatory audit reason recorded with your staff identity in AuditEntry.</small>
+        </div>
+        <div class="form-field">
+          <label>Campus</label>
+          <select name="campus">
+            <option value="All campuses">All campuses</option>
+            <option value="Primary campus">Primary campus</option>
+            <option value="Secondary campus">Secondary campus</option>
+            <option value="North gate annex">North gate annex</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Class</label>
+          <select name="class">
+            <option value="All classes">All classes</option>
+            ${[...new Set(pupils.map(p => p.className))].sort().map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Export Format</label>
+          <select name="format">
+            <option value="csv">CSV Spreadsheet (.csv)</option>
+            <option value="json">JSON Structured Data (.json)</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Date Filter</label>
+          <input type="text" name="date" value="${today}">
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelAttExport">Cancel</button>
+          <button type="submit" class="button button-primary">Download Attendance Report ↓</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelAttExport').onclick = closeModal;
+    $('#attendanceExportForm').onsubmit = async ev => {
+      ev.preventDefault();
+      const f = new FormData(ev.currentTarget);
+      const reason = f.get('reason');
+      const format = f.get('format');
+      const campus = f.get('campus');
+      const cls = f.get('class');
+      const dt = f.get('date');
+
+      try {
+        if (format === 'csv') {
+          const res = await fetch(`/api/reports/attendance/export?format=csv&campus=${encodeURIComponent(campus)}&class=${encodeURIComponent(cls)}&date=${encodeURIComponent(dt)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ reason, campus, class: cls, date: dt })
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.error || 'Export failed.');
+          }
+          const blob = await res.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `gatewise-attendance-report-${dt}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          closeModal();
+          toast('Attendance CSV exported and audited.');
+        } else {
+          const data = await api('/api/reports/attendance/export', { reason, campus, class: cls, date: dt, format: 'json' });
+          closeModal();
+          toast(`Exported ${data.recordCount} attendance records successfully.`);
+        }
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
   // Daily Reconciliation Report Modal
   async function openDailyReconciliationModal() {
     openModal(`<h2 id="modalTitle">Daily Attendance Reconciliation</h2><p class="modal-intro">Generating reconciliation report across timelines, missing patterns, and exceptions...</p>`);
     try {
       const data = await api('/api/reports/reconciliation');
-      const { summary, pupilTimeline, missingArrivalPatterns, missingDeparturePatterns, unresolvedExceptions } = data;
+      const { summary, pupilTimeline, missingArrivalPatterns, missingDeparturePatterns, duplicateScanAttempts, unresolvedExceptions } = data;
 
       openModal(`
         <h2 id="modalTitle">Daily Gate Reconciliation Report</h2>
         <p class="modal-intro">Comprehensive audit covering pupil event timelines, missing arrival/departure patterns, duplicate attempts, and unresolved exceptions.</p>
 
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px">
+        <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:14px">
           <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:8px;text-align:center">
-            <span style="font-size:16px;font-weight:700;color:#1e40af">${summary.totalEventsToday}</span>
-            <small style="display:block;font-size:9px;color:#1e40af">Events Today</small>
+            <span style="font-size:15px;font-weight:700;color:#1e40af">${summary.totalEventsToday}</span>
+            <small style="display:block;font-size:8px;color:#1e40af">Events Today</small>
           </div>
           <div style="background:${missingArrivalPatterns.length ? '#fee2e2' : '#f0fdf4'};border:1px solid ${missingArrivalPatterns.length ? '#fca5a5' : '#bbf7d0'};border-radius:6px;padding:8px;text-align:center">
-            <span style="font-size:16px;font-weight:700;color:${missingArrivalPatterns.length ? '#b91c1c' : '#15803d'}">${missingArrivalPatterns.length}</span>
-            <small style="display:block;font-size:9px;color:${missingArrivalPatterns.length ? '#b91c1c' : '#15803d'}">Missing Arrival</small>
+            <span style="font-size:15px;font-weight:700;color:${missingArrivalPatterns.length ? '#b91c1c' : '#15803d'}">${missingArrivalPatterns.length}</span>
+            <small style="display:block;font-size:8px;color:${missingArrivalPatterns.length ? '#b91c1c' : '#15803d'}">Missing Arrival</small>
           </div>
           <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:8px;text-align:center">
-            <span style="font-size:16px;font-weight:700;color:#92400e">${missingDeparturePatterns.length}</span>
-            <small style="display:block;font-size:9px;color:#92400e">Still On Site</small>
+            <span style="font-size:15px;font-weight:700;color:#92400e">${missingDeparturePatterns.length}</span>
+            <small style="display:block;font-size:8px;color:#92400e">Still On Site</small>
+          </div>
+          <div style="background:${duplicateScanAttempts.length ? '#fef3c7' : '#f0fdf4'};border:1px solid ${duplicateScanAttempts.length ? '#fde68a' : '#bbf7d0'};border-radius:6px;padding:8px;text-align:center">
+            <span style="font-size:15px;font-weight:700;color:${duplicateScanAttempts.length ? '#b45309' : '#15803d'}">${duplicateScanAttempts.length}</span>
+            <small style="display:block;font-size:8px;color:${duplicateScanAttempts.length ? '#b45309' : '#15803d'}">Dup Scans</small>
           </div>
           <div style="background:${unresolvedExceptions.length ? '#fee2e2' : '#f0fdf4'};border:1px solid ${unresolvedExceptions.length ? '#fca5a5' : '#bbf7d0'};border-radius:6px;padding:8px;text-align:center">
-            <span style="font-size:16px;font-weight:700;color:${unresolvedExceptions.length ? '#b91c1c' : '#15803d'}">${unresolvedExceptions.length}</span>
-            <small style="display:block;font-size:9px;color:${unresolvedExceptions.length ? '#b91c1c' : '#15803d'}">Exceptions</small>
+            <span style="font-size:15px;font-weight:700;color:${unresolvedExceptions.length ? '#b91c1c' : '#15803d'}">${unresolvedExceptions.length}</span>
+            <small style="display:block;font-size:8px;color:${unresolvedExceptions.length ? '#b91c1c' : '#15803d'}">Exceptions</small>
           </div>
         </div>
 
@@ -2705,6 +2938,15 @@
             <strong style="font-size:11px;color:#9f1239">⚠ Missing Arrival Patterns Detected (${missingArrivalPatterns.length}):</strong>
             <ul style="margin:4px 0 0;padding-left:16px;font-size:10px;color:#be123c">
               ${missingArrivalPatterns.map(m => `<li><b>${escapeHtml(m.pupilName)} (${escapeHtml(m.pupilId)})</b>: Departed at ${escapeHtml(m.departureTime)} without check-in.</li>`).join('')}
+            </ul>
+          </div>
+        ` : ''}
+
+        ${duplicateScanAttempts.length ? `
+          <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:6px;padding:10px;margin-bottom:12px">
+            <strong style="font-size:11px;color:#92400e">⚠ Duplicate Scan Attempts Recorded (${duplicateScanAttempts.length}):</strong>
+            <ul style="margin:4px 0 0;padding-left:16px;font-size:10px;color:#78350f">
+              ${duplicateScanAttempts.slice(0, 5).map(d => `<li><b>${escapeHtml(d.pupilId || 'Scan')}</b> (${escapeHtml(d.time || 'today')}): ${escapeHtml(d.outcome || 'duplicate')} [${escapeHtml(d.source || 'ScanAttempt')}]</li>`).join('')}
             </ul>
           </div>
         ` : ''}
@@ -2830,6 +3072,26 @@
   $('#toggleDegradedModeBtn')?.addEventListener('click', openDegradedModeModal);
   $('#openExceptionReportBtn')?.addEventListener('click', openExceptionReport);
   $('#viewExceptionsTabBtn')?.addEventListener('click', openExceptionReport);
+  $('#exportAttendanceReportBtn')?.addEventListener('click', openAttendanceExportModal);
+  $('#refreshLiveViewsBtn')?.addEventListener('click', loadLiveViewsReport);
+
+  // Live views tab buttons
+  $$('.live-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      $$('.live-tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      activeLiveViewTab = btn.dataset.liveView;
+      renderLiveViewsTable();
+    });
+  });
+
+  // Live views filter change listeners
+  $('#liveCampusFilter')?.addEventListener('change', loadLiveViewsReport);
+  $('#liveClassFilter')?.addEventListener('change', loadLiveViewsReport);
+  $('#liveSessionFilter')?.addEventListener('change', loadLiveViewsReport);
+  $('#liveEventTypeFilter')?.addEventListener('change', loadLiveViewsReport);
+  $('#livePupilSearch')?.addEventListener('input', loadLiveViewsReport);
+
   $('#addPupilBtn').onclick=openAddPupil;
   $('#arrivalSearch').oninput=renderDashboard;
   $('#pupilSearch').oninput=renderPupils;
