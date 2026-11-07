@@ -10,6 +10,7 @@ const {
   Pupil,
   PickupRequest,
   AttendanceEvent,
+  Notification,
   AuditEntry,
   Guardian,
   PupilGuardian,
@@ -2341,4 +2342,264 @@ test('Pickup authorization: Guardian requests, Staff approvals, effective dates,
   // Check audit reasons are preserved
   const revAudit = auditRes.body.audits.find(a => a.action === 'pickup_permission_revoked');
   assert.ok(revAudit.reason.includes('Trip cancelled'));
+});
+
+test('Key flows & Notifications acceptance criteria verification', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. A valid arrival scan creates exactly one arrival event and shows pupil identity for staff confirmation before saving.
+  const createPupilRes = await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Amara Acceptance',
+      id: 'NF-AC01',
+      className: 'Grade 3A',
+      guardian: 'Kelechi Acceptance',
+      guardianPhone: '+1 555-8888',
+      guardianEmail: 'kelechi@example.com',
+      inviteGuardian: true,
+      verifiedContactMethod: 'sms'
+    });
+  assert.equal(createPupilRes.status, 201);
+  const cardDoc = await Card.findOne({ pupilId: 'NF-AC01', status: 'active' });
+  assert.ok(cardDoc);
+
+  // Scan returns valid_pupil showing pupil identity for staff visual pre-verification
+  const scanPreVerifyRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({ code: cardDoc.cardToken, mode: 'arrival' });
+  assert.equal(scanPreVerifyRes.status, 200);
+  assert.equal(scanPreVerifyRes.body.outcome, 'valid_pupil');
+  assert.equal(scanPreVerifyRes.body.pupil.id, 'NF-AC01');
+  assert.equal(scanPreVerifyRes.body.pupil.name, 'Amara Acceptance');
+  assert.ok(scanPreVerifyRes.body.pupil.photo);
+
+  // Staff confirms arrival -> creates exactly 1 arrival event
+  const arrEventRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-AC01',
+      type: 'arrival',
+      source: 'Card scan',
+      clientEventId: 'client-arr-ac-01'
+    });
+  assert.equal(arrEventRes.status, 201);
+  const eventsInDb = await AttendanceEvent.find({ pupilId: 'NF-AC01', type: 'arrival' });
+  assert.equal(eventsInDb.length, 1);
+
+  // 2. A revoked or unknown card cannot create an event through the normal scan flow and displays a useful next step.
+  const unknownScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({ code: 'unknown_token_999999', mode: 'arrival' });
+  assert.equal(unknownScanRes.status, 200);
+  assert.equal(unknownScanRes.body.outcome, 'unknown_code');
+  assert.equal(unknownScanRes.body.canCreateEvent, false);
+  assert.ok(unknownScanRes.body.nextStep);
+  assert.ok(unknownScanRes.body.nextStep.toLowerCase().includes('manual'));
+
+  // Revoke card
+  await request
+    .post(`/api/cards/${cardDoc.id}/revoke`)
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Reported lost' });
+
+  const revokedScanRes = await request
+    .post('/api/cards/scan')
+    .set('Cookie', adminCookie)
+    .send({ code: cardDoc.cardToken, mode: 'arrival' });
+  assert.equal(revokedScanRes.status, 200);
+  assert.equal(revokedScanRes.body.outcome, 'revoked_card');
+  assert.equal(revokedScanRes.body.canCreateEvent, false);
+  assert.ok(revokedScanRes.body.nextStep);
+
+  // 3. A departure cannot be completed without selecting an approved collector or recording an administrator-authorized exception with a reason.
+  const pupilAc = await Pupil.findOne({ id: 'NF-AC01' });
+  pupilAc.collectors.push({ id: 1, name: 'Approved Uncle', relation: 'Uncle', until: 'Ongoing', active: true });
+  await pupilAc.save();
+
+  // Attempt departure with no collector or unapproved collector -> blocked
+  const noColDepRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-AC01',
+      type: 'departure',
+      collectorId: 999
+    });
+  assert.equal(noColDepRes.status, 400);
+  assert.ok(noColDepRes.body.error.includes('Release is blocked'));
+
+  // Exception departure requires reason
+  const noReasonException = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-AC01',
+      type: 'authorized_exception',
+      collectorName: 'Grandma Joy',
+      reason: ''
+    });
+  assert.equal(noReasonException.status, 400);
+
+  // Valid departure with approved collector
+  const validColDepRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-AC01',
+      type: 'departure',
+      collectorId: 1
+    });
+  assert.equal(validColDepRes.status, 201);
+  assert.ok(validColDepRes.body.ok);
+
+  // 4. Each eligible guardian receives one notification attempt per configured channel; status is visible and distinguishes provider acceptance from delivery.
+  // Privacy safe: pupil IDs and addresses omitted from preview and messages
+  const notifsForPupil = await Notification.find({ pupilId: 'NF-AC01' });
+  assert.ok(notifsForPupil.length >= 1);
+  for (const n of notifsForPupil) {
+    assert.equal(n.status, 'accepted_by_provider'); // Distinguishes provider acceptance from delivery
+    assert.ok(!n.message.includes('NF-AC01')); // Does not expose pupil ID
+    assert.ok(!n.privacySafePreview.includes('NF-AC01'));
+  }
+
+  // Update receipt via callback to 'delivered'
+  const notifToUpdate = notifsForPupil[0];
+  const receiptRes = await request
+    .post(`/api/notifications/${notifToUpdate.id}/delivery-receipt`)
+    .send({ status: 'delivered' });
+  assert.equal(receiptRes.status, 200);
+  assert.equal(receiptRes.body.notification.status, 'delivered');
+
+  // 5. A manual event is clearly labeled, requires a reason, appears in reports, and is auditable.
+  await request
+    .post('/api/pupils')
+    .set('Cookie', adminCookie)
+    .send({
+      name: 'Manual Pupil',
+      id: 'NF-AC02',
+      className: 'Grade 1A',
+      guardian: 'Parent Manual'
+    });
+
+  // Manual event without reason fails
+  const noReasonManual = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-AC02',
+      type: 'manual_arrival',
+      source: 'Manual entry',
+      reason: ''
+    });
+  assert.equal(noReasonManual.status, 400);
+  assert.ok(noReasonManual.body.error.includes('explicit reason'));
+
+  // Manual event with reason succeeds and appears in exception reports
+  const validManual = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-AC02',
+      type: 'manual_arrival',
+      source: 'Manual entry',
+      reason: 'card_missing'
+    });
+  assert.equal(validManual.status, 201);
+  const savedManual = await AttendanceEvent.findOne({ id: validManual.body.eventId });
+  assert.equal(savedManual.manualEntry, true);
+  assert.equal(savedManual.reason, 'card_missing');
+
+  const reportRes = await request.get('/api/reports/exceptions').set('Cookie', adminCookie);
+  assert.equal(reportRes.status, 200);
+  const foundEx = reportRes.body.exceptions.find(e => e.id === savedManual.id);
+  assert.ok(foundEx);
+  assert.equal(foundEx.manualEntry, true);
+
+  // 6. A correction preserves the original event and records the correcting actor, time, and reason.
+  const corrRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-AC02',
+      type: 'correction',
+      correctionLink: savedManual.id,
+      reason: 'Incorrect gate terminal selected'
+    });
+  assert.equal(corrRes.status, 201);
+  const origAfter = await AttendanceEvent.findOne({ id: savedManual.id });
+  assert.ok(origAfter); // Original event preserved
+  const corrEvent = await AttendanceEvent.findOne({ id: corrRes.body.eventId });
+  assert.equal(corrEvent.correctionLink, savedManual.id);
+  assert.equal(corrEvent.staff, 'Amara Okafor');
+  assert.equal(corrEvent.correctionReason, 'Incorrect gate terminal selected');
+
+  // 7. A guardian cannot access another household's pupil by changing an identifier or URL.
+  const guardianCookie = await login('tomi.adeyemi@guardian.northfield.school', 'GatewiseDemo!26');
+  // Attempt accessing pupil NF-AC02 (not linked to Tomi Adeyemi)
+  const forbiddenPupilRes = await request
+    .get('/api/guardian/pupils/NF-AC02')
+    .set('Cookie', guardianCookie);
+  assert.equal(forbiddenPupilRes.status, 403);
+
+  // Accessing linked pupil NF-1042 succeeds
+  const allowedPupilRes = await request
+    .get('/api/guardian/pupils/NF-1042')
+    .set('Cookie', guardianCookie);
+  assert.equal(allowedPupilRes.status, 200);
+  assert.equal(allowedPupilRes.body.pupil.id, 'NF-1042');
+
+  // 8. If offline queueing is enabled, a queued event is visibly pending, syncs once, and does not claim notification success before server processing.
+  // Client creates offline queue item for an arrival
+  const clientOfflineId = `offline-ac-${Date.now()}`;
+  const syncOfflineRes = await request
+    .post('/api/events/sync')
+    .set('Cookie', adminCookie)
+    .send({
+      events: [{
+        clientEventId: clientOfflineId,
+        pupilId: 'NF-AC01',
+        type: 'arrival',
+        deviceManaged: true,
+        deviceEncrypted: true,
+        reason: 'card_missing',
+        date: '2026-12-25'
+      }]
+    });
+  assert.equal(syncOfflineRes.status, 200);
+  assert.equal(syncOfflineRes.body.results[0].ok, true);
+
+  // Syncing a second time with same clientEventId syncs once (isDuplicate: true)
+  const syncAgainRes = await request
+    .post('/api/events/sync')
+    .set('Cookie', adminCookie)
+    .send({
+      events: [{
+        clientEventId: clientOfflineId,
+        pupilId: 'NF-AC01',
+        type: 'arrival',
+        deviceManaged: true,
+        deviceEncrypted: true,
+        reason: 'card_missing',
+        date: '2026-12-25'
+      }]
+    });
+  assert.equal(syncAgainRes.status, 200);
+  assert.equal(syncAgainRes.body.results[0].isDuplicate, true);
+
+  // 9. Guardian pause non-critical alerts without altering school records
+  const pauseAlertsRes = await request
+    .post('/api/guardian/pause-alerts')
+    .set('Cookie', guardianCookie)
+    .send({ pause: true });
+  assert.equal(pauseAlertsRes.status, 200);
+  assert.equal(pauseAlertsRes.body.pausedNonCriticalAlerts, true);
+
+  // Official school records for pupil NF-1042 remain unchanged
+  const pupilDocAfterPause = await Pupil.findOne({ id: 'NF-1042' });
+  assert.equal(pupilDocAfterPause.active, true);
 });

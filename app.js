@@ -2290,17 +2290,37 @@
       const { outcome, message, pupil: scanPupil, existingEvent, card } = res;
 
       if (outcome === 'unknown_code') {
-        showScanResult(false, 'Unknown Code (Unrecognized QR)', message);
-        toast(message, '!');
+        const nextStepText = res.nextStep || 'Search for pupil by name or pupil number in the directory and verify identity with on-screen photo before recording a manual entry.';
+        showScanResult(false, 'Unknown Code (Unrecognized QR)', `${message} Next step: ${nextStepText}`);
+        openModal(`
+          <h2 id="modalTitle" style="color:#b91c1c">⚠ Unrecognized Card</h2>
+          <p class="modal-intro">
+            ${escapeHtml(message)}
+          </p>
+          <div style="background:#fef2f2;border:1px solid #fecaca;padding:12px;border-radius:6px;font-size:11px;color:#991b1b;margin:12px 0">
+            <strong>Recommended Next Step:</strong>
+            <p style="margin:4px 0 0;font-size:10px;line-height:1.4">${escapeHtml(nextStepText)}</p>
+          </div>
+          <div class="modal-actions">
+            <button class="button button-outline" id="closeUnknownModal">Close</button>
+            <button class="button button-primary" id="switchToManualSearch">Search Directory ↗</button>
+          </div>
+        `);
+        $('#closeUnknownModal').onclick = closeModal;
+        $('#switchToManualSearch').onclick = () => {
+          closeModal();
+          $('#pupilIdInput')?.focus();
+        };
         return;
       }
 
       if (outcome === 'revoked_card') {
+        const nextStepText = res.nextStep || 'Do not proceed with this card. Perform a manual lookup to confirm pupil identity and request administrator to reissue an official card.';
         showScanResult(false, 'Revoked Card', message);
         openModal(`
           <h2 id="modalTitle" style="color:#b91c1c">⚠ Card Revoked</h2>
           <p class="modal-intro" style="color:#991b1b">
-            This pupil ID card has been revoked and cannot be used for gate handover.
+            This pupil ID card has been revoked and cannot create an event through the normal scan flow.
           </p>
           ${scanPupil ? `
             <div class="confirm-profile">
@@ -2313,13 +2333,21 @@
           ` : ''}
           <div style="background:#fee2e2;border:1px solid #fca5a5;padding:12px;border-radius:6px;font-size:11px;color:#991b1b;margin:12px 0">
             <strong>Revocation Reason:</strong> ${escapeHtml(res.reason || 'Card deactivated by administration.')}
-            <p style="margin:4px 0 0;font-size:10px">If child is present, perform manual lookup with photo verification or contact administrator for card reissue.</p>
+            <div style="margin-top:6px;padding-top:6px;border-top:1px dashed #f87171">
+              <strong>Useful Next Step:</strong>
+              <p style="margin:2px 0 0;font-size:10px">${escapeHtml(nextStepText)}</p>
+            </div>
           </div>
           <div class="modal-actions">
-            <button class="button button-primary" id="closeRevokedModal">Understood</button>
+            <button class="button button-outline" id="closeRevokedModal">Understood</button>
+            <button class="button button-primary" id="revokedManualSearchBtn">Manual Lookup ↗</button>
           </div>
         `);
         $('#closeRevokedModal').onclick = closeModal;
+        $('#revokedManualSearchBtn').onclick = () => {
+          closeModal();
+          $('#pupilIdInput')?.focus();
+        };
         return;
       }
 
@@ -2922,6 +2950,31 @@
       $$('input[name="prefChannels"]', form).forEach(cb => {
         cb.checked = current.includes(cb.value);
       });
+
+      // Pause non-critical alerts toggle
+      const pauseContainer = $('#pauseAlertsContainer') || document.createElement('div');
+      pauseContainer.id = 'pauseAlertsContainer';
+      pauseContainer.style.cssText = 'border-top:1px dashed #cbd5e1;padding-top:10px;margin-top:10px';
+      pauseContainer.innerHTML = `
+        <label style="display:flex;align-items:center;gap:8px;font-size:11px;color:#334155;cursor:pointer">
+          <input type="checkbox" id="pauseAlertsCheckbox" ${data.guardian.pausedNonCriticalAlerts ? 'checked' : ''}>
+          <span><b>Pause non-critical notifications</b> (emergency exception alerts will still be sent)</span>
+        </label>
+        <small style="display:block;margin-top:3px;color:#64748b;font-size:9.5px">Official school attendance and pickup records remain completely unaltered.</small>
+      `;
+      if (!$('#pauseAlertsContainer')) form.appendChild(pauseContainer);
+
+      $('#pauseAlertsCheckbox').onchange = async (e) => {
+        try {
+          const res = await api('/api/guardian/pause-alerts', { pause: e.target.checked });
+          toast(res.message);
+          loadGuardianPortal();
+        } catch (err) {
+          toast(err.message, '!');
+          e.target.checked = !e.target.checked;
+        }
+      };
+
       form.onsubmit = async (e) => {
         e.preventDefault();
         const selected = $$('input[name="prefChannels"]:checked', form).map(cb => cb.value);
@@ -2930,7 +2983,10 @@
           return;
         }
         try {
-          const res = await api('/api/guardian/preferences', { channels: selected });
+          const res = await api('/api/guardian/preferences', {
+            channels: selected,
+            whatsappOptIn: selected.includes('whatsapp')
+          });
           toast(res.message);
           loadGuardianPortal();
         } catch (err) {
