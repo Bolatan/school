@@ -4649,6 +4649,37 @@ app.get('/api/compliance/processors', requireAuth(['admin', 'manager']), async (
       }
     ];
 
+    const risksAndMitigations = [
+      {
+        risk: "A copied QR card is used",
+        mitigation: "Treat QR as lookup only; staff checks pupil photo and physical presence; revoke/reissue cards; monitor unusual scans"
+      },
+      {
+        risk: "Incorrect guardian receives an alert",
+        mitigation: "School-controlled guardian linking, verified contact channels, access review, test alerts, and correction process"
+      },
+      {
+        risk: "Unauthorized person collects a pupil",
+        mitigation: "Approved pickup list, effective dates, staff identity-check procedure, escalation path, audited exceptions"
+      },
+      {
+        risk: "Network/provider outage delays alerts",
+        mitigation: "Visible pending/failure status, alternative school procedure, retries, provider monitoring, post-event reconciliation"
+      },
+      {
+        risk: "Staff makes a mistaken scan or selection",
+        mitigation: "Confirmation screen, undo/correction workflow that preserves audit history, training and operational review"
+      },
+      {
+        risk: "Sensitive child data is exposed",
+        mitigation: "Data minimization, role boundaries, secure devices, encryption, retention rules, incident response, vendor review"
+      },
+      {
+        risk: "Alert volume or SMS fees become excessive",
+        mitigation: "Per-channel preferences, clear cost model, event deduplication, pilot usage measurements"
+      }
+    ];
+
     res.json({
       ok: true,
       dataProcessors: recipients,
@@ -4660,7 +4691,8 @@ app.get('/api/compliance/processors', requireAuth(['admin', 'manager']), async (
         "Automatic face recognition or location tracking",
         "Transport/bus tracking, payments, grades, messaging feeds, and learning-management features",
         "Complex multi-tenant analytics and third-party integrations"
-      ]
+      ],
+      risksAndMitigations
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

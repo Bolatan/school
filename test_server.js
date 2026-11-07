@@ -1,6 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const supertest = require('supertest');
+const fs = require('fs');
+const path = require('path');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const mongoose = require('mongoose');
 
@@ -1911,6 +1913,17 @@ test('Non-Functional Requirements: Availability, Performance, Security, Privacy,
   assert.ok(processorsRes.body.dataMinimizationNotice.includes('minimum data necessary'));
   assert.ok(Array.isArray(processorsRes.body.scopeExclusions));
   assert.equal(processorsRes.body.scopeExclusions.length, 5);
+  assert.ok(Array.isArray(processorsRes.body.risksAndMitigations));
+  assert.equal(processorsRes.body.risksAndMitigations.length, 7);
+  assert.ok(processorsRes.body.risksAndMitigations.some(r => r.risk.includes('copied QR card')));
+  assert.ok(processorsRes.body.risksAndMitigations.some(r => r.risk.includes('Sensitive child data')));
+
+  // Verify README.md contains the exact Risks and Mitigations table
+  const readmeContent = fs.readFileSync(path.join(__dirname, 'README.md'), 'utf-8');
+  assert.ok(readmeContent.includes('### Risks and mitigations'));
+  assert.ok(readmeContent.includes('| Risk | Mitigation |'));
+  assert.ok(readmeContent.includes('| A copied QR card is used | Treat QR as lookup only; staff checks pupil photo and physical presence; revoke/reissue cards; monitor unusual scans |'));
+  assert.ok(readmeContent.includes('| Sensitive child data is exposed | Data minimization, role boundaries, secure devices, encryption, retention rules, incident response, vendor review |'));
 
   // Role privacy isolation: viewer cannot toggle degraded mode or access administrative configurations
   const viewerCookie = await login('oliver.twist@northfield.school', 'GatewiseDemo!26').catch(() => null);

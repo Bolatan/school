@@ -177,6 +177,18 @@ Targets should be confirmed against pilot conditions and provider capabilities b
 - **PII and token protection:** Pupil names and card tokens are strictly protected and never exposed in public URLs, analytics, error stacks, or support logs.
 - **Safeguarding incident process:** Standard operating incident procedures are established for lost devices, compromised accounts, incorrect alerts, and suspected unauthorized pickups with direct escalation to designated safeguarding contacts.
 
+### Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| A copied QR card is used | Treat QR as lookup only; staff checks pupil photo and physical presence; revoke/reissue cards; monitor unusual scans |
+| Incorrect guardian receives an alert | School-controlled guardian linking, verified contact channels, access review, test alerts, and correction process |
+| Unauthorized person collects a pupil | Approved pickup list, effective dates, staff identity-check procedure, escalation path, audited exceptions |
+| Network/provider outage delays alerts | Visible pending/failure status, alternative school procedure, retries, provider monitoring, post-event reconciliation |
+| Staff makes a mistaken scan or selection | Confirmation screen, undo/correction workflow that preserves audit history, training and operational review |
+| Sensitive child data is exposed | Data minimization, role boundaries, secure devices, encryption, retention rules, incident response, vendor review |
+| Alert volume or SMS fees become excessive | Per-channel preferences, clear cost model, event deduplication, pilot usage measurements |
+
 ## MVP scope and exclusions
 
 ### Include in MVP
