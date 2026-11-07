@@ -4317,7 +4317,14 @@ app.get('/api/system/status', async (req, res) => {
         supportedLocales: ["en-GB", "en-NG", "en-US", "fr-FR"],
         phoneFormat: "E.164 international format (+...)",
         dateFormat: "YYYY-MM-DD (ISO) and locale-specific display"
-      }
+      },
+      scopeExclusions: [
+        "WhatsApp until provider, opt-in, template, and local rules are settled",
+        "NFC or biometric identification",
+        "Automatic face recognition or location tracking",
+        "Transport/bus tracking, payments, grades, messaging feeds, and learning-management features",
+        "Complex multi-tenant analytics and third-party integrations"
+      ]
     };
 
     res.json(statusPayload);
@@ -4404,7 +4411,14 @@ app.get('/api/compliance/processors', requireAuth(['admin', 'manager']), async (
       ok: true,
       dataProcessors: recipients,
       dataMinimizationNotice: "Gatewise collects and processes only the minimum data necessary for safe pupil arrival and dismissal. Biometric data and precise GPS locations are strictly excluded.",
-      dataRetentionPolicy: "Standard records retained in compliance with statutory pupil safety regulations; expired offline queues automatically purged after 24 hours."
+      dataRetentionPolicy: "Standard records retained in compliance with statutory pupil safety regulations; expired offline queues automatically purged after 24 hours.",
+      scopeExclusions: [
+        "WhatsApp until provider, opt-in, template, and local rules are settled",
+        "NFC or biometric identification",
+        "Automatic face recognition or location tracking",
+        "Transport/bus tracking, payments, grades, messaging feeds, and learning-management features",
+        "Complex multi-tenant analytics and third-party integrations"
+      ]
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

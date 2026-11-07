@@ -191,6 +191,14 @@ Targets should be confirmed against pilot conditions and provider capabilities b
 - Live dashboard, daily report, audit history, and basic exception handling
 - Privacy notice, support process, backups, monitoring, and staff training materials
 
+### Exclusions
+
+- WhatsApp until provider, opt-in, template, and local rules are settled
+- NFC or biometric identification
+- Automatic face recognition or location tracking
+- Transport/bus tracking, payments, grades, messaging feeds, and learning-management features
+- Complex multi-tenant analytics and third-party integrations
+
 ## Production deployment guidance (Vercel, Next.js, Express.js, MongoDB)
 
 To transition Gatewise from a local Python/SQLite MVP into a production cloud deployment, deploy the application on **Vercel** using **Next.js**, **Node.js**, **Express.js**, and **MongoDB**.
