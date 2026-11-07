@@ -19,11 +19,57 @@ const userSchema = new mongoose.Schema({
 
 const collectorSchema = new mongoose.Schema({
   id: { type: Number },
-  name: { type: String, required: true },
-  relation: { type: String, required: true },
+  name: { type: String, required: true, trim: true },
+  relation: { type: String, default: '' },
+  phone: { type: String, default: '' },
+  email: { type: String, default: '' },
+  idCheckGuidance: { type: String, default: '' },
+  photoUrl: { type: String, default: '' },
+  permissionType: {
+    type: String,
+    enum: ['ongoing', 'time_limited', 'one_time', 'emergency_exception'],
+    default: 'ongoing'
+  },
+  startDate: { type: String, default: null },
+  endDate: { type: String, default: null },
   until: { type: String, default: 'Ongoing' },
-  active: { type: Boolean, default: true }
+  status: { type: String, enum: ['active', 'expired', 'revoked'], default: 'active' },
+  active: { type: Boolean, default: true },
+  approvedBy: { type: String, default: '' },
+  approvedAt: { type: Date, default: null },
+  revokedBy: { type: String, default: '' },
+  revokedAt: { type: Date, default: null },
+  revokedReason: { type: String, default: '' },
+  usedAt: { type: Date, default: null }
 });
+
+const pickupContactSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true },
+  pupilId: { type: String, required: true, ref: 'Pupil', index: true },
+  name: { type: String, required: true, trim: true },
+  relation: { type: String, default: '' },
+  phone: { type: String, default: '' },
+  email: { type: String, default: '' },
+  idCheckGuidance: { type: String, default: '' },
+  photoUrl: { type: String, default: '' },
+  permissionType: {
+    type: String,
+    enum: ['ongoing', 'time_limited', 'one_time', 'emergency_exception'],
+    default: 'ongoing'
+  },
+  startDate: { type: String, default: null },
+  endDate: { type: String, default: null },
+  until: { type: String, default: 'Ongoing' },
+  status: { type: String, enum: ['active', 'expired', 'revoked'], default: 'active' },
+  active: { type: Boolean, default: true },
+  approvedBy: { type: String, default: '' },
+  approvedAt: { type: Date, default: null },
+  revokedBy: { type: String, default: '' },
+  revokedAt: { type: Date, default: null },
+  revokedReason: { type: String, default: '' },
+  usedAt: { type: Date, default: null },
+  collectorId: { type: Number, default: null }
+}, { timestamps: true });
 
 const pupilSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true, uppercase: true, trim: true },
@@ -55,12 +101,27 @@ const notificationSchema = new mongoose.Schema({
 const pickupRequestSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
   pupilId: { type: String, required: true, ref: 'Pupil' },
-  name: { type: String, required: true },
-  relation: { type: String, required: true },
+  guardianId: { type: String, default: null },
+  name: { type: String, required: true, trim: true },
+  relation: { type: String, default: '' },
+  phone: { type: String, default: '' },
+  email: { type: String, default: '' },
+  idCheckGuidance: { type: String, default: '' },
+  photoUrl: { type: String, default: '' },
+  permissionType: {
+    type: String,
+    enum: ['ongoing', 'time_limited', 'one_time', 'emergency_exception'],
+    default: 'ongoing'
+  },
+  startDate: { type: String, default: null },
+  endDate: { type: String, default: null },
   requestedBy: { type: String, required: true },
   time: { type: String, required: true },
   note: { type: String, default: '' },
-  status: { type: String, enum: ['pending', 'approved', 'declined'], default: 'pending' }
+  status: { type: String, enum: ['pending', 'approved', 'declined'], default: 'pending' },
+  decisionReason: { type: String, default: '' },
+  decidedBy: { type: String, default: '' },
+  decidedAt: { type: Date, default: null }
 }, { timestamps: true });
 
 const attendanceEventSchema = new mongoose.Schema({
@@ -113,6 +174,7 @@ const sessionSchema = new mongoose.Schema({
 const User = mongoose.model('User', userSchema);
 const Pupil = mongoose.model('Pupil', pupilSchema);
 const PickupRequest = mongoose.model('PickupRequest', pickupRequestSchema);
+const PickupContact = mongoose.model('PickupContact', pickupContactSchema);
 const AttendanceEvent = mongoose.model('AttendanceEvent', attendanceEventSchema);
 const Notification = mongoose.model('Notification', notificationSchema);
 const AuditEntry = mongoose.model('AuditEntry', auditEntrySchema);
@@ -296,6 +358,7 @@ module.exports = {
   User,
   Pupil,
   PickupRequest,
+  PickupContact,
   AttendanceEvent,
   Notification,
   AuditEntry,

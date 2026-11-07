@@ -251,7 +251,134 @@
   function renderDashboard(){const es=todayEvents(), arrivals=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival'), deps=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception'), present=pupils.filter(p=>statusFor(p)==='On campus').length;$('#presentCount').innerHTML=`${present} <small>/ 248</small>`;$('#presentProgress').style.width=`${Math.min(100,present/248*100)}%`;$('#arrivalsCount').textContent=arrivals.length;$('#departuresCount').textContent=deps.length;$('#lastArrival').textContent=arrivals.length?arrivals.sort((a,b)=>b.createdAt-a.createdAt)[0].time:'—';$('#alertsSent').textContent=es.filter(e=>e.alert==='Sent').length;$('#attentionCount').textContent=requests.length+1;const term=($('#arrivalSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>statusFor(p)==='On campus'&&(!term||`${p.name} ${p.className}`.toLowerCase().includes(term))&&(classChoice==='All classes'||p.className===classChoice));$('#arrivalRows').innerHTML=list.slice(0,7).map(p=>{const e=lastEvent(p.id);return `<tr><td>${pupilCell(p)}</td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td class="time-cell">${escapeHtml(e?.time||'—')}</td><td>${badge('On campus','status-present')}</td></tr>`}).join('');$('#emptyArrivals').classList.toggle('hidden',list.length>0);const recent=es.slice().sort((a,b)=>b.createdAt-a.createdAt).slice(0,5);$('#recentActivity').innerHTML=recent.map(activityItem).join('')||'<div class="empty-state">No events recorded yet.</div>';updateOfflineStatusUI();}
   function activityItem(e){const p=pupil(e.pupilId)||{name:'Unknown pupil'};let type=e.type;const isArrival=type==='arrival'||type==='manual_arrival';const isDep=type==='departure'||type==='manual_departure'||type==='authorized_exception';const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION</span>`:'';const pendingTag=isPendingSync?`<span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">PENDING SYNC (NOT NOTIFIED)</span>`:'';const alertText=isPendingSync?'Pending sync (parents NOT notified)':(e.alert||'Sent');return `<div class="activity-item"><div class="activity-icon ${isArrival?'arrival':isDep?'departure':'request'}">${isArrival?'↘':isDep?'↗':'◷'}</div><div class="activity-copy"><b>${isArrival?'Arrival recorded':isDep?'Departure recorded':'Activity'}</b> for ${escapeHtml(p.name)}${e.collector?` with ${escapeHtml(e.collector)}`:''} ${manualTag} ${corrTag} ${pendingTag}<small>${escapeHtml(e.time)} · ${escapeHtml(e.staff)} · Guardian alert: <b>${escapeHtml(alertText)}</b></small></div></div>`;}
   function renderPupils(){const q=($('#pupilSearch')?.value||'').toLowerCase();const list=pupils.filter(p=>{const st=statusFor(p);const matchStatus=pupilStatusChoice==='All statuses'||st===pupilStatusChoice;const matchQ=!q||`${p.name} ${p.id} ${p.className}`.toLowerCase().includes(q);const matchCls=classChoice==='All classes'||p.className===classChoice;return matchStatus&&matchQ&&matchCls;});$('#pupilResultCount').textContent=`${list.length} pupils`;$('#pupilRows').innerHTML=list.map(p=>`<tr><td>${pupilCell(p)}</td><td><span class="pupil-id">${escapeHtml(p.id)}</span></td><td><span class="class-pill">${escapeHtml(p.className)}</span></td><td>${p.collectors.length} approved</td><td>${badge(statusFor(p),statusClass(statusFor(p)))}</td><td><button class="row-menu" data-pupil-detail="${escapeHtml(p.id)}" aria-label="Pupil options">···</button></td></tr>`).join('');}
-  function renderPickup(){const total=pupils.reduce((n,p)=>n+p.collectors.length,0);$('#pendingCount').textContent=requests.length;$('#approvedCount').textContent=total;$('#requestList').innerHTML=requests.length?requests.map(r=>{const p=pupil(r.pupilId)||{name:'Unknown pupil',initials:'?',color:'blue'};return `<div class="request-card"><div>${avatar(p)}</div><div class="request-details"><strong>${escapeHtml(r.name)} <span class="card-tag">· ${escapeHtml(r.relation)}</span></strong><p>Pickup for <b>${escapeHtml(p.name)}</b> · Requested by ${escapeHtml(r.requestedBy)}</p><small>${escapeHtml(r.time)} — ${escapeHtml(r.note)}</small></div>${signedInUser?.role==='viewer'?'':`<div class="request-actions"><button class="decline-button" data-request="${r.id}" data-action="decline">Decline</button><button class="approve-button" data-request="${r.id}" data-action="approve">✓ Approve</button></div>`}</div>`}).join(''):'<div class="empty-state">No pending pickup requests.</div>';const q=($('#pickupSearch')?.value||'').toLowerCase();const active=pupils.flatMap(p=>p.collectors.map(c=>({p,c}))).filter(x=>`${x.p.name} ${x.c.name} ${x.c.relation}`.toLowerCase().includes(q));$('#approvedRows').innerHTML=active.map(({p,c})=>`<tr><td>${pupilCell(p)}</td><td><b>${escapeHtml(c.name)}</b></td><td>${escapeHtml(c.relation)}</td><td>${escapeHtml(c.until||'Ongoing')}</td><td>${badge('Approved','status-approved')}</td></tr>`).join('');}
+  let pickupAuditRecords = [];
+
+  function renderPickup(){
+    const allCols = pupils.flatMap(p => (p.allCollectors || p.collectors || []).map(c => ({ p, c })));
+    const activeCols = allCols.filter(x => x.c.status === 'active' || x.c.active);
+    const oneTimeCols = allCols.filter(x => x.c.permissionType === 'one_time' || x.c.permissionType === 'time_limited' || x.c.permissionType === 'emergency_exception');
+
+    $('#pendingCount').textContent = requests.length;
+    $('#approvedCount').textContent = activeCols.length;
+    if ($('#oneTimeCount')) $('#oneTimeCount').textContent = oneTimeCols.length;
+
+    $('#requestList').innerHTML = requests.length ? requests.map(r => {
+      const p = pupil(r.pupilId) || { name: 'Unknown pupil', initials: '?', color: 'blue' };
+      const permBadge = `<span class="card-tag" style="background:#eff6ff;color:#1e40af;font-weight:700">${escapeHtml((r.permissionType || 'ongoing').replace(/_/g, ' ').toUpperCase())}</span>`;
+      const verificationInfo = [
+        r.phone ? `📞 ${escapeHtml(r.phone)}` : '',
+        r.email ? `✉ ${escapeHtml(r.email)}` : '',
+        r.idCheckGuidance ? `🛡 Guidance: ${escapeHtml(r.idCheckGuidance)}` : ''
+      ].filter(Boolean).join(' · ');
+
+      return `
+        <div class="request-card">
+          <div>${avatar(p)}</div>
+          <div class="request-details">
+            <strong>${escapeHtml(r.name)} <span class="card-tag">· ${escapeHtml(r.relation || 'Contact')}</span> ${permBadge}</strong>
+            <p>Pickup for <b>${escapeHtml(p.name)}</b> (${escapeHtml(p.id)}) · Requested by ${escapeHtml(r.requestedBy)}</p>
+            ${verificationInfo ? `<small style="display:block;color:#475569;margin:2px 0">${verificationInfo}</small>` : ''}
+            <small style="color:#64748b">${escapeHtml(r.time)} — ${escapeHtml(r.note || 'No notes provided')}</small>
+          </div>
+          ${signedInUser?.role === 'viewer' ? '' : `
+            <div class="request-actions">
+              <button class="decline-button" data-request="${r.id}" data-action="decline">Decline</button>
+              <button class="approve-button" data-request="${r.id}" data-action="approve">✓ Approve</button>
+            </div>
+          `}
+        </div>
+      `;
+    }).join('') : '<div class="empty-state">No pending pickup requests.</div>';
+
+    const q = ($('#pickupSearch')?.value || '').toLowerCase();
+    const filtered = allCols.filter(x => `${x.p.name} ${x.p.id} ${x.c.name} ${x.c.relation} ${x.c.permissionType || ''} ${x.c.status || ''}`.toLowerCase().includes(q));
+
+    $('#approvedRows').innerHTML = filtered.length ? filtered.map(({ p, c }) => {
+      const pType = c.permissionType || (c.until === 'Ongoing' ? 'ongoing' : 'time_limited');
+      let typeBadge = '<span class="status-pill status-present">Ongoing</span>';
+      if (pType === 'one_time') typeBadge = '<span class="status-pill" style="background:#fef3c7;color:#92400e;font-weight:700">One-time</span>';
+      else if (pType === 'time_limited') typeBadge = '<span class="status-pill" style="background:#e0f2fe;color:#0369a1;font-weight:700">Time-limited</span>';
+      else if (pType === 'emergency_exception') typeBadge = '<span class="status-pill" style="background:#fee2e2;color:#b91c1c;font-weight:700">Emergency Exception</span>';
+
+      let effectiveText = escapeHtml(c.until || 'Ongoing');
+      if (c.startDate || c.endDate) {
+        effectiveText = `${c.startDate ? escapeHtml(c.startDate) : 'Start'} → ${c.endDate ? escapeHtml(c.endDate) : (c.until || 'Ongoing')}`;
+      }
+
+      const idCheckHtml = [
+        c.phone ? `📞 ${escapeHtml(c.phone)}` : '',
+        c.email ? `✉ ${escapeHtml(c.email)}` : '',
+        c.idCheckGuidance ? `<span style="display:block;font-size:10px;color:#475569">🛡 ${escapeHtml(c.idCheckGuidance)}</span>` : ''
+      ].filter(Boolean).join(' ');
+
+      const isCurrentActive = c.status === 'active' || (!c.status && c.active);
+      let statusBadge = badge('Active', 'status-approved');
+      if (c.status === 'revoked' || !c.active) statusBadge = '<span class="status-pill" style="background:#fee2e2;color:#991b1b;font-weight:700">Revoked</span>';
+      else if (c.status === 'expired') statusBadge = '<span class="status-pill" style="background:#f1f5f9;color:#64748b;font-weight:700">Expired</span>';
+
+      const canManage = (signedInUser?.role === 'admin' || signedInUser?.role === 'manager');
+      const actionButtons = canManage ? `
+        <div style="display:flex;gap:6px">
+          <button class="button button-outline button-small edit-col-btn" data-pupil-id="${escapeHtml(p.id)}" data-col-id="${c.id}" style="padding:2px 8px;font-size:11px">Edit</button>
+          ${isCurrentActive ? `<button class="button button-outline button-small revoke-col-btn" data-pupil-id="${escapeHtml(p.id)}" data-col-id="${c.id}" data-col-name="${escapeHtml(c.name)}" style="padding:2px 8px;font-size:11px;color:#b91c1c;border-color:#fca5a5">Revoke</button>` : ''}
+        </div>
+      ` : '—';
+
+      return `
+        <tr>
+          <td>${pupilCell(p)}</td>
+          <td><b>${escapeHtml(c.name)}</b></td>
+          <td>${escapeHtml(c.relation || '—')}</td>
+          <td>${typeBadge}</td>
+          <td><small style="font-weight:600;color:#334155">${effectiveText}</small></td>
+          <td><small>${idCheckHtml || 'Standard gate photo check'}</small></td>
+          <td>${statusBadge}</td>
+          <td>${actionButtons}</td>
+        </tr>
+      `;
+    }).join('') : '<tr><td colspan="8" class="empty-state" style="text-align:center;padding:16px">No pickup contacts found.</td></tr>';
+
+    $$('.edit-col-btn').forEach(b => {
+      b.onclick = () => openEditPickupContactModal(b.dataset.pupilId, Number(b.dataset.colId));
+    });
+    $$('.revoke-col-btn').forEach(b => {
+      b.onclick = () => openRevokePickupContactModal(b.dataset.pupilId, Number(b.dataset.colId), b.dataset.colName);
+    });
+
+    loadPickupAuditHistory();
+  }
+
+  async function loadPickupAuditHistory() {
+    const tableBody = $('#pickupAuditRows');
+    if (!tableBody) return;
+    try {
+      const res = await api('/api/pickup/audit');
+      pickupAuditRecords = res.audits || [];
+      renderPickupAuditUI();
+    } catch {}
+  }
+
+  function renderPickupAuditUI() {
+    const tableBody = $('#pickupAuditRows');
+    if (!tableBody) return;
+    if (!pickupAuditRecords.length) {
+      tableBody.innerHTML = '<tr><td colspan="5" class="empty-state" style="text-align:center;padding:12px">No pickup permission audit records found.</td></tr>';
+      return;
+    }
+    tableBody.innerHTML = pickupAuditRecords.map(a => {
+      const timeStr = a.timestamp ? new Date(a.timestamp).toLocaleString() : '—';
+      const actorName = a.actor ? `${escapeHtml(a.actor.name || 'Staff')} (${escapeHtml(a.actor.role || 'staff')})` : 'System';
+      return `
+        <tr>
+          <td style="font-size:11px;color:#64748b;white-space:nowrap">${escapeHtml(timeStr)}</td>
+          <td style="font-weight:600;font-size:11px">${actorName}</td>
+          <td><span class="card-tag" style="font-weight:700">${escapeHtml(a.action)}</span></td>
+          <td style="font-family:monospace;font-size:11px;color:#1e293b">${escapeHtml(a.objectId)}</td>
+          <td style="font-size:11px;color:#334155;max-width:320px;word-break:break-word">${escapeHtml(a.reason || '—')}</td>
+        </tr>
+      `;
+    }).join('');
+  }
   function renderActivity(){const q=($('#activitySearch')?.value||'').toLowerCase();let es=todayEvents().slice().sort((a,b)=>b.createdAt-a.createdAt);if(activityChoice==='Arrivals')es=es.filter(e=>e.type==='arrival'||e.type==='manual_arrival');else if(activityChoice==='Departures')es=es.filter(e=>e.type==='departure'||e.type==='manual_departure'||e.type==='authorized_exception');else if(activityChoice==='Manual entries')es=es.filter(e=>e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.source==='Paper/voice manual fallback'||e.reason);es=es.filter(e=>{const p=pupil(e.pupilId)||{};return `${p.name||''} ${e.type} ${e.source} ${e.staff} ${e.reason||''} ${e.alert||''}`.toLowerCase().includes(q)});$('#activityResultCount').textContent=`${es.length} events`;$('#activityRows').innerHTML=es.map(e=>{const p=pupil(e.pupilId)||{name:'Unknown pupil',guardian:'',initials:'?',color:'blue'};const isPendingSync=e.alert==='Pending sync'||e.syncStatus==='pending_sync';const manualTag=e.manualEntry||e.source==='Manual entry'||e.source==='Manual ID lookup'||e.reason?`<br><span class="manual-tag">MANUAL ENTRY (${escapeHtml((e.reason||'manual').replace('_',' '))})</span>`:'';const corrTag=e.correctionLink?`<br><span class="manual-tag" style="background:#fef3c7;color:#92400e">CORRECTION (LINKED: ${escapeHtml(e.correctionLink)})</span>`:'';const offlineTag=e.source==='Offline queued'||isPendingSync?`<br><span class="manual-tag" style="background:#fee2e2;color:#b91c1c;font-weight:700">OFFLINE QUEUED</span>`:'';const fallbackTag=e.source==='Paper/voice manual fallback'?`<br><span class="manual-tag" style="background:#f3e8ff;color:#6b21a8;font-weight:700">RECONCILED FALLBACK (${escapeHtml(e.reconciliationAuditReason||'Manual log')})</span>`:'';const canCorrect=(signedInUser?.role==='admin'||signedInUser?.role==='manager')&&!isPendingSync?`<button class="text-link" data-correct-event="${escapeHtml(e.id)}" style="margin-left:8px;font-size:11px">Correct</button>`:'';const alertBadge=isPendingSync?`<span class="status-pill status-pending" title="Parents have NOT been notified. Will sync upon reconnection."><i></i>Pending sync</span>`:badge(e.alert||'Sent',e.alert==='Sent'?'status-approved':'status-pending');return `<tr><td>${badge(e.type.includes('arrival')?'Arrival':e.type.includes('exception')?'Authorized Exception':'Departure',e.type.includes('arrival')?'status-present':'status-departed')}</td><td>${pupilCell(p)}</td><td>${escapeHtml(e.source||'Card scan')}${e.collector?`<small class="card-tag"> · ${escapeHtml(e.collector)}</small>`:''}${manualTag}${corrTag}${offlineTag}${fallbackTag}${canCorrect}</td><td>${escapeHtml(e.staff)}</td><td class="time-cell">${escapeHtml(e.time)}</td><td>${alertBadge}</td></tr>`}).join('');$('#emptyActivity').classList.toggle('hidden',es.length>0);updateOfflineStatusUI();}
   function showScanResult(isSuccess, message, details = '') {
     const banner = $('#scanResultBanner');
@@ -349,16 +476,19 @@
         <div style="margin:12px 0">
           <label style="font-size:10px;font-weight:700;color:#454b60;display:block;margin-bottom:6px">Active Approved Pickup Contacts</label>
           <div class="approved-collectors-list">
-            ${collectors.map((c, i) => `
+            ${collectors.map((c, i) => {
+              const permTypeLabel = (c.permissionType || (c.until === 'Ongoing' ? 'ongoing' : 'time_limited')).replace(/_/g, ' ').toUpperCase();
+              const guidanceText = c.idCheckGuidance ? ` · 🛡 ${escapeHtml(c.idCheckGuidance)}` : '';
+              return `
               <label class="collector-card-item ${i === 0 ? 'selected' : ''}" data-collector-id="${c.id}">
                 <input type="radio" name="selectedCollectorRadio" value="${c.id}" ${i === 0 ? 'checked' : ''}>
                 <div class="collector-avatar">${escapeHtml(initials(c.name))}</div>
                 <div class="collector-meta">
-                  <strong>${escapeHtml(c.name)} <span style="font-weight:normal;color:#6f7487">(${escapeHtml(c.relation)})</span></strong>
-                  <small>Status: Approved · Valid until: ${escapeHtml(c.until || 'Ongoing')}</small>
+                  <strong>${escapeHtml(c.name)} <span style="font-weight:normal;color:#6f7487">(${escapeHtml(c.relation || 'Contact')})</span> <span class="card-tag" style="font-size:9px">${escapeHtml(permTypeLabel)}</span></strong>
+                  <small>Valid: ${escapeHtml(c.until || 'Ongoing')}${guidanceText}</small>
                 </div>
               </label>
-            `).join('')}
+            `;}).join('')}
           </div>
         </div>
         <div class="form-field" style="margin-bottom:12px">
@@ -825,7 +955,427 @@
     };
   }
 
-  function resolvePickupRequest(r,action){if(action==='approve'){const localToday=new Date(Date.now()-new Date().getTimezoneOffset()*60000).toISOString().slice(0,10);openModal(`<h2 id="modalTitle">Approve pickup</h2><p class="modal-intro">This adds ${escapeHtml(r.name)} to the approved collector list for ${escapeHtml(pupil(r.pupilId)?.name||'the pupil')}. Set the last valid pickup date.</p><form id="approvePickupForm"><div class="form-field"><label>Approval expires on</label><input name="validUntil" type="date" min="${localToday}" value="${localToday}" required></div><div class="danger-note" style="margin-top:12px">Staff must still verify this person’s identity at pickup. Confirm the expiry with the guardian before approving.</div><div class="modal-actions"><button type="button" class="button button-outline" id="cancelPickupApproval">Cancel</button><button class="button button-primary" type="submit">Approve collector</button></div></form>`);$('#cancelPickupApproval').onclick=closeModal;$('#approvePickupForm').onsubmit=async ev=>{ev.preventDefault();const validUntil=new FormData(ev.currentTarget).get('validUntil');try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action,validUntil});acceptState(res.state);closeModal();render();toast(`${r.name} approved until ${validUntil}.`)}catch(err){toast(err.message,'!')}};return}openModal(`<h2 id="modalTitle">Decline pickup request?</h2><p class="modal-intro">${escapeHtml(r.name)} will not be added to the approved collector list. Contact the guardian through the school’s usual process.</p><div class="modal-actions"><button class="button button-outline" id="cancelDecline">Keep request</button><button class="button button-dark" id="confirmDecline">Decline request</button></div>`);$('#cancelDecline').onclick=closeModal;$('#confirmDecline').onclick=async()=>{try{const res=await api(`/api/pickup/${encodeURIComponent(r.id)}`,{action});acceptState(res.state);closeModal();render();toast('Pickup request declined.')}catch(err){toast(err.message,'!')}}}
+  function resolvePickupRequest(r, action) {
+    if (action === 'approve') {
+      const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+      const reqType = r.permissionType || 'ongoing';
+      openModal(`
+        <h2 id="modalTitle">Approve Pickup Contact</h2>
+        <p class="modal-intro">This approves <b>${escapeHtml(r.name)}</b> for <b>${escapeHtml(pupil(r.pupilId)?.name || 'the pupil')}</b> (${escapeHtml(r.pupilId)}). Set permission type and effective dates.</p>
+        <form id="approvePickupForm" class="form-grid">
+          <div class="form-field full">
+            <label>Permission Type *</label>
+            <select name="permissionType" id="approvePermTypeSelect">
+              <option value="ongoing" ${reqType === 'ongoing' ? 'selected' : ''}>Ongoing (indefinite regular pickup)</option>
+              <option value="time_limited" ${reqType === 'time_limited' ? 'selected' : ''}>Time-limited (date range)</option>
+              <option value="one_time" ${reqType === 'one_time' ? 'selected' : ''}>One-time (expires automatically after departure)</option>
+              <option value="emergency_exception" ${reqType === 'emergency_exception' ? 'selected' : ''}>Emergency Exception (urgent temporary authorization)</option>
+            </select>
+          </div>
+          <div class="form-field">
+            <label>Start Date</label>
+            <input name="startDate" type="date" value="${r.startDate || localToday}">
+          </div>
+          <div class="form-field">
+            <label>Approval Expiry / End Date</label>
+            <input name="validUntil" id="approveValidUntilInput" type="date" min="${localToday}" value="${r.endDate || (reqType === 'ongoing' ? '' : localToday)}">
+            <small style="color:#64748b">Leave blank for Ongoing permissions.</small>
+          </div>
+          <div class="form-field full">
+            <label>ID Check & Verification Guidance</label>
+            <input name="idCheckGuidance" value="${escapeHtml(r.idCheckGuidance || 'Verify government photo ID (Driver License or Passport)')}">
+          </div>
+          <div class="form-field full">
+            <label>Staff Approval Reason / Audit Note *</label>
+            <input name="reason" required value="Verified with parent via school office" placeholder="Explain verification performed...">
+          </div>
+          <div class="danger-note full" style="margin-top:6px">
+            Staff must still verify this person's identity at dismissal. One-time permissions will expire automatically once departure is logged.
+          </div>
+          <div class="modal-actions form-field full">
+            <button type="button" class="button button-outline" id="cancelPickupApproval">Cancel</button>
+            <button class="button button-primary" type="submit">Confirm & Approve</button>
+          </div>
+        </form>
+      `);
+
+      $('#cancelPickupApproval').onclick = closeModal;
+      $('#approvePermTypeSelect').onchange = (e) => {
+        const val = e.target.value;
+        const untilInput = $('#approveValidUntilInput');
+        if (val === 'ongoing') {
+          untilInput.required = false;
+        } else {
+          untilInput.required = true;
+          if (!untilInput.value) untilInput.value = localToday;
+        }
+      };
+
+      $('#approvePickupForm').onsubmit = async (ev) => {
+        ev.preventDefault();
+        const f = new FormData(ev.currentTarget);
+        const pType = f.get('permissionType');
+        let validUntil = f.get('validUntil');
+        if (pType === 'ongoing' && !validUntil) validUntil = 'Ongoing';
+
+        try {
+          const res = await api(`/api/pickup/${encodeURIComponent(r.id)}`, {
+            action: 'approve',
+            permissionType: pType,
+            startDate: f.get('startDate') || undefined,
+            validUntil: validUntil || undefined,
+            idCheckGuidance: f.get('idCheckGuidance') || undefined,
+            reason: f.get('reason')
+          });
+          acceptState(res.state);
+          closeModal();
+          render();
+          toast(`${r.name} approved.`);
+        } catch (err) {
+          toast(err.message, '!');
+        }
+      };
+      return;
+    }
+
+    openModal(`
+      <h2 id="modalTitle">Decline pickup request?</h2>
+      <p class="modal-intro">${escapeHtml(r.name)} will not be added to the approved collector list. Provide a reason for the school audit log.</p>
+      <form id="declinePickupForm" class="form-grid">
+        <div class="form-field full">
+          <label>Decline Reason *</label>
+          <input name="reason" required value="Declined per school safeguard policy" placeholder="Reason for declining...">
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelDecline">Keep request</button>
+          <button class="button button-dark" type="submit">Decline request</button>
+        </div>
+      </form>
+    `);
+    $('#cancelDecline').onclick = closeModal;
+    $('#declinePickupForm').onsubmit = async (ev) => {
+      ev.preventDefault();
+      const reason = new FormData(ev.currentTarget).get('reason');
+      try {
+        const res = await api(`/api/pickup/${encodeURIComponent(r.id)}`, { action: 'decline', reason });
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast('Pickup request declined.');
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  function openAddPickupContactModal() {
+    const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const pupilOpts = pupils.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)}) - ${escapeHtml(p.className)}</option>`).join('');
+
+    openModal(`
+      <h2 id="modalTitle">Add Authorized Pickup Contact</h2>
+      <p class="modal-intro">Directly register an approved collector under school policy. All changes are logged to the audit history.</p>
+      <form id="addPickupContactForm" class="form-grid">
+        <div class="form-field full">
+          <label>Pupil *</label>
+          <select name="pupilId" required>${pupilOpts}</select>
+        </div>
+        <div class="form-field">
+          <label>Contact Full Name *</label>
+          <input name="name" required placeholder="Full legal name">
+        </div>
+        <div class="form-field">
+          <label>Relationship (Optional)</label>
+          <input name="relation" placeholder="e.g. Grandparent, Babysitter, Aunt">
+        </div>
+        <div class="form-field">
+          <label>Phone (Optional)</label>
+          <input name="phone" placeholder="+1 555-0100">
+        </div>
+        <div class="form-field">
+          <label>Email (Optional)</label>
+          <input name="email" type="email" placeholder="contact@example.com">
+        </div>
+        <div class="form-field full">
+          <label>Permission Type *</label>
+          <select name="permissionType" id="directPermTypeSelect">
+            <option value="ongoing">Ongoing (Regular Authorized Collector)</option>
+            <option value="time_limited">Time-Limited (Specific Date Window)</option>
+            <option value="one_time">One-Time (Single Departure Only)</option>
+            <option value="emergency_exception">Emergency Exception</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Start Date</label>
+          <input name="startDate" type="date" value="${localToday}">
+        </div>
+        <div class="form-field">
+          <label>Approval Expiry / End Date</label>
+          <input name="validUntil" id="directValidUntilInput" type="date" min="${localToday}">
+          <small style="color:#64748b">Leave blank for Ongoing permissions.</small>
+        </div>
+        <div class="form-field full">
+          <label>Photo / ID-Check Guidance (If Collected)</label>
+          <input name="idCheckGuidance" placeholder="e.g. Check photo passport / National ID / Driving Licence" value="Check government-issued photo ID">
+        </div>
+        <div class="form-field full">
+          <label>Mandatory Audit Reason *</label>
+          <input name="reason" required placeholder="Why is this permission being added? (e.g. Guardian signed authorization form)">
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelAddContact">Cancel</button>
+          <button type="submit" class="button button-primary">Save Pickup Contact</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelAddContact').onclick = closeModal;
+    $('#addPickupContactForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.currentTarget);
+      const pType = f.get('permissionType');
+      let validUntil = f.get('validUntil');
+      if (pType === 'ongoing' && !validUntil) validUntil = 'Ongoing';
+
+      try {
+        const res = await api('/api/pickup/contact', {
+          pupilId: f.get('pupilId'),
+          name: f.get('name'),
+          relation: f.get('relation'),
+          phone: f.get('phone'),
+          email: f.get('email'),
+          permissionType: pType,
+          startDate: f.get('startDate') || undefined,
+          validUntil: validUntil || undefined,
+          idCheckGuidance: f.get('idCheckGuidance'),
+          reason: f.get('reason')
+        });
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast('Pickup contact added successfully.');
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  function openEditPickupContactModal(pupilId, collectorId) {
+    const p = pupil(pupilId);
+    if (!p) return;
+    const col = (p.allCollectors || p.collectors || []).find(c => c.id === collectorId);
+    if (!col) return;
+
+    const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const pType = col.permissionType || (col.until === 'Ongoing' ? 'ongoing' : 'time_limited');
+
+    openModal(`
+      <h2 id="modalTitle">Edit Pickup Permission</h2>
+      <p class="modal-intro">Update authorization details for <b>${escapeHtml(col.name)}</b> on pupil <b>${escapeHtml(p.name)}</b>. Modifications require an audit reason.</p>
+      <form id="editPickupContactForm" class="form-grid">
+        <div class="form-field">
+          <label>Contact Full Name *</label>
+          <input name="name" required value="${escapeHtml(col.name)}">
+        </div>
+        <div class="form-field">
+          <label>Relationship</label>
+          <input name="relation" value="${escapeHtml(col.relation || '')}">
+        </div>
+        <div class="form-field">
+          <label>Phone</label>
+          <input name="phone" value="${escapeHtml(col.phone || '')}">
+        </div>
+        <div class="form-field">
+          <label>Email</label>
+          <input name="email" type="email" value="${escapeHtml(col.email || '')}">
+        </div>
+        <div class="form-field full">
+          <label>Permission Type *</label>
+          <select name="permissionType">
+            <option value="ongoing" ${pType === 'ongoing' ? 'selected' : ''}>Ongoing</option>
+            <option value="time_limited" ${pType === 'time_limited' ? 'selected' : ''}>Time-Limited</option>
+            <option value="one_time" ${pType === 'one_time' ? 'selected' : ''}>One-Time</option>
+            <option value="emergency_exception" ${pType === 'emergency_exception' ? 'selected' : ''}>Emergency Exception</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Start Date</label>
+          <input name="startDate" type="date" value="${col.startDate || ''}">
+        </div>
+        <div class="form-field">
+          <label>Approval Expiry / End Date</label>
+          <input name="validUntil" type="date" min="${localToday}" value="${col.endDate || (col.until !== 'Ongoing' ? col.until : '')}">
+        </div>
+        <div class="form-field full">
+          <label>Photo / ID-Check Guidance</label>
+          <input name="idCheckGuidance" value="${escapeHtml(col.idCheckGuidance || '')}">
+        </div>
+        <div class="form-field full">
+          <label>Mandatory Audit Reason *</label>
+          <input name="reason" required placeholder="Why was this permission changed? (e.g. Parent requested extension)">
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelEditContact">Cancel</button>
+          <button type="submit" class="button button-primary">Update Permission</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelEditContact').onclick = closeModal;
+    $('#editPickupContactForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.currentTarget);
+      const permType = f.get('permissionType');
+      let validUntil = f.get('validUntil');
+      if (permType === 'ongoing' && !validUntil) validUntil = 'Ongoing';
+
+      try {
+        const res = await api(`/api/pickup/collectors/${encodeURIComponent(pupilId)}/${encodeURIComponent(collectorId)}`, {
+          name: f.get('name'),
+          relation: f.get('relation'),
+          phone: f.get('phone'),
+          email: f.get('email'),
+          permissionType: permType,
+          startDate: f.get('startDate') || undefined,
+          validUntil: validUntil || undefined,
+          idCheckGuidance: f.get('idCheckGuidance'),
+          reason: f.get('reason')
+        }, 'PUT');
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast('Pickup permission updated.');
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  function openRevokePickupContactModal(pupilId, collectorId, collectorName) {
+    openModal(`
+      <h2 id="modalTitle">Revoke Pickup Permission?</h2>
+      <p class="modal-intro">Are you sure you want to revoke pickup permission for <b>${escapeHtml(collectorName)}</b>? They will immediately be blocked from collecting the child at the gate.</p>
+      <form id="revokePickupContactForm" class="form-grid">
+        <div class="form-field full">
+          <label>Mandatory Revocation Reason (Preserved in Audit Log) *</label>
+          <input name="reason" required placeholder="Explain why permission is revoked (e.g. Parental dispute, revoked by mother)">
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelRevokeContact">Keep Permission</button>
+          <button type="submit" class="button button-dark" style="background:#b91c1c">Revoke Permission</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelRevokeContact').onclick = closeModal;
+    $('#revokePickupContactForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const reason = new FormData(e.currentTarget).get('reason');
+      try {
+        const res = await api(`/api/pickup/collectors/${encodeURIComponent(pupilId)}/${encodeURIComponent(collectorId)}/revoke`, {
+          pupilId,
+          collectorId,
+          reason
+        });
+        acceptState(res.state);
+        closeModal();
+        render();
+        toast('Pickup permission revoked.');
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
+
+  function openGuardianPickupRequestModal() {
+    if (!guardianPortalData || !guardianPortalData.pupils.length) {
+      toast('No linked pupils available.', '!');
+      return;
+    }
+    const localToday = new Date(Date.now() - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    const pupilOpts = guardianPortalData.pupils.map(p => `<option value="${escapeHtml(p.id)}">${escapeHtml(p.name)} (${escapeHtml(p.id)})</option>`).join('');
+
+    openModal(`
+      <h2 id="modalTitle">Request Authorized Pickup Contact</h2>
+      <p class="modal-intro">Submit a new pickup contact for school administration review and approval. Include verification details required under school policy.</p>
+      <form id="guardianPickupReqForm" class="form-grid">
+        <div class="form-field full">
+          <label>Select Child *</label>
+          <select name="pupilId" required>${pupilOpts}</select>
+        </div>
+        <div class="form-field">
+          <label>Collector Legal Name *</label>
+          <input name="name" required placeholder="Full name matching ID">
+        </div>
+        <div class="form-field">
+          <label>Relationship to Child (Optional)</label>
+          <input name="relation" placeholder="e.g. Uncle, Family Friend, Nanny">
+        </div>
+        <div class="form-field">
+          <label>Contact Phone (Optional)</label>
+          <input name="phone" placeholder="+1 555-0100">
+        </div>
+        <div class="form-field">
+          <label>Contact Email (Optional)</label>
+          <input name="email" type="email" placeholder="contact@example.com">
+        </div>
+        <div class="form-field full">
+          <label>Permission Duration *</label>
+          <select name="permissionType">
+            <option value="ongoing">Ongoing (indefinite regular collection)</option>
+            <option value="time_limited">Time-limited (temporary window)</option>
+            <option value="one_time">One-time (single pickup today)</option>
+            <option value="emergency_exception">Emergency Exception</option>
+          </select>
+        </div>
+        <div class="form-field">
+          <label>Effective Date</label>
+          <input name="startDate" type="date" value="${localToday}">
+        </div>
+        <div class="form-field">
+          <label>Expiry Date (if time-limited)</label>
+          <input name="endDate" type="date" min="${localToday}">
+        </div>
+        <div class="form-field full">
+          <label>ID Check Guidance / Notes for Gate Staff</label>
+          <input name="idCheckGuidance" placeholder="e.g. Will present Driving License or National Identity Card">
+        </div>
+        <div class="form-field full">
+          <label>Additional Notes / Instructions</label>
+          <textarea name="note" placeholder="Provide any additional context for school office approval..." style="width:100%;padding:8px;border-radius:6px;border:1px solid #d0d5dd;font:inherit;min-height:50px"></textarea>
+        </div>
+        <div class="modal-actions form-field full">
+          <button type="button" class="button button-outline" id="cancelGuardianPickupReq">Cancel</button>
+          <button type="submit" class="button button-primary">Submit for School Approval</button>
+        </div>
+      </form>
+    `);
+
+    $('#cancelGuardianPickupReq').onclick = closeModal;
+    $('#guardianPickupReqForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = new FormData(e.currentTarget);
+      try {
+        const res = await api('/api/pickup/request', {
+          pupilId: f.get('pupilId'),
+          name: f.get('name'),
+          relation: f.get('relation'),
+          phone: f.get('phone'),
+          email: f.get('email'),
+          permissionType: f.get('permissionType'),
+          startDate: f.get('startDate') || undefined,
+          endDate: f.get('endDate') || undefined,
+          idCheckGuidance: f.get('idCheckGuidance'),
+          note: f.get('note')
+        });
+        closeModal();
+        toast('Pickup contact request submitted to school office.');
+        loadGuardianPortal();
+      } catch (err) {
+        toast(err.message, '!');
+      }
+    };
+  }
   function matchPupil(p, query) {
     const q = query.trim().toLowerCase();
     const pid = p.id.toLowerCase();
@@ -2830,6 +3380,9 @@
   $('#toggleDegradedModeBtn')?.addEventListener('click', openDegradedModeModal);
   $('#openExceptionReportBtn')?.addEventListener('click', openExceptionReport);
   $('#viewExceptionsTabBtn')?.addEventListener('click', openExceptionReport);
+  $('#addPickupPermissionBtn')?.addEventListener('click', openAddPickupContactModal);
+  $('#refreshPickupAuditBtn')?.addEventListener('click', loadPickupAuditHistory);
+  $('#guardianAddPickupBtn')?.addEventListener('click', openGuardianPickupRequestModal);
   $('#addPupilBtn').onclick=openAddPupil;
   $('#arrivalSearch').oninput=renderDashboard;
   $('#pupilSearch').oninput=renderPupils;
