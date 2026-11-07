@@ -1,16 +1,22 @@
 const crypto = require('crypto');
 const {
-  User,
+  School,
+  Campus,
   Pupil,
-  PickupRequest,
-  AttendanceEvent,
   Guardian,
   PupilGuardian,
-  CorrectionRequest,
+  PickupContact,
   Card,
-  Campus,
-  SchoolClass,
+  StaffUser,
+  User,
   Device,
+  AttendanceEvent,
+  Notification,
+  AuditEntry,
+  Session,
+  PickupRequest,
+  CorrectionRequest,
+  SchoolClass,
   NotificationTemplate,
   EscalationContact,
   SchoolSetting
@@ -112,6 +118,43 @@ function verifyMfaToken(secret, token) {
 }
 
 async function seedInitialData() {
+  // Seed School
+  const schoolCount = await School.countDocuments();
+  if (schoolCount === 0) {
+    await School.create({
+      id: 'school-main',
+      name: 'Northfield Academy',
+      timezone: 'Europe/London',
+      policySettings: {
+        discloseCollectorName: true,
+        allowOfflineStalePickupPolicy: false,
+        retentionSettings: {
+          attendanceRetentionDays: 365,
+          auditLogRetentionDays: 730,
+          notificationRetentionDays: 90,
+          pickupContactRetentionDays: 365,
+          offlineQueueTtlHours: 24,
+          sessionTimeoutMinutes: 480,
+          autoPurgeEnabled: true
+        },
+        operatingSessions: [
+          { id: "morning", name: "Morning Arrival", startTime: "07:30", endTime: "08:30", defaultMode: "arrival" },
+          { id: "standard", name: "Standard Day", startTime: "08:30", endTime: "14:30", defaultMode: "arrival" },
+          { id: "afternoon", name: "Afternoon Dismissal", startTime: "14:30", endTime: "15:30", defaultMode: "departure" }
+        ]
+      },
+      notificationConfiguration: {
+        pushEnabled: true,
+        smsEnabled: true,
+        whatsappEnabled: false,
+        emailEnabled: true,
+        defaultProvider: 'MockGateway',
+        deliverySlaSeconds: 60
+      },
+      active: true
+    });
+  }
+
   const userCount = await User.countDocuments();
   if (userCount === 0) {
     const { salt, hash } = passwordHash(DEMO_PASSWORD);
@@ -177,10 +220,13 @@ async function seedInitialData() {
 
     for (let idx = 0; idx < seedPupils.length; idx++) {
       const [id, name, className, guardian, initials, color, photo] = seedPupils[idx];
-      await Pupil.create({
+      const createdPupil = await Pupil.create({
         id,
+        schoolId: 'school-main',
         name,
+        class: className,
         className,
+        campus: 'Primary campus',
         guardian,
         guardianPhone: guardianPhones[id] || "+1 555-0100",
         guardianEmail: `${guardian.toLowerCase().replace(/\s+/g, '.')}@example.com`,
@@ -188,9 +234,37 @@ async function seedInitialData() {
         initials,
         color,
         photo,
+        photoReference: photo,
+        status: 'active',
         active: true,
         collectors: collectorsMap[id] || []
       });
+
+      // Seed PickupContacts for each collector
+      const cols = collectorsMap[id] || [];
+      for (const c of cols) {
+        await PickupContact.create({
+          id: `pc-${id}-${c.id}`,
+          pupil: createdPupil._id,
+          pupilId: id,
+          name: c.name,
+          relationship: c.relation,
+          relation: c.relation,
+          phone: guardianPhones[id] || "+1 555-0100",
+          verificationData: {
+            method: 'Photo matched',
+            idDocumentGuidance: 'Government photo ID check required'
+          },
+          effectiveDates: {
+            startDate: new Date(),
+            endDate: c.until === 'Ongoing' ? null : new Date(c.until),
+            until: c.until
+          },
+          permissionType: c.until === 'Ongoing' ? 'ongoing' : 'time_limited',
+          status: 'active',
+          active: true
+        });
+      }
 
       // Generate random non-meaningful token for card QR (no PII)
       const cardToken = 'gw_tok_' + crypto.randomBytes(12).toString('hex');
