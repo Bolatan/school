@@ -11,6 +11,7 @@ const {
   User,
   Pupil,
   PickupRequest,
+  PickupContact,
   AttendanceEvent,
   Notification,
   AuditEntry,
@@ -168,9 +169,62 @@ async function getStateJson() {
   activeCards.forEach(c => { cardMap[c.pupilId] = c; });
 
   const pupils = pupilDocs.map(p => {
+    const todayMidnight = new Date().setHours(0,0,0,0);
     const activeCollectors = (p.collectors || [])
-      .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
-      .map(c => ({ id: c.id, name: c.name, relation: c.relation, until: c.until }));
+      .filter(c => {
+        if (!c.active) return false;
+        if (c.status === 'revoked' || c.status === 'expired') return false;
+        if (c.permissionType === 'one_time' && c.usedAt) return false;
+        if (c.endDate && new Date(c.endDate) < todayMidnight) return false;
+        if (c.until && c.until !== 'Ongoing' && new Date(c.until) < todayMidnight) return false;
+        return true;
+      })
+      .map(c => ({
+        id: c.id,
+        name: c.name,
+        relation: c.relation || '',
+        phone: c.phone || '',
+        email: c.email || '',
+        idCheckGuidance: c.idCheckGuidance || '',
+        photoUrl: c.photoUrl || '',
+        permissionType: c.permissionType || 'ongoing',
+        startDate: c.startDate || null,
+        endDate: c.endDate || null,
+        until: c.until || 'Ongoing',
+        status: c.status || 'active',
+        active: c.active !== false
+      }));
+
+    const allCollectors = (p.collectors || []).map(c => {
+      let isExpired = false;
+      if (c.permissionType === 'one_time' && c.usedAt) isExpired = true;
+      else if (c.endDate && new Date(c.endDate) < todayMidnight) isExpired = true;
+      else if (c.until && c.until !== 'Ongoing' && new Date(c.until) < todayMidnight) isExpired = true;
+
+      const computedStatus = !c.active || c.status === 'revoked' ? 'revoked' : (isExpired || c.status === 'expired' ? 'expired' : 'active');
+      return {
+        id: c.id,
+        name: c.name,
+        relation: c.relation || '',
+        phone: c.phone || '',
+        email: c.email || '',
+        idCheckGuidance: c.idCheckGuidance || '',
+        photoUrl: c.photoUrl || '',
+        permissionType: c.permissionType || 'ongoing',
+        startDate: c.startDate || null,
+        endDate: c.endDate || null,
+        until: c.until || 'Ongoing',
+        status: computedStatus,
+        active: computedStatus === 'active',
+        approvedBy: c.approvedBy || '',
+        approvedAt: c.approvedAt || null,
+        revokedBy: c.revokedBy || '',
+        revokedAt: c.revokedAt || null,
+        revokedReason: c.revokedReason || '',
+        usedAt: c.usedAt || null
+      };
+    });
+
     const pCard = cardMap[p.id];
     return {
       id: p.id,
@@ -184,6 +238,7 @@ async function getStateJson() {
       color: p.color,
       photo: p.photo,
       collectors: activeCollectors,
+      allCollectors,
       cardToken: pCard ? pCard.cardToken : null,
       cardId: pCard ? pCard.id : null,
       cardStatus: pCard ? pCard.status : 'no_card'
@@ -269,7 +324,14 @@ async function getStateJson() {
     id: r.id,
     pupilId: r.pupilId,
     name: r.name,
-    relation: r.relation,
+    relation: r.relation || '',
+    phone: r.phone || '',
+    email: r.email || '',
+    idCheckGuidance: r.idCheckGuidance || '',
+    photoUrl: r.photoUrl || '',
+    permissionType: r.permissionType || 'ongoing',
+    startDate: r.startDate || null,
+    endDate: r.endDate || null,
     requestedBy: r.requestedBy,
     time: r.time,
     note: r.note
@@ -1962,9 +2024,16 @@ async function processEventRecord(user, eventData) {
     const collectorId = eventData.collectorId;
     const collectorNameInput = eventData.collectorName ? String(eventData.collectorName).trim() : null;
 
-    const activeCollectors = (pupil.collectors || []).filter(
-      c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0))
-    );
+    const todayMidnight = new Date().setHours(0,0,0,0);
+    const activeCollectors = (pupil.collectors || []).filter(c => {
+      if (!c.active) return false;
+      if (c.status === 'revoked' || c.status === 'expired') return false;
+      if (c.permissionType === 'one_time' && c.usedAt) return false;
+      if (c.startDate && new Date(c.startDate) > new Date()) return false;
+      if (c.endDate && new Date(c.endDate) < todayMidnight) return false;
+      if (c.until && c.until !== 'Ongoing' && new Date(c.until) < todayMidnight) return false;
+      return true;
+    });
 
     let cr = null;
     if (collectorId !== undefined && collectorId !== null) {
@@ -1977,7 +2046,29 @@ async function processEventRecord(user, eventData) {
       throw new Error('That collector is not approved for this pupil. Escalation instruction: Release is blocked. An unapproved collector requires a school administrator exception authorization.');
     }
     collector = cr.name;
-    verification = String(eventData.verification || 'Photo matched').slice(0, 60);
+    verification = String(eventData.verification || (cr.idCheckGuidance ? `ID Checked: ${cr.idCheckGuidance}` : 'Photo matched')).slice(0, 100);
+
+    // If collector has a one_time permission, mark it as used and expired automatically
+    if (cr.permissionType === 'one_time') {
+      cr.usedAt = utcDate;
+      cr.status = 'expired';
+      cr.active = false;
+      await pupil.save();
+
+      await PickupContact.updateMany(
+        { pupilId: pupil.id, collectorId: cr.id, permissionType: 'one_time' },
+        { $set: { usedAt: utcDate, status: 'expired', active: false } }
+      );
+
+      await AuditEntry.create({
+        userId: user._id,
+        action: 'expire_pickup_permission',
+        objectType: 'pickup_permission',
+        objectId: `${pupil.id}:${cr.id}`,
+        reason: `Automatic expiration of one-time permission following departure event for pupil ${pupil.id} with collector ${cr.name}`,
+        createdAt: utcDate
+      });
+    }
   } else if (typ === 'authorized_exception') {
     if (user.role !== 'admin') {
       const err = new Error('Only a school administrator can authorize an unapproved collector exception.');
@@ -2256,9 +2347,31 @@ app.post('/api/cards/scan', requireAuth(['admin', 'manager']), async (req, res) 
     }
 
     // Minimum useful identity information to verify pupil photo
+    const todayMidnight = new Date().setHours(0,0,0,0);
     const activeCollectors = (pupil.collectors || [])
-      .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
-      .map(c => ({ id: c.id, name: c.name, relation: c.relation, until: c.until }));
+      .filter(c => {
+        if (!c.active) return false;
+        if (c.status === 'revoked' || c.status === 'expired') return false;
+        if (c.permissionType === 'one_time' && c.usedAt) return false;
+        if (c.startDate && new Date(c.startDate) > new Date()) return false;
+        if (c.endDate && new Date(c.endDate) < todayMidnight) return false;
+        if (c.until && c.until !== 'Ongoing' && new Date(c.until) < todayMidnight) return false;
+        return true;
+      })
+      .map(c => ({
+        id: c.id,
+        name: c.name,
+        relation: c.relation || '',
+        phone: c.phone || '',
+        email: c.email || '',
+        idCheckGuidance: c.idCheckGuidance || '',
+        photoUrl: c.photoUrl || '',
+        permissionType: c.permissionType || 'ongoing',
+        startDate: c.startDate || null,
+        endDate: c.endDate || null,
+        until: c.until || 'Ongoing',
+        status: c.status || 'active'
+      }));
 
     const pupilInfo = {
       id: pupil.id,
@@ -2616,10 +2729,188 @@ app.post('/api/events/reconcile', requireAuth(['admin', 'manager']), async (req,
   }
 });
 
+// Staff creates a direct pickup permission/contact
+app.post('/api/pickup/contact', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pupilId = String(req.body.pupilId || '').trim().toUpperCase();
+    const name = String(req.body.name || '').trim();
+    const relation = String(req.body.relation || '').trim();
+    const phone = String(req.body.phone || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const idCheckGuidance = String(req.body.idCheckGuidance || '').trim();
+    const photoUrl = String(req.body.photoUrl || '').trim();
+    const permissionType = ['ongoing', 'time_limited', 'one_time', 'emergency_exception'].includes(req.body.permissionType)
+      ? req.body.permissionType
+      : 'ongoing';
+    const startDate = req.body.startDate ? String(req.body.startDate).trim() : null;
+    let validUntil = String(req.body.validUntil || req.body.endDate || '');
+    const reason = String(req.body.reason || req.body.auditReason || '').trim();
+
+    if (!pupilId || !name) {
+      return res.status(400).json({ error: 'Pupil and contact name are required.' });
+    }
+    if (!reason) {
+      return res.status(400).json({ error: 'Adding a pickup permission requires a mandatory audit reason.' });
+    }
+
+    if (permissionType === 'ongoing' && !validUntil) {
+      validUntil = 'Ongoing';
+    } else if (permissionType === 'one_time' && !validUntil) {
+      validUntil = new Date().toISOString().slice(0, 10);
+    } else if ((permissionType === 'time_limited' || permissionType === 'emergency_exception') && !validUntil) {
+      return res.status(400).json({ error: 'Choose a valid pickup approval expiry date.' });
+    }
+
+    if (validUntil && validUntil !== 'Ongoing') {
+      const expiryDate = new Date(validUntil);
+      if (isNaN(expiryDate.getTime())) {
+        return res.status(400).json({ error: 'Choose a valid pickup approval expiry date.' });
+      }
+      const todayFloor = new Date();
+      todayFloor.setHours(0,0,0,0);
+      if (expiryDate < todayFloor) {
+        return res.status(400).json({ error: 'Pickup approval expiry cannot be in the past.' });
+      }
+    }
+
+    const pupil = await Pupil.findOne({ id: pupilId });
+    if (!pupil) {
+      return res.status(404).json({ error: 'Pupil not found.' });
+    }
+
+    const nextId = await getNextCollectorId(pupil);
+    pupil.collectors.push({
+      id: nextId,
+      name,
+      relation,
+      phone,
+      email,
+      idCheckGuidance,
+      photoUrl,
+      permissionType,
+      startDate,
+      endDate: validUntil !== 'Ongoing' ? validUntil : null,
+      until: validUntil,
+      status: 'active',
+      active: true,
+      approvedBy: req.user.name,
+      approvedAt: new Date()
+    });
+    await pupil.save();
+
+    const contactDoc = await PickupContact.create({
+      id: 'PC-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+      pupilId,
+      name,
+      relation,
+      phone,
+      email,
+      idCheckGuidance,
+      photoUrl,
+      permissionType,
+      startDate,
+      endDate: validUntil !== 'Ongoing' ? validUntil : null,
+      until: validUntil,
+      status: 'active',
+      active: true,
+      approvedBy: req.user.name,
+      approvedAt: new Date(),
+      collectorId: nextId
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'pickup_permission_added',
+      objectType: 'pickup_permission',
+      objectId: `${pupilId}:${nextId}`,
+      reason: `Staff ${req.user.name} added pickup permission (${permissionType}) for ${name} on pupil ${pupilId}. Reason: ${reason}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({ ok: true, state, contact: contactDoc });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Pickup contact request submission by guardian
+app.post(['/api/pickup/request', '/api/pickup-requests'], requireAuth(['guardian', 'admin', 'manager']), async (req, res) => {
+  try {
+    const guardianId = req.user.guardianId;
+    const pupilId = String(req.body.pupilId || '').trim().toUpperCase();
+    const name = String(req.body.name || '').trim();
+    const relation = String(req.body.relation || '').trim();
+    const phone = String(req.body.phone || '').trim();
+    const email = String(req.body.email || '').trim().toLowerCase();
+    const idCheckGuidance = String(req.body.idCheckGuidance || '').trim();
+    const photoUrl = String(req.body.photoUrl || '').trim();
+    const permissionType = ['ongoing', 'time_limited', 'one_time', 'emergency_exception'].includes(req.body.permissionType)
+      ? req.body.permissionType
+      : 'ongoing';
+    const startDate = req.body.startDate ? String(req.body.startDate).trim() : null;
+    const endDate = req.body.endDate ? String(req.body.endDate).trim() : (req.body.validUntil ? String(req.body.validUntil).trim() : null);
+    const note = String(req.body.note || req.body.message || '').trim();
+
+    if (!pupilId || !name) {
+      return res.status(400).json({ error: 'Pupil and contact name are required.' });
+    }
+
+    // Verify guardian is linked to this pupil (for guardian role)
+    if (req.user.role === 'guardian') {
+      const link = await PupilGuardian.findOne({ guardianId, pupilId, status: { $ne: 'revoked' } });
+      if (!link) {
+        return res.status(403).json({ error: 'You are only authorized to request pickup contacts for your linked pupil(s).' });
+      }
+    }
+
+    const reqId = 'PR-' + crypto.randomBytes(4).toString('hex').toUpperCase();
+    const newRequest = await PickupRequest.create({
+      id: reqId,
+      pupilId,
+      guardianId: guardianId || null,
+      name,
+      relation,
+      phone,
+      email,
+      idCheckGuidance,
+      photoUrl,
+      permissionType,
+      startDate,
+      endDate,
+      requestedBy: req.user.name,
+      time: 'Today, ' + formatTime(new Date()),
+      note,
+      status: 'pending'
+    });
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'pickup_request_created',
+      objectType: 'pickup_request',
+      objectId: `${pupilId}:${reqId}`,
+      reason: `User ${req.user.name} requested pickup permission (${permissionType}) for ${name} on pupil ${pupilId}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.status(201).json({
+      ok: true,
+      message: 'Pickup contact request submitted to school for approval.',
+      request: newRequest,
+      state
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Staff approves or declines pickup contact request
 app.post('/api/pickup/:id', requireAuth(['admin', 'manager']), async (req, res) => {
   try {
     const rid = req.params.id;
     const action = req.body.action;
+    const reason = String(req.body.reason || req.body.auditReason || req.body.decisionReason || 'School admin review').trim();
 
     if (!['approve', 'decline'].includes(action)) {
       return res.status(400).json({ error: 'Choose approve or decline.' });
@@ -2631,15 +2922,31 @@ app.post('/api/pickup/:id', requireAuth(['admin', 'manager']), async (req, res) 
     }
 
     if (action === 'approve') {
-      const validUntil = String(req.body.validUntil || '');
-      const expiryDate = new Date(validUntil);
-      if (isNaN(expiryDate.getTime())) {
+      const permissionType = ['ongoing', 'time_limited', 'one_time', 'emergency_exception'].includes(req.body.permissionType)
+        ? req.body.permissionType
+        : (pReq.permissionType || 'ongoing');
+
+      let validUntil = String(req.body.validUntil || req.body.endDate || pReq.endDate || '');
+      let startDate = req.body.startDate ? String(req.body.startDate).trim() : (pReq.startDate || null);
+
+      if (permissionType === 'ongoing' && !validUntil) {
+        validUntil = 'Ongoing';
+      } else if (permissionType === 'one_time' && !validUntil) {
+        validUntil = new Date().toISOString().slice(0, 10);
+      } else if ((permissionType === 'time_limited' || permissionType === 'emergency_exception') && !validUntil) {
         return res.status(400).json({ error: 'Choose a valid pickup approval expiry date.' });
       }
-      const todayFloor = new Date();
-      todayFloor.setHours(0,0,0,0);
-      if (expiryDate < todayFloor) {
-        return res.status(400).json({ error: 'Pickup approval expiry cannot be in the past.' });
+
+      if (validUntil && validUntil !== 'Ongoing') {
+        const expiryDate = new Date(validUntil);
+        if (isNaN(expiryDate.getTime())) {
+          return res.status(400).json({ error: 'Choose a valid pickup approval expiry date.' });
+        }
+        const todayFloor = new Date();
+        todayFloor.setHours(0,0,0,0);
+        if (expiryDate < todayFloor) {
+          return res.status(400).json({ error: 'Pickup approval expiry cannot be in the past.' });
+        }
       }
 
       const pupil = await Pupil.findOne({ id: pReq.pupilId });
@@ -2651,35 +2958,269 @@ app.post('/api/pickup/:id', requireAuth(['admin', 'manager']), async (req, res) 
         c => c.active && c.name.toLowerCase() === pReq.name.toLowerCase()
       );
 
+      const idCheckGuidance = String(req.body.idCheckGuidance || pReq.idCheckGuidance || '').trim();
+      const phone = String(req.body.phone || pReq.phone || '').trim();
+      const email = String(req.body.email || pReq.email || '').trim();
+      const photoUrl = String(req.body.photoUrl || pReq.photoUrl || '').trim();
+      const relation = String(req.body.relation || pReq.relation || '').trim();
+
+      let collectorId;
       if (existingCol) {
+        collectorId = existingCol.id;
         existingCol.until = validUntil;
+        existingCol.permissionType = permissionType;
+        existingCol.startDate = startDate;
+        existingCol.endDate = validUntil !== 'Ongoing' ? validUntil : null;
+        if (relation) existingCol.relation = relation;
+        if (phone) existingCol.phone = phone;
+        if (email) existingCol.email = email;
+        if (idCheckGuidance) existingCol.idCheckGuidance = idCheckGuidance;
+        if (photoUrl) existingCol.photoUrl = photoUrl;
+        existingCol.status = 'active';
+        existingCol.approvedBy = req.user.name;
+        existingCol.approvedAt = new Date();
       } else {
         const nextId = await getNextCollectorId(pupil);
+        collectorId = nextId;
         pupil.collectors.push({
           id: nextId,
           name: pReq.name,
-          relation: pReq.relation,
+          relation: relation || pReq.relation,
+          phone,
+          email,
+          idCheckGuidance,
+          photoUrl,
+          permissionType,
+          startDate,
+          endDate: validUntil !== 'Ongoing' ? validUntil : null,
           until: validUntil,
-          active: true
+          status: 'active',
+          active: true,
+          approvedBy: req.user.name,
+          approvedAt: new Date()
         });
       }
       await pupil.save();
+
+      // Create / update standalone PickupContact document
+      await PickupContact.create({
+        id: 'PC-' + crypto.randomBytes(4).toString('hex').toUpperCase(),
+        pupilId: pupil.id,
+        name: pReq.name,
+        relation: relation || pReq.relation,
+        phone,
+        email,
+        idCheckGuidance,
+        photoUrl,
+        permissionType,
+        startDate,
+        endDate: validUntil !== 'Ongoing' ? validUntil : null,
+        until: validUntil,
+        status: 'active',
+        active: true,
+        approvedBy: req.user.name,
+        approvedAt: new Date(),
+        collectorId
+      });
     }
 
     pReq.status = action === 'approve' ? 'approved' : 'declined';
+    pReq.decidedBy = req.user.name;
+    pReq.decidedAt = new Date();
+    pReq.decisionReason = reason;
     await pReq.save();
 
     await AuditEntry.create({
       userId: req.user._id,
       action: `pickup_${action}`,
       objectType: 'pickup_request',
-      objectId: rid,
-      reason: 'School admin review',
+      objectId: `${pReq.pupilId}:${rid}`,
+      reason: `Staff ${req.user.name} marked request ${rid} as ${action}. Reason: ${reason}`,
       createdAt: new Date()
     });
 
     const state = await getStateJson();
     res.json({ ok: true, state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Staff updates/edits an existing pickup permission
+app.put('/api/pickup/collectors/:pupilId/:collectorId', requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pupilId = String(req.params.pupilId).toUpperCase();
+    const collectorId = Number(req.params.collectorId);
+    const reason = String(req.body.reason || req.body.auditReason || '').trim();
+
+    if (!reason) {
+      return res.status(400).json({ error: 'Modifying a pickup permission requires a mandatory audit reason.' });
+    }
+
+    const pupil = await Pupil.findOne({ id: pupilId });
+    if (!pupil) {
+      return res.status(404).json({ error: 'Pupil not found.' });
+    }
+
+    const collector = (pupil.collectors || []).find(c => c.id === collectorId);
+    if (!collector) {
+      return res.status(404).json({ error: 'Pickup collector not found for this pupil.' });
+    }
+
+    const beforeState = {
+      name: collector.name,
+      relation: collector.relation,
+      phone: collector.phone,
+      email: collector.email,
+      idCheckGuidance: collector.idCheckGuidance,
+      permissionType: collector.permissionType,
+      until: collector.until,
+      startDate: collector.startDate,
+      endDate: collector.endDate
+    };
+
+    if (req.body.name !== undefined) collector.name = String(req.body.name).trim();
+    if (req.body.relation !== undefined) collector.relation = String(req.body.relation).trim();
+    if (req.body.phone !== undefined) collector.phone = String(req.body.phone).trim();
+    if (req.body.email !== undefined) collector.email = String(req.body.email).trim().toLowerCase();
+    if (req.body.idCheckGuidance !== undefined) collector.idCheckGuidance = String(req.body.idCheckGuidance).trim();
+    if (req.body.photoUrl !== undefined) collector.photoUrl = String(req.body.photoUrl).trim();
+    if (req.body.permissionType !== undefined) {
+      if (['ongoing', 'time_limited', 'one_time', 'emergency_exception'].includes(req.body.permissionType)) {
+        collector.permissionType = req.body.permissionType;
+      }
+    }
+    if (req.body.startDate !== undefined) collector.startDate = req.body.startDate ? String(req.body.startDate).trim() : null;
+    if (req.body.validUntil !== undefined || req.body.endDate !== undefined) {
+      const validUntil = String(req.body.validUntil || req.body.endDate || 'Ongoing');
+      collector.until = validUntil;
+      collector.endDate = validUntil !== 'Ongoing' ? validUntil : null;
+    }
+
+    await pupil.save();
+
+    await PickupContact.updateMany(
+      { pupilId, collectorId },
+      {
+        $set: {
+          name: collector.name,
+          relation: collector.relation,
+          phone: collector.phone,
+          email: collector.email,
+          idCheckGuidance: collector.idCheckGuidance,
+          photoUrl: collector.photoUrl,
+          permissionType: collector.permissionType,
+          startDate: collector.startDate,
+          endDate: collector.endDate,
+          until: collector.until
+        }
+      }
+    );
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'pickup_permission_changed',
+      objectType: 'pickup_permission',
+      objectId: `${pupilId}:${collectorId}`,
+      reason: `Staff ${req.user.name} changed pickup permission for ${collector.name} on pupil ${pupilId}. Reason: ${reason}; Before=${JSON.stringify(beforeState)}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.json({ ok: true, state, collector });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Staff revokes a pickup permission
+app.post(['/api/pickup/revoke', '/api/pickup/collectors/:pupilId/:collectorId/revoke'], requireAuth(['admin', 'manager']), async (req, res) => {
+  try {
+    const pupilId = String(req.params.pupilId || req.body.pupilId || '').toUpperCase();
+    const collectorId = Number(req.params.collectorId || req.body.collectorId);
+    const reason = String(req.body.reason || req.body.auditReason || req.body.revokedReason || '').trim();
+
+    if (!pupilId || isNaN(collectorId)) {
+      return res.status(400).json({ error: 'Pupil ID and collector ID are required.' });
+    }
+    if (!reason) {
+      return res.status(400).json({ error: 'Revoking a pickup permission requires a mandatory audit reason.' });
+    }
+
+    const pupil = await Pupil.findOne({ id: pupilId });
+    if (!pupil) {
+      return res.status(404).json({ error: 'Pupil not found.' });
+    }
+
+    const collector = (pupil.collectors || []).find(c => c.id === collectorId);
+    if (!collector) {
+      return res.status(404).json({ error: 'Pickup collector not found for this pupil.' });
+    }
+
+    collector.active = false;
+    collector.status = 'revoked';
+    collector.revokedBy = req.user.name;
+    collector.revokedAt = new Date();
+    collector.revokedReason = reason;
+    await pupil.save();
+
+    await PickupContact.updateMany(
+      { pupilId, collectorId },
+      {
+        $set: {
+          active: false,
+          status: 'revoked',
+          revokedBy: req.user.name,
+          revokedAt: new Date(),
+          revokedReason: reason
+        }
+      }
+    );
+
+    await AuditEntry.create({
+      userId: req.user._id,
+      action: 'pickup_permission_revoked',
+      objectType: 'pickup_permission',
+      objectId: `${pupilId}:${collectorId}`,
+      reason: `Staff ${req.user.name} revoked pickup permission for ${collector.name} on pupil ${pupilId}. Reason: ${reason}`,
+      createdAt: new Date()
+    });
+
+    const state = await getStateJson();
+    res.json({ ok: true, message: 'Pickup permission revoked.', state });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Complete pickup audit history
+app.get('/api/pickup/audit', requireAuth(['admin', 'manager', 'viewer']), async (req, res) => {
+  try {
+    const query = {
+      $or: [
+        { objectType: 'pickup_permission' },
+        { objectType: 'pickup_request' },
+        { action: { $regex: /^pickup_/i } },
+        { action: 'expire_pickup_permission' }
+      ]
+    };
+    if (req.query.pupilId) {
+      const pId = String(req.query.pupilId).toUpperCase();
+      query.objectId = { $regex: new RegExp(pId, 'i') };
+    }
+
+    const audits = await AuditEntry.find(query).populate('userId', 'name email role').sort({ createdAt: -1 }).limit(200);
+    const formatted = audits.map(a => ({
+      id: a._id.toString(),
+      actor: a.userId ? { id: a.userId._id.toString(), name: a.userId.name, email: a.userId.email, role: a.userId.role } : { name: 'System / Automated' },
+      action: a.action,
+      objectType: a.objectType,
+      objectId: a.objectId,
+      reason: a.reason,
+      timestamp: a.createdAt
+    }));
+
+    res.json({ audits: formatted });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3078,11 +3619,33 @@ async function getGuardianPortalData(guardianId) {
   const linkedPupilIds = links.map(l => l.pupilId);
 
   const pupilDocs = await Pupil.find({ id: { $in: linkedPupilIds }, active: true });
+  const todayMidnight = new Date().setHours(0,0,0,0);
   const pupils = pupilDocs.map(p => {
     const link = links.find(l => l.pupilId === p.id);
     const activeCollectors = (p.collectors || [])
-      .filter(c => c.active && (c.until === 'Ongoing' || new Date(c.until) >= new Date().setHours(0,0,0,0)))
-      .map(c => ({ id: c.id, name: c.name, relation: c.relation, until: c.until }));
+      .filter(c => {
+        if (!c.active) return false;
+        if (c.status === 'revoked' || c.status === 'expired') return false;
+        if (c.permissionType === 'one_time' && c.usedAt) return false;
+        if (c.startDate && new Date(c.startDate) > new Date()) return false;
+        if (c.endDate && new Date(c.endDate) < todayMidnight) return false;
+        if (c.until && c.until !== 'Ongoing' && new Date(c.until) < todayMidnight) return false;
+        return true;
+      })
+      .map(c => ({
+        id: c.id,
+        name: c.name,
+        relation: c.relation || '',
+        phone: c.phone || '',
+        email: c.email || '',
+        idCheckGuidance: c.idCheckGuidance || '',
+        photoUrl: c.photoUrl || '',
+        permissionType: c.permissionType || 'ongoing',
+        startDate: c.startDate || null,
+        endDate: c.endDate || null,
+        until: c.until || 'Ongoing',
+        status: c.status || 'active'
+      }));
 
     return {
       id: p.id,

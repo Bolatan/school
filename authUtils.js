@@ -234,8 +234,32 @@ async function seedInitialData() {
     }
 
     const requests = [
-      { id: "r1", pupilId: "NF-1042", name: "Bola Adeyemi", relation: "Aunt", requestedBy: "Tomi Adeyemi", time: "Today, 8:42 AM", note: "One-time pickup today. ID check required." },
-      { id: "r2", pupilId: "NF-1087", name: "Kojo Mensah", relation: "Uncle", requestedBy: "Ama Mensah", time: "Today, 9:06 AM", note: "Temporary approval. Confirm the expiry with the guardian." }
+      {
+        id: "r1",
+        pupilId: "NF-1042",
+        name: "Bola Adeyemi",
+        relation: "Aunt",
+        phone: "+1 555-0191",
+        email: "bola.adeyemi@example.com",
+        idCheckGuidance: "Verify photo ID (Passport or Driver's License)",
+        permissionType: "one_time",
+        requestedBy: "Tomi Adeyemi",
+        time: "Today, 8:42 AM",
+        note: "One-time pickup today. ID check required."
+      },
+      {
+        id: "r2",
+        pupilId: "NF-1087",
+        name: "Kojo Mensah",
+        relation: "Uncle",
+        phone: "+1 555-0192",
+        email: "kojo.mensah@example.com",
+        idCheckGuidance: "Government photo ID check",
+        permissionType: "time_limited",
+        requestedBy: "Ama Mensah",
+        time: "Today, 9:06 AM",
+        note: "Temporary approval. Confirm the expiry with the guardian."
+      }
     ];
 
     for (const req of requests) {

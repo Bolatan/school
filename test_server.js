@@ -2165,3 +2165,169 @@ test('Security and Safeguarding: Rate-limiting, unusual pattern alerting, privil
   assert.ok(reissueAudit);
   assert.ok(reissueAudit.reason.includes('...'), 'Raw token in audit logs should be masked with truncation');
 });
+
+test('Pickup authorization: Guardian requests, Staff approvals, effective dates, permission types, revoking, automatic expiration, and complete audit history', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+  const guardianCookie = await login('tomi.adeyemi@guardian.northfield.school', 'GatewiseDemo!26');
+
+  // 1. Guardian submits a pickup contact request for linked child (NF-1042)
+  const reqRes = await request
+    .post('/api/pickup/request')
+    .set('Cookie', guardianCookie)
+    .send({
+      pupilId: 'NF-1042',
+      name: 'Uncle Biyi Adeyemi',
+      relation: 'Uncle',
+      phone: '+1 555-0888',
+      email: 'biyi.adeyemi@example.com',
+      permissionType: 'time_limited',
+      startDate: '2026-05-01',
+      endDate: '2026-05-15',
+      idCheckGuidance: 'Government photo passport',
+      note: 'Visiting from abroad to collect Zara for two weeks'
+    });
+  assert.equal(reqRes.status, 201);
+  assert.ok(reqRes.body.request.id);
+  const pickupReqId = reqRes.body.request.id;
+
+  // Attempting request for unlinked pupil fails with 403
+  const unlinkedReqRes = await request
+    .post('/api/pickup/request')
+    .set('Cookie', guardianCookie)
+    .send({
+      pupilId: 'NF-1087',
+      name: 'Strangers Contact'
+    });
+  assert.equal(unlinkedReqRes.status, 403);
+
+  // 2. Staff approves pickup request with effective dates, permission type, and ID-check guidance
+  const approveRes = await request
+    .post(`/api/pickup/${pickupReqId}`)
+    .set('Cookie', adminCookie)
+    .send({
+      action: 'approve',
+      permissionType: 'time_limited',
+      startDate: '2026-05-01',
+      validUntil: '2030-05-15',
+      idCheckGuidance: 'Check passport photo',
+      reason: 'Verified by telephone call with Tomi Adeyemi'
+    });
+  assert.equal(approveRes.status, 200);
+
+  const updatedPupil = approveRes.body.state.pupils.find(p => p.id === 'NF-1042');
+  const addedCol = updatedPupil.collectors.find(c => c.name === 'Uncle Biyi Adeyemi');
+  assert.ok(addedCol);
+  assert.equal(addedCol.permissionType, 'time_limited');
+  assert.equal(addedCol.idCheckGuidance, 'Check passport photo');
+
+  // 3. Staff creates an emergency_exception and a one_time pickup permission directly with mandatory audit reason
+  // Missing audit reason fails
+  const noReasonRes = await request
+    .post('/api/pickup/contact')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-1042',
+      name: 'Neighbor Susan',
+      relation: 'Neighbor',
+      permissionType: 'one_time',
+      reason: ''
+    });
+  assert.equal(noReasonRes.status, 400);
+  assert.ok(noReasonRes.body.error.includes('mandatory audit reason'));
+
+  const oneTimeRes = await request
+    .post('/api/pickup/contact')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-1042',
+      name: 'Neighbor Susan',
+      relation: 'Neighbor',
+      phone: '+1 555-0999',
+      permissionType: 'one_time',
+      validUntil: new Date().toISOString().slice(0, 10),
+      idCheckGuidance: 'National Identity Card',
+      reason: 'Mother called gate phone authorizing neighbor for today only due to car breakdown'
+    });
+  assert.equal(oneTimeRes.status, 201);
+  const oneTimeCol = oneTimeRes.body.state.pupils.find(p => p.id === 'NF-1042').collectors.find(c => c.name === 'Neighbor Susan');
+  assert.ok(oneTimeCol);
+  assert.equal(oneTimeCol.permissionType, 'one_time');
+
+  // 4. Staff edits pickup permission details with mandatory audit reason
+  const editRes = await request
+    .put(`/api/pickup/collectors/NF-1042/${addedCol.id}`)
+    .set('Cookie', adminCookie)
+    .send({
+      phone: '+1 555-7777',
+      idCheckGuidance: 'Check passport or drivers license',
+      reason: 'Updated phone number per parent request'
+    });
+  assert.equal(editRes.status, 200);
+  assert.equal(editRes.body.collector.phone, '+1 555-7777');
+
+  // 5. One-time permission: Pupil arrives, then departs with one-time collector Neighbor Susan -> automatically expires
+  await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-1042',
+      type: 'arrival',
+      session: 'Morning Arrival'
+    });
+
+  const depRes = await request
+    .post('/api/events')
+    .set('Cookie', adminCookie)
+    .send({
+      pupilId: 'NF-1042',
+      type: 'departure',
+      collectorId: oneTimeCol.id,
+      session: 'Afternoon Dismissal'
+    });
+  assert.equal(depRes.status, 201);
+  assert.equal(depRes.body.state.events[0].collector, 'Neighbor Susan');
+
+  // Now verify that Neighbor Susan is no longer in active collectors list for NF-1042
+  const postDepPupil = await Pupil.findOne({ id: 'NF-1042' });
+  const susanInDb = postDepPupil.collectors.find(c => c.name === 'Neighbor Susan');
+  assert.equal(susanInDb.status, 'expired');
+  assert.equal(susanInDb.active, false);
+  assert.ok(susanInDb.usedAt);
+
+  // 6. Staff revokes a permission with mandatory audit reason
+  const revokeWithoutReason = await request
+    .post(`/api/pickup/collectors/NF-1042/${addedCol.id}/revoke`)
+    .set('Cookie', adminCookie)
+    .send({ reason: '' });
+  assert.equal(revokeWithoutReason.status, 400);
+
+  const revokeRes = await request
+    .post(`/api/pickup/collectors/NF-1042/${addedCol.id}/revoke`)
+    .set('Cookie', adminCookie)
+    .send({ reason: 'Trip cancelled; father requested revocation of uncle permission' });
+  assert.equal(revokeRes.status, 200);
+
+  const postRevokePupil = await Pupil.findOne({ id: 'NF-1042' });
+  const biyiInDb = postRevokePupil.collectors.find(c => c.name === 'Uncle Biyi Adeyemi');
+  assert.equal(biyiInDb.status, 'revoked');
+  assert.equal(biyiInDb.active, false);
+
+  // 7. Complete Audit History (/api/pickup/audit)
+  const auditRes = await request
+    .get('/api/pickup/audit?pupilId=NF-1042')
+    .set('Cookie', adminCookie);
+  assert.equal(auditRes.status, 200);
+  assert.ok(Array.isArray(auditRes.body.audits));
+  const actions = auditRes.body.audits.map(a => a.action);
+
+  assert.ok(actions.includes('pickup_request_created'), 'Must log guardian pickup request creation');
+  assert.ok(actions.includes('pickup_approve'), 'Must log staff approval');
+  assert.ok(actions.includes('pickup_permission_added'), 'Must log staff addition');
+  assert.ok(actions.includes('pickup_permission_changed'), 'Must log staff edit');
+  assert.ok(actions.includes('expire_pickup_permission'), 'Must log automatic expiration of one-time permission');
+  assert.ok(actions.includes('pickup_permission_revoked'), 'Must log staff revocation');
+
+  // Check audit reasons are preserved
+  const revAudit = auditRes.body.audits.find(a => a.action === 'pickup_permission_revoked');
+  assert.ok(revAudit.reason.includes('Trip cancelled'));
+});
