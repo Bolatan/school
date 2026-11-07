@@ -8,7 +8,9 @@ const { parse } = require('csv-parse/sync');
 const XLSX = require('xlsx');
 
 const {
+  School,
   User,
+  StaffUser,
   Pupil,
   PickupRequest,
   PickupContact,
@@ -27,7 +29,9 @@ const {
   NotificationTemplate,
   EscalationContact,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  DATA_CLASS_RULES,
+  assertDataMinimization
 } = require('./models');
 const {
   DEMO_EMAIL,
@@ -4404,7 +4408,8 @@ app.get('/api/compliance/processors', requireAuth(['admin', 'manager']), async (
       ok: true,
       dataProcessors: recipients,
       dataMinimizationNotice: "Gatewise collects and processes only the minimum data necessary for safe pupil arrival and dismissal. Biometric data and precise GPS locations are strictly excluded.",
-      dataRetentionPolicy: "Standard records retained in compliance with statutory pupil safety regulations; expired offline queues automatically purged after 24 hours."
+      dataRetentionPolicy: "Standard records retained in compliance with statutory pupil safety regulations; expired offline queues automatically purged after 24 hours.",
+      dataClassRules: DATA_CLASS_RULES
     });
   } catch (err) {
     res.status(500).json({ error: err.message });

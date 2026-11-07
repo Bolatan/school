@@ -6,18 +6,25 @@ const mongoose = require('mongoose');
 
 const { app, seedInitialData } = require('./server');
 const {
+  School,
   User,
+  StaffUser,
   Pupil,
   PickupRequest,
+  PickupContact,
   AttendanceEvent,
+  Notification,
   AuditEntry,
   Guardian,
   PupilGuardian,
   CorrectionRequest,
   Card,
+  Campus,
   Device,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  DATA_CLASS_RULES,
+  assertDataMinimization
 } = require('./models');
 const { DEMO_EMAIL, DEMO_PASSWORD, DEMO_GUARDIAN_EMAIL, DEMO_GUARDIAN_PASSWORD } = require('./authUtils');
 
@@ -2330,4 +2337,303 @@ test('Pickup authorization: Guardian requests, Staff approvals, effective dates,
   // Check audit reasons are preserved
   const revAudit = auditRes.body.audits.find(a => a.action === 'pickup_permission_revoked');
   assert.ok(revAudit.reason.includes('Trip cancelled'));
+});
+
+test('Data Model: 12 Domain Classes, DATA_CLASS_RULES, and Data Minimization', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Verify DATA_CLASS_RULES covering all 12 classes with retention, access, and minimization
+  const requiredDataClasses = [
+    'School',
+    'Campus',
+    'Pupil',
+    'Guardian',
+    'PupilGuardian',
+    'PickupContact',
+    'Card',
+    'StaffUser',
+    'Device',
+    'AttendanceEvent',
+    'Notification',
+    'AuditEntry'
+  ];
+
+  for (const cls of requiredDataClasses) {
+    const rule = DATA_CLASS_RULES[cls];
+    assert.ok(rule, `DATA_CLASS_RULES must include ${cls}`);
+    assert.ok(rule.description, `${cls} must have description`);
+    assert.ok(rule.retentionSchedule, `${cls} must have retentionSchedule`);
+    assert.ok(rule.accessRules, `${cls} must have accessRules`);
+    assert.ok(rule.dataMinimization, `${cls} must have dataMinimization rules`);
+  }
+
+  // Check processor API includes dataClassRules
+  const procRes = await request
+    .get('/api/compliance/processors')
+    .set('Cookie', adminCookie);
+  assert.equal(procRes.status, 200);
+  assert.ok(procRes.body.dataClassRules);
+  assert.ok(procRes.body.dataClassRules.Pupil);
+  assert.ok(procRes.body.dataClassRules.AttendanceEvent);
+
+  // 2. School: name, policy settings, timezone, notification configuration
+  const schoolDoc = await School.create({
+    id: `school-${Date.now()}`,
+    name: 'Northfield Academy International',
+    policySettings: {
+      allowOfflineStalePickupPolicy: true,
+      discloseCollectorName: true,
+      mfaEnforcedForAdmins: true,
+      sessionTimeoutMinutes: 360
+    },
+    timezone: 'Europe/London',
+    notificationConfiguration: {
+      smsEnabled: true,
+      pushEnabled: true,
+      whatsappEnabled: true,
+      emailEnabled: true,
+      defaultProvider: 'twilio-gateway'
+    }
+  });
+  assert.ok(schoolDoc);
+  assert.equal(schoolDoc.name, 'Northfield Academy International');
+  assert.equal(schoolDoc.timezone, 'Europe/London');
+  assert.equal(schoolDoc.policySettings.discloseCollectorName, true);
+  assert.equal(schoolDoc.notificationConfiguration.smsEnabled, true);
+
+  // 3. Campus: school, name, address/reference, timezone override, gates
+  const campusDoc = await Campus.create({
+    id: `camp-${Date.now()}`,
+    schoolId: schoolDoc.id,
+    school: schoolDoc.name,
+    name: 'North Campus',
+    code: `NC-${Date.now()}`,
+    address: '100 North Way',
+    addressReference: 'Main entrance opposite North Park',
+    timezone: 'Europe/London',
+    timezoneOverride: 'Europe/Paris',
+    gates: ['Gate A', 'Gate B']
+  });
+  assert.ok(campusDoc);
+  assert.equal(campusDoc.addressReference, 'Main entrance opposite North Park');
+  assert.equal(campusDoc.timezoneOverride, 'Europe/Paris');
+
+  // 4. Pupil: school ID, name, photo reference, class, campus, status
+  const pupilDoc = await Pupil.create({
+    id: `NF-DM-${Date.now()}`,
+    schoolId: schoolDoc.id,
+    name: 'Taylor Model',
+    photoReference: '/photos/pupils/taylor.jpg',
+    className: 'Grade 4B',
+    campus: campusDoc.name,
+    guardian: 'Jordan Model',
+    initials: 'TM',
+    color: '#336699',
+    status: 'active'
+  });
+  assert.ok(pupilDoc);
+  assert.equal(pupilDoc.photoReference, '/photos/pupils/taylor.jpg');
+  assert.equal(pupilDoc.status, 'active');
+  assert.equal(pupilDoc.campus, campusDoc.name);
+
+  // 5. Guardian: name, verified contacts, account status, preferences
+  const guardianDoc = await Guardian.create({
+    id: `guard-${Date.now()}`,
+    name: 'Jordan Model',
+    email: `jordan.${Date.now()}@example.com`,
+    phone: '+44 7700 900111',
+    verifiedContacts: [
+      { type: 'phone', value: '+44 7700 900111', verifiedAt: new Date() },
+      { type: 'email', value: `jordan.${Date.now()}@example.com`, verifiedAt: new Date() }
+    ],
+    accountStatus: 'active',
+    preferences: {
+      preferredChannels: ['sms', 'push'],
+      language: 'en-GB',
+      quietHoursEnabled: false
+    },
+    verifiedContactMethod: 'sms',
+    status: 'active'
+  });
+  assert.ok(guardianDoc);
+  assert.equal(guardianDoc.verifiedContacts.length, 2);
+  assert.equal(guardianDoc.accountStatus, 'active');
+  assert.equal(guardianDoc.preferences.language, 'en-GB');
+
+  // 6. PupilGuardian: pupil, guardian, relationship, status, authority metadata
+  const pupilGuardianDoc = await PupilGuardian.create({
+    id: `pg-${Date.now()}`,
+    pupilId: pupilDoc.id,
+    guardianId: guardianDoc.id,
+    relationship: 'Mother',
+    status: 'active',
+    authorityMetadata: {
+      courtOrderRestricted: false,
+      custodyDocumentationRef: 'CUST-2026-001',
+      permittedToAuthorizePickups: true
+    }
+  });
+  assert.ok(pupilGuardianDoc);
+  assert.equal(pupilGuardianDoc.authorityMetadata.custodyDocumentationRef, 'CUST-2026-001');
+  assert.equal(pupilGuardianDoc.authorityMetadata.permittedToAuthorizePickups, true);
+
+  // 7. PickupContact: pupil, name, relationship, verification data/reference, effective dates, status
+  const pickupContactDoc = await PickupContact.create({
+    id: `pc-${Date.now()}`,
+    pupilId: pupilDoc.id,
+    name: 'Aunt Casey',
+    relationship: 'Aunt',
+    phone: '+44 7700 900222',
+    verificationData: 'Passport check and matching family photo',
+    effectiveDates: {
+      startDate: '2026-01-01',
+      endDate: '2026-12-31'
+    },
+    status: 'active'
+  });
+  assert.ok(pickupContactDoc);
+  assert.equal(pickupContactDoc.verificationData, 'Passport check and matching family photo');
+  assert.equal(pickupContactDoc.effectiveDates.startDate, '2026-01-01');
+
+  // 8. Card: pupil, random token hash/reference, issue/revoke timestamps, status
+  const cardDoc = await Card.create({
+    id: `card-${Date.now()}`,
+    pupilId: pupilDoc.id,
+    cardToken: `gw_tok_${Date.now()}`,
+    tokenHash: `hash_${Date.now()}`,
+    status: 'active',
+    issuedAt: new Date()
+  });
+  assert.ok(cardDoc);
+  assert.ok(cardDoc.tokenHash.startsWith('hash_'));
+  assert.equal(cardDoc.status, 'active');
+
+  // 9. StaffUser: identity, role, assigned campus, status, authentication metadata
+  const staffDoc = await StaffUser.create({
+    email: `staff.${Date.now()}@northfield.school`,
+    name: 'Officer Alex',
+    role: 'manager',
+    salt: 'salt1234',
+    passwordHash: 'hash1234',
+    assignedCampus: campusDoc.name,
+    status: 'active',
+    authenticationMetadata: {
+      lastLoginAt: new Date(),
+      failedLoginCount: 0,
+      mfaLastVerifiedAt: new Date()
+    }
+  });
+  assert.ok(staffDoc);
+  assert.equal(staffDoc.status, 'active');
+  assert.equal(staffDoc.authenticationMetadata.failedLoginCount, 0);
+
+  // 10. Device: managed device identifier, assigned staff/campus, last seen, status
+  const devDoc = await Device.create({
+    id: `DEV-MGD-${Date.now()}`,
+    name: 'Main Gate Kiosk',
+    managedDeviceIdentifier: `MGD-${Date.now()}`,
+    assignedStaff: staffDoc.name,
+    assignedCampus: campusDoc.name,
+    lastSeen: new Date(),
+    status: 'active'
+  });
+  assert.ok(devDoc);
+  assert.ok(devDoc.managedDeviceIdentifier.startsWith('MGD-'));
+  assert.equal(devDoc.status, 'active');
+
+  // 11. AttendanceEvent: pupil, type, timestamps, actor, device, campus, source, collector, verification method, correction link, reason
+  const eventDoc = await AttendanceEvent.create({
+    id: `evt-dm-${Date.now()}`,
+    pupilId: pupilDoc.id,
+    type: 'departure',
+    timestamp: new Date(),
+    utcTimestamp: new Date().toISOString(),
+    time: '3:30 PM',
+    date: '2026-04-01',
+    createdAt: Date.now(),
+    staff: staffDoc.name,
+    actorId: staffDoc._id,
+    source: 'Card scan',
+    collector: 'Aunt Casey',
+    verification: 'Passport check',
+    device: devDoc.name,
+    campus: campusDoc.name,
+    correctionLink: null,
+    reason: 'Standard dismissal'
+  });
+  assert.ok(eventDoc);
+  assert.equal(eventDoc.pupilId, pupilDoc.id);
+  assert.equal(eventDoc.collector, 'Aunt Casey');
+  assert.equal(eventDoc.verification, 'Passport check');
+
+  // 12. Notification: event, guardian, channel, provider reference, status, timestamps, failure category
+  const notifDoc = await Notification.create({
+    id: `notif-dm-${Date.now()}`,
+    eventId: eventDoc.id,
+    guardianId: guardianDoc.id,
+    pupilId: pupilDoc.id,
+    guardianName: guardianDoc.name,
+    channel: 'SMS',
+    providerReference: 'tw_msg_123456789',
+    recipient: guardianDoc.phone,
+    message: 'Gatewise Alert: Taylor Model departed with Aunt Casey at 3:30 PM.',
+    status: 'delivered',
+    sentAt: '3:30 PM',
+    timestamps: {
+      queuedAt: new Date(),
+      acceptedAt: new Date(),
+      deliveredAt: new Date()
+    },
+    failureCategory: null
+  });
+  assert.ok(notifDoc);
+  assert.equal(notifDoc.providerReference, 'tw_msg_123456789');
+  assert.equal(notifDoc.status, 'delivered');
+  assert.ok(notifDoc.timestamps.deliveredAt);
+
+  // 13. AuditEntry: actor, action, object, timestamp, reason, before/after references as appropriate
+  const auditDoc = await AuditEntry.create({
+    userId: staffDoc._id,
+    actor: staffDoc.email,
+    action: 'record_departure',
+    objectType: 'AttendanceEvent',
+    objectId: eventDoc.id,
+    object: `AttendanceEvent:${eventDoc.id}`,
+    reason: 'Aunt Casey collected pupil',
+    beforeReference: 'status=on_site',
+    afterReference: 'status=departed',
+    beforeAfterReferences: {
+      before: { onSite: true },
+      after: { onSite: false }
+    },
+    timestamp: new Date()
+  });
+  assert.ok(auditDoc);
+  assert.equal(auditDoc.actor, staffDoc.email);
+  assert.equal(auditDoc.object, `AttendanceEvent:${eventDoc.id}`);
+  assert.equal(auditDoc.afterReference, 'status=departed');
+
+  // 14. Data Minimization Assertion: Avoid copying entire pupil record into logs or notifications
+  const fullPupilRecordCopy = {
+    pupilId: pupilDoc.id,
+    name: pupilDoc.name,
+    className: pupilDoc.className,
+    collectors: pupilDoc.collectors,
+    guardianPhone: pupilDoc.guardianPhone,
+    guardianEmail: pupilDoc.guardianEmail,
+    photo: pupilDoc.photo
+  };
+
+  assert.throws(() => {
+    assertDataMinimization('AuditEntry', fullPupilRecordCopy);
+  }, /Data minimization violation/);
+
+  assert.throws(() => {
+    assertDataMinimization('Notification', fullPupilRecordCopy);
+  }, /Data minimization violation/);
+
+  // Non-infringing minimal data passes without exception
+  assert.doesNotThrow(() => {
+    assertDataMinimization('AuditEntry', { pupilId: pupilDoc.id, action: 'record_arrival' });
+  });
 });
