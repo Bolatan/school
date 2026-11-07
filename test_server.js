@@ -1812,6 +1812,15 @@ test('Non-Functional Requirements: Availability, Performance, Security, Privacy,
   assert.equal(degradedStatusRes.body.availability.degradedModeActive, true);
   assert.equal(degradedStatusRes.body.availability.degradedReason, 'Upstream SMS provider connectivity degradation');
 
+  // Verify MVP Scope Exclusions in /api/system/status
+  assert.ok(Array.isArray(sysStatusRes.body.scopeExclusions));
+  assert.equal(sysStatusRes.body.scopeExclusions.length, 5);
+  assert.ok(sysStatusRes.body.scopeExclusions.some(ex => ex.includes('WhatsApp')));
+  assert.ok(sysStatusRes.body.scopeExclusions.some(ex => ex.includes('NFC or biometric')));
+  assert.ok(sysStatusRes.body.scopeExclusions.some(ex => ex.includes('Automatic face recognition')));
+  assert.ok(sysStatusRes.body.scopeExclusions.some(ex => ex.includes('Transport/bus tracking')));
+  assert.ok(sysStatusRes.body.scopeExclusions.some(ex => ex.includes('Complex multi-tenant analytics')));
+
   // Audit entry was created for activating degraded mode
   const degradedAudit = await AuditEntry.findOne({ action: 'activate_degraded_mode' });
   assert.ok(degradedAudit);
@@ -1899,6 +1908,8 @@ test('Non-Functional Requirements: Availability, Performance, Security, Privacy,
   const hasMongoProcessor = processorsRes.body.dataProcessors.some(p => p.recipient.includes('MongoDB'));
   assert.ok(hasMongoProcessor);
   assert.ok(processorsRes.body.dataMinimizationNotice.includes('minimum data necessary'));
+  assert.ok(Array.isArray(processorsRes.body.scopeExclusions));
+  assert.equal(processorsRes.body.scopeExclusions.length, 5);
 
   // Role privacy isolation: viewer cannot toggle degraded mode or access administrative configurations
   const viewerCookie = await login('oliver.twist@northfield.school', 'GatewiseDemo!26').catch(() => null);

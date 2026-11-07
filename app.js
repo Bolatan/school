@@ -1952,6 +1952,14 @@
               </ul>
             </div>
           </div>
+          ${Array.isArray(res.scopeExclusions) && res.scopeExclusions.length > 0 ? `
+            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed #cbd5e1">
+              <b>Explicit MVP Scope Exclusions:</b>
+              <ul class="nfr-list" style="margin-top:4px">
+                ${res.scopeExclusions.map(ex => `<li>🚫 ${escapeHtml(ex)}</li>`).join('')}
+              </ul>
+            </div>
+          ` : ''}
         </div>
       `;
     } catch {}
@@ -3310,6 +3318,14 @@
           </table>
         </div>
         <p style="font-size:10px;color:#64748b;line-height:1.4"><b>Minimization:</b> ${escapeHtml(data.dataMinimizationNotice)}</p>
+        ${Array.isArray(data.scopeExclusions) && data.scopeExclusions.length > 0 ? `
+          <div style="margin:10px 0;padding:8px 10px;background:#fef2f2;border:1px solid #fee2e2;border-radius:6px">
+            <span style="font-size:10px;font-weight:700;color:#991b1b">Excluded from Scope:</span>
+            <ul style="margin:4px 0 0 16px;padding:0;font-size:9.5px;color:#b91c1c;line-height:1.4">
+              ${data.scopeExclusions.map(ex => `<li>${escapeHtml(ex)}</li>`).join('')}
+            </ul>
+          </div>
+        ` : ''}
         <div class="modal-actions">
           <button type="button" class="button button-primary" id="closeProcessorsModal">Close</button>
         </div>
