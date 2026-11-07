@@ -1,6 +1,11 @@
 const crypto = require('crypto');
 const {
+  School,
   User,
+  StaffUser,
+  Notification,
+  AuditEntry,
+  PickupContact,
   Pupil,
   PickupRequest,
   AttendanceEvent,
@@ -504,6 +509,33 @@ async function seedInitialData() {
   }
 
   // Seed default Retention Settings in SchoolSetting
+
+  // Seed default School institutional document
+  const schoolDoc = await School.findOne({ id: 'SCH-001' });
+  if (!schoolDoc) {
+    await School.create({
+      id: 'SCH-001',
+      name: 'Northfield Academy',
+      policySettings: {
+        discloseCollectorName: true,
+        allowOfflineStalePickupPolicy: false,
+        enforceMfaForAdmins: true,
+        strongStaffPasswordPolicy: true,
+        scanRateLimitMaxPerMinute: 30
+      },
+      timezone: 'Europe/London',
+      notificationConfiguration: {
+        defaultChannel: 'sms',
+        smsEnabled: true,
+        pushEnabled: true,
+        whatsappEnabled: false,
+        emailEnabled: true,
+        retryMaxAttempts: 3
+      },
+      active: true
+    });
+  }
+
   const retentionDoc = await SchoolSetting.findOne({ key: 'retentionSettings' });
   if (!retentionDoc) {
     await SchoolSetting.create({
@@ -511,6 +543,7 @@ async function seedInitialData() {
       val: {
         attendanceRetentionDays: 365, // Attendance logs kept 1 year
         auditLogRetentionDays: 730,    // Audit trail kept 2 years
+        notificationRetentionDays: 90, // Notifications kept 90 days
         offlineQueueTtlHours: 24,      // Device queue expires in 24 hours
         sessionTimeoutMinutes: 480,    // 8-hour staff sessions
         autoPurgeEnabled: true,

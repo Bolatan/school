@@ -3,10 +3,16 @@ const assert = require('node:assert/strict');
 const supertest = require('supertest');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 
 const { app, seedInitialData } = require('./server');
 const {
+  School,
   User,
+  StaffUser,
+  Notification,
+  PickupContact,
+  DATA_CLASS_RULES,
   Pupil,
   PickupRequest,
   AttendanceEvent,
@@ -15,6 +21,7 @@ const {
   PupilGuardian,
   CorrectionRequest,
   Card,
+  Campus,
   Device,
   SecurityIncident,
   SecurityAlert
@@ -2341,4 +2348,280 @@ test('Pickup authorization: Guardian requests, Staff approvals, effective dates,
   // Check audit reasons are preserved
   const revAudit = auditRes.body.audits.find(a => a.action === 'pickup_permission_revoked');
   assert.ok(revAudit.reason.includes('Trip cancelled'));
+});
+
+test('Data Model: 12 core data classes, schema attributes, DATA_CLASS_RULES, data minimization, and retention/access scoping', async () => {
+  const adminCookie = await login(DEMO_EMAIL, DEMO_PASSWORD);
+
+  // 1. Verify DATA_CLASS_RULES covers all 12 core domain data classes
+  const expectedClasses = [
+    'School',
+    'Campus',
+    'Pupil',
+    'Guardian',
+    'PupilGuardian',
+    'PickupContact',
+    'Card',
+    'StaffUser',
+    'Device',
+    'AttendanceEvent',
+    'Notification',
+    'AuditEntry'
+  ];
+
+  for (const cls of expectedClasses) {
+    assert.ok(DATA_CLASS_RULES[cls], `DATA_CLASS_RULES must contain ${cls}`);
+    assert.ok(DATA_CLASS_RULES[cls].retentionDays > 0, `${cls} must specify retentionDays`);
+    assert.ok(DATA_CLASS_RULES[cls].retentionPolicy, `${cls} must specify retentionPolicy description`);
+    assert.ok(Array.isArray(DATA_CLASS_RULES[cls].accessRoles), `${cls} must specify accessRoles array`);
+    assert.ok(Array.isArray(DATA_CLASS_RULES[cls].readRoles), `${cls} must specify readRoles array`);
+    assert.ok(DATA_CLASS_RULES[cls].minimizationRules, `${cls} must specify minimizationRules`);
+  }
+
+  // 2. Test School data class instantiation & schema attributes
+  const schoolDoc = await School.create({
+    id: `SCH-TEST-${Date.now()}`,
+    name: 'St. Jude International Academy',
+    policySettings: {
+      discloseCollectorName: true,
+      allowOfflineStalePickupPolicy: false,
+      enforceMfaForAdmins: true,
+      strongStaffPasswordPolicy: true,
+      scanRateLimitMaxPerMinute: 25
+    },
+    timezone: 'Africa/Lagos',
+    notificationConfiguration: {
+      defaultChannel: 'sms',
+      smsEnabled: true,
+      pushEnabled: true,
+      whatsappEnabled: false,
+      emailEnabled: true,
+      retryMaxAttempts: 3
+    }
+  });
+  assert.ok(schoolDoc._id);
+  assert.equal(schoolDoc.name, 'St. Jude International Academy');
+  assert.equal(schoolDoc.timezone, 'Africa/Lagos');
+  assert.equal(schoolDoc.notificationConfiguration.defaultChannel, 'sms');
+
+  // 3. Test Campus data class schema attributes
+  const campusDoc = await Campus.create({
+    id: `CAMP-TEST-${Date.now()}`,
+    school: schoolDoc.id,
+    name: 'North Campus Facility',
+    code: `NC-${Date.now() % 10000}`,
+    address: '42 Main Boulevard',
+    addressReference: 'REF-ADDR-42',
+    timezone: 'Europe/London',
+    timezoneOverride: 'Europe/London',
+    gates: ['North Gate 1', 'North Gate 2']
+  });
+  assert.equal(campusDoc.school, schoolDoc.id);
+  assert.equal(campusDoc.addressReference, 'REF-ADDR-42');
+  assert.equal(campusDoc.timezoneOverride, 'Europe/London');
+
+  // 4. Test Pupil data class schema attributes
+  const pupilDoc = await Pupil.create({
+    id: `NF-MODEL-${Date.now() % 10000}`,
+    schoolId: schoolDoc.id,
+    name: 'Chidi Anagonye',
+    photoReference: 'https://cdn.northfield.school/photos/chidi.webp',
+    className: 'Philosophy 101',
+    class: 'Philosophy 101',
+    campus: 'North Campus Facility',
+    status: 'active',
+    guardian: 'Parent Anagonye',
+    initials: 'CA',
+    color: 'blue'
+  });
+  assert.equal(pupilDoc.schoolId, schoolDoc.id);
+  assert.equal(pupilDoc.status, 'active');
+  assert.equal(pupilDoc.photoReference, 'https://cdn.northfield.school/photos/chidi.webp');
+
+  // 5. Test Guardian data class schema attributes
+  const guardianDoc = await Guardian.create({
+    id: `G-MODEL-${Date.now() % 10000}`,
+    name: 'Eleanor Shellstrop',
+    email: `eleanor.${Date.now()}@example.com`,
+    phone: '+1 555-4321',
+    verifiedContactMethod: 'email',
+    status: 'active',
+    preferredChannels: ['email', 'push']
+  });
+  assert.equal(guardianDoc.name, 'Eleanor Shellstrop');
+  assert.equal(guardianDoc.status, 'active');
+
+  // 6. Test PupilGuardian data class schema attributes
+  const pupilGuardianDoc = await PupilGuardian.create({
+    id: `PG-MODEL-${Date.now() % 10000}`,
+    pupil: pupilDoc.id,
+    pupilId: pupilDoc.id,
+    guardian: guardianDoc.id,
+    guardianId: guardianDoc.id,
+    relationship: 'Foster Parent',
+    status: 'active',
+    authorityMetadata: {
+      canAuthorizePickup: true,
+      canReceiveAlerts: true,
+      isEmergencyContact: true,
+      custodyDocumentationRef: 'CUST-2026-99'
+    }
+  });
+  assert.equal(pupilGuardianDoc.pupil, pupilDoc.id);
+  assert.equal(pupilGuardianDoc.authorityMetadata.canAuthorizePickup, true);
+  assert.equal(pupilGuardianDoc.authorityMetadata.custodyDocumentationRef, 'CUST-2026-99');
+
+  // 7. Test PickupContact data class schema attributes
+  const pickupContactDoc = await PickupContact.create({
+    id: `PC-MODEL-${Date.now() % 10000}`,
+    pupil: pupilDoc.id,
+    pupilId: pupilDoc.id,
+    name: 'Janet Della-Denunzio',
+    relationship: 'Aunt',
+    relation: 'Aunt',
+    phone: '+1 555-8888',
+    verificationData: { idType: 'Passport', number: 'P1234567' },
+    verificationReference: 'PASSPORT-P1234567',
+    effectiveDates: { startDate: '2026-09-01', endDate: '2027-06-30' },
+    status: 'active'
+  });
+  assert.equal(pickupContactDoc.pupil, pupilDoc.id);
+  assert.equal(pickupContactDoc.relationship, 'Aunt');
+  assert.equal(pickupContactDoc.verificationReference, 'PASSPORT-P1234567');
+
+  // 8. Test Card data class schema attributes (random token, non-meaningful)
+  const cardDoc = await Card.create({
+    id: `CARD-MODEL-${Date.now() % 10000}`,
+    pupil: pupilDoc.id,
+    pupilId: pupilDoc.id,
+    cardToken: `gw_tok_random_${crypto.randomBytes(12).toString('hex')}`,
+    tokenHash: crypto.randomBytes(16).toString('hex'),
+    tokenReference: 'REF-HASH-001',
+    status: 'active',
+    issuedBy: 'Northfield Registrar'
+  });
+  assert.equal(cardDoc.pupil, pupilDoc.id);
+  assert.ok(cardDoc.cardToken.startsWith('gw_tok_random_'));
+
+  // 9. Test StaffUser data class schema attributes
+  const staffDoc = await StaffUser.create({
+    name: 'Michael Supervisor',
+    email: `michael.${Date.now()}@northfield.school`,
+    role: 'manager',
+    salt: 'salt123',
+    passwordHash: 'hash123',
+    status: 'active',
+    assignedCampus: 'North Campus Facility',
+    authMetadata: {
+      lastLoginAt: new Date(),
+      failedLoginCount: 0
+    }
+  });
+  assert.equal(staffDoc.name, 'Michael Supervisor');
+  assert.equal(staffDoc.status, 'active');
+  assert.equal(staffDoc.authMetadata.failedLoginCount, 0);
+
+  // 10. Test Device data class schema attributes
+  const deviceDoc = await Device.create({
+    id: `DEV-MODEL-${Date.now() % 10000}`,
+    managedDeviceIdentifier: `MDM-ZEBRA-${Date.now() % 10000}`,
+    name: 'North Gate Kiosk 1',
+    type: 'kiosk',
+    assignedCampus: 'North Campus Facility',
+    assignedGate: 'North Gate 1',
+    status: 'active',
+    lastSeen: new Date()
+  });
+  assert.ok(deviceDoc.managedDeviceIdentifier.startsWith('MDM-ZEBRA-'));
+  assert.equal(deviceDoc.type, 'kiosk');
+
+  // 11. Test AttendanceEvent data class schema attributes
+  const eventDoc = await AttendanceEvent.create({
+    id: `EVT-MODEL-${Date.now() % 10000}`,
+    pupilId: pupilDoc.id,
+    type: 'arrival',
+    timestamp: new Date(),
+    utcTimestamp: new Date().toISOString(),
+    time: '8:15 AM',
+    date: '2026-09-02',
+    createdAt: Date.now(),
+    staff: staffDoc.name,
+    actorId: staffDoc._id,
+    source: 'Card scan',
+    device: deviceDoc.name,
+    campus: campusDoc.name,
+    gate: 'North Gate 1'
+  });
+  assert.equal(eventDoc.pupilId, pupilDoc.id);
+  assert.equal(eventDoc.type, 'arrival');
+
+  // 12. Test Notification data class: minimal entity references, NO copied pupil record
+  const notifDoc = await Notification.create({
+    id: `NOTIF-MODEL-${Date.now() % 10000}`,
+    eventId: eventDoc.id,
+    event: eventDoc.id,
+    guardianId: guardianDoc.id,
+    guardian: guardianDoc.id,
+    pupilId: pupilDoc.id, // reference only
+    guardianName: guardianDoc.name,
+    channel: 'SMS',
+    providerReference: 'TWILIO-SM-998877',
+    recipient: '+1 555-4321',
+    message: 'Gatewise Alert: Chidi Anagonye has arrived safely.',
+    status: 'Delivered',
+    sentAt: '8:15 AM'
+  });
+  assert.equal(notifDoc.eventId, eventDoc.id);
+  assert.equal(notifDoc.providerReference, 'TWILIO-SM-998877');
+  // Verify notification does NOT contain full pupil record properties (e.g. photo, initials, collectors)
+  assert.equal(notifDoc.toObject().collectors, undefined);
+  assert.equal(notifDoc.toObject().photo, undefined);
+
+  // 13. Test AuditEntry data class: entity references & reason, NO full pupil record copied
+  const auditDoc = await AuditEntry.create({
+    userId: staffDoc._id,
+    actor: staffDoc.email,
+    action: 'record_arrival',
+    objectType: 'AttendanceEvent',
+    objectId: eventDoc.id,
+    object: `AttendanceEvent:${eventDoc.id}`,
+    reason: `Arrival confirmed for pupilId=${pupilDoc.id}; campus=${campusDoc.name}`,
+    beforeReferences: null,
+    afterReferences: { status: 'arrived' }
+  });
+  assert.equal(auditDoc.actor, staffDoc.email);
+  assert.equal(auditDoc.objectId, eventDoc.id);
+  assert.equal(auditDoc.toObject().collectors, undefined);
+  assert.equal(auditDoc.toObject().photo, undefined);
+
+  // 14. Query Compliance Endpoint /api/compliance/data-classes
+  const dataClassesRes = await request
+    .get('/api/compliance/data-classes')
+    .set('Cookie', adminCookie);
+  assert.equal(dataClassesRes.status, 200);
+  assert.ok(dataClassesRes.body.ok);
+  assert.ok(dataClassesRes.body.dataClasses);
+  assert.equal(Object.keys(dataClassesRes.body.dataClasses).length, 12);
+  assert.ok(dataClassesRes.body.dataMinimizationPrinciple.includes('Avoid copying entire pupil records'));
+
+  // 15. Verify Data Retention Purge cleans up notifications older than retention cutoff
+  const oldDate = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000); // 100 days old (> 90 days)
+  await Notification.create({
+    id: `OLD-NOTIF-${Date.now()}`,
+    eventId: 'old-evt',
+    pupilId: pupilDoc.id,
+    guardianName: 'Old Guardian',
+    channel: 'SMS',
+    recipient: '+1 555-0000',
+    message: 'Old alert',
+    sentAt: 'Yesterday',
+    createdAt: oldDate
+  });
+
+  const purgeRes = await request
+    .post('/api/admin/retention/purge')
+    .set('Cookie', adminCookie)
+    .send({});
+  assert.equal(purgeRes.status, 200);
+  assert.ok(purgeRes.body.purged.notifications >= 1);
 });

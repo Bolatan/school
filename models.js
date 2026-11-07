@@ -1,5 +1,27 @@
 const mongoose = require('mongoose');
 
+const schoolSchema = new mongoose.Schema({
+  id: { type: String, required: true, unique: true, trim: true },
+  name: { type: String, required: true, trim: true },
+  policySettings: {
+    discloseCollectorName: { type: Boolean, default: true },
+    allowOfflineStalePickupPolicy: { type: Boolean, default: false },
+    enforceMfaForAdmins: { type: Boolean, default: true },
+    strongStaffPasswordPolicy: { type: Boolean, default: true },
+    scanRateLimitMaxPerMinute: { type: Number, default: 30 }
+  },
+  timezone: { type: String, default: 'Europe/London' },
+  notificationConfiguration: {
+    defaultChannel: { type: String, enum: ['sms', 'push', 'email', 'whatsapp'], default: 'sms' },
+    smsEnabled: { type: Boolean, default: true },
+    pushEnabled: { type: Boolean, default: true },
+    whatsappEnabled: { type: Boolean, default: false },
+    emailEnabled: { type: Boolean, default: true },
+    retryMaxAttempts: { type: Number, default: 3 }
+  },
+  active: { type: Boolean, default: true }
+}, { timestamps: true });
+
 const userSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   name: { type: String, required: true, trim: true },
@@ -7,6 +29,7 @@ const userSchema = new mongoose.Schema({
   salt: { type: String, required: true },
   passwordHash: { type: String, required: true },
   active: { type: Boolean, default: true },
+  status: { type: String, enum: ['active', 'inactive', 'revoked'], default: 'active' },
   guardianId: { type: String, default: null }, // Optional link to Guardian document
   mfaEnabled: { type: Boolean, default: false },
   mfaSecret: { type: String, default: null },
@@ -14,7 +37,12 @@ const userSchema = new mongoose.Schema({
   deviceLockEnforced: { type: Boolean, default: false },
   revokedAt: { type: Date, default: null },
   revokedReason: { type: String, default: '' },
-  assignedCampus: { type: String, default: 'Primary campus' }
+  assignedCampus: { type: String, default: 'Primary campus' },
+  authMetadata: {
+    lastLoginAt: { type: Date, default: null },
+    failedLoginCount: { type: Number, default: 0 },
+    lastPasswordChange: { type: Date, default: Date.now }
+  }
 }, { timestamps: true });
 
 const collectorSchema = new mongoose.Schema({
@@ -45,9 +73,13 @@ const collectorSchema = new mongoose.Schema({
 
 const pickupContactSchema = new mongoose.Schema({
   id: { type: String, required: true, unique: true },
+  pupil: { type: String, default: null },
   pupilId: { type: String, required: true, ref: 'Pupil', index: true },
   name: { type: String, required: true, trim: true },
+  relationship: { type: String, default: '' },
   relation: { type: String, default: '' },
+  verificationData: { type: mongoose.Schema.Types.Mixed, default: null },
+  verificationReference: { type: String, default: '' },
   phone: { type: String, default: '' },
   email: { type: String, default: '' },
   idCheckGuidance: { type: String, default: '' },
@@ -59,6 +91,10 @@ const pickupContactSchema = new mongoose.Schema({
   },
   startDate: { type: String, default: null },
   endDate: { type: String, default: null },
+  effectiveDates: {
+    startDate: { type: String, default: null },
+    endDate: { type: String, default: null }
+  },
   until: { type: String, default: 'Ongoing' },
   status: { type: String, enum: ['active', 'expired', 'revoked'], default: 'active' },
   active: { type: Boolean, default: true },
@@ -72,6 +108,11 @@ const pickupContactSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const pupilSchema = new mongoose.Schema({
+  schoolId: { type: String, default: 'SCH-001', trim: true },
+  photoReference: { type: String, default: null },
+  class: { type: String, default: 'Grade 1A', trim: true },
+  campus: { type: String, default: 'Primary campus', trim: true },
+  status: { type: String, enum: ['active', 'withdrawn', 'transferred', 'archived'], default: 'active' },
   id: { type: String, required: true, unique: true, uppercase: true, trim: true },
   name: { type: String, required: true, trim: true },
   className: { type: String, required: true, trim: true },
@@ -87,6 +128,17 @@ const pupilSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const notificationSchema = new mongoose.Schema({
+  event: { type: String, default: null },
+  guardian: { type: String, default: null },
+  guardianId: { type: String, default: null },
+  providerReference: { type: String, default: null },
+  failureCategory: { type: String, default: null },
+  timestamps: {
+    queuedAt: { type: Date, default: Date.now },
+    providerAcceptedAt: { type: Date, default: null },
+    deliveredAt: { type: Date, default: null },
+    failedAt: { type: Date, default: null }
+  },
   id: { type: String, required: true, unique: true },
   eventId: { type: String, required: true },
   pupilId: { type: String, required: true },
@@ -156,6 +208,11 @@ const attendanceEventSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const auditEntrySchema = new mongoose.Schema({
+  actor: { type: String, default: '' },
+  object: { type: String, default: '' },
+  timestamp: { type: Date, default: Date.now },
+  beforeReferences: { type: mongoose.Schema.Types.Mixed, default: null },
+  afterReferences: { type: mongoose.Schema.Types.Mixed, default: null },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   action: { type: String, required: true },
   objectType: { type: String, required: true },
@@ -206,6 +263,14 @@ const guardianSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const pupilGuardianSchema = new mongoose.Schema({
+  pupil: { type: String, default: null },
+  guardian: { type: String, default: null },
+  authorityMetadata: {
+    canAuthorizePickup: { type: Boolean, default: true },
+    canReceiveAlerts: { type: Boolean, default: true },
+    isEmergencyContact: { type: Boolean, default: true },
+    custodyDocumentationRef: { type: String, default: null }
+  },
   id: { type: String, required: true, unique: true },
   pupilId: { type: String, required: true, ref: 'Pupil', index: true },
   guardianId: { type: String, required: true, ref: 'Guardian', index: true },
@@ -232,6 +297,9 @@ const correctionRequestSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const cardSchema = new mongoose.Schema({
+  pupil: { type: String, default: null },
+  tokenHash: { type: String, default: null },
+  tokenReference: { type: String, default: null },
   id: { type: String, required: true, unique: true },
   pupilId: { type: String, required: true, ref: 'Pupil', index: true },
   cardToken: { type: String, required: true, unique: true, index: true }, // Random, non-meaningful token (no PII)
@@ -243,6 +311,9 @@ const cardSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const campusSchema = new mongoose.Schema({
+  school: { type: String, default: 'SCH-001', trim: true },
+  addressReference: { type: String, default: '' },
+  timezoneOverride: { type: String, default: null },
   id: { type: String, required: true, unique: true, trim: true },
   name: { type: String, required: true, trim: true },
   code: { type: String, required: true, unique: true, uppercase: true, trim: true },
@@ -264,6 +335,8 @@ const schoolClassSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const deviceSchema = new mongoose.Schema({
+  managedDeviceIdentifier: { type: String, default: null },
+  lastSeen: { type: Date, default: Date.now },
   id: { type: String, required: true, unique: true, trim: true }, // e.g. DEV-001
   name: { type: String, required: true, trim: true },
   type: { type: String, enum: ['terminal', 'handheld', 'tablet', 'kiosk'], default: 'terminal' },
@@ -345,6 +418,8 @@ const securityAlertSchema = new mongoose.Schema({
   acknowledgedBy: { type: String, default: null }
 }, { timestamps: true });
 
+const School = mongoose.model('School', schoolSchema);
+const StaffUser = mongoose.model('StaffUser', userSchema);
 const EscalationContact = mongoose.model('EscalationContact', escalationContactSchema);
 const Card = mongoose.model('Card', cardSchema);
 const Guardian = mongoose.model('Guardian', guardianSchema);
@@ -354,8 +429,109 @@ const SchoolSetting = mongoose.model('SchoolSetting', schoolSettingSchema);
 const SecurityIncident = mongoose.model('SecurityIncident', securityIncidentSchema);
 const SecurityAlert = mongoose.model('SecurityAlert', securityAlertSchema);
 
+const DATA_CLASS_RULES = {
+  School: {
+    description: 'School institutional identity, operational policies, timezone, and notification settings',
+    retentionDays: 2555,
+    retentionPolicy: 'Permanent institutional setting; retained for duration of school operation plus 7 years audit trail.',
+    accessRoles: ['admin'],
+    readRoles: ['admin', 'manager', 'viewer'],
+    minimizationRules: 'Institutional metadata only; no child or parent PII allowed.'
+  },
+  Campus: {
+    description: 'Campus facility details, gates, address references, and timezone overrides',
+    retentionDays: 2555,
+    retentionPolicy: 'Retained while campus is operational; archived upon campus closure.',
+    accessRoles: ['admin'],
+    readRoles: ['admin', 'manager', 'viewer', 'guardian'],
+    minimizationRules: 'Physical gate and campus infrastructure references only.'
+  },
+  Pupil: {
+    description: 'Enrolled pupil school record, classroom, photograph reference, and status',
+    retentionDays: 2555,
+    retentionPolicy: 'Retained for active enrollment period plus statutory educational record retention (7 years post-graduation/withdrawal).',
+    accessRoles: ['admin', 'manager'],
+    readRoles: ['admin', 'manager', 'viewer', 'guardian'],
+    minimizationRules: 'School ID, name, classroom, photo reference, status; full pupil record must NEVER be copied into logs or notification tables.'
+  },
+  Guardian: {
+    description: 'Verified guardian identity, verified contact channels, consent, and preferences',
+    retentionDays: 2555,
+    retentionPolicy: 'Retained while linked to an enrolled pupil, purged 7 years after last linked pupil departs.',
+    accessRoles: ['admin', 'manager'],
+    readRoles: ['admin', 'manager', 'guardian'],
+    minimizationRules: 'Name, verified phone/email, preferences only; access strictly scoped to linked pupils.'
+  },
+  PupilGuardian: {
+    description: 'Pupil-to-guardian linking, relationship, authority metadata, and verification status',
+    retentionDays: 2555,
+    retentionPolicy: 'Retained while pupil relationship is active plus statutory custody/educational retention.',
+    accessRoles: ['admin'],
+    readRoles: ['admin', 'manager', 'guardian'],
+    minimizationRules: 'Pupil and guardian identifier references, relationship, legal authority metadata.'
+  },
+  PickupContact: {
+    description: 'Authorized pickup contacts, verification references, effective dates, and permission types',
+    retentionDays: 365,
+    retentionPolicy: 'Active during validity window; one-time permissions expire upon pupil departure; archived records purged after 1 year.',
+    accessRoles: ['admin', 'manager'],
+    readRoles: ['admin', 'manager', 'guardian'],
+    minimizationRules: 'Name, relationship, verification data/reference, effective date window; one-time permissions expire immediately after departure.'
+  },
+  Card: {
+    description: 'PVC credential random non-meaningful token hash and reference, issue/revoke timestamps, and status',
+    retentionDays: 365,
+    retentionPolicy: 'Active while card is assigned; revoked/replaced card tokens retained for 1 year for audit and scan reconciliation.',
+    accessRoles: ['admin', 'manager'],
+    readRoles: ['admin', 'manager'],
+    minimizationRules: 'Cryptographically random token hash/reference without encoding pupil name, date of birth, or PII.'
+  },
+  StaffUser: {
+    description: 'Staff operator accounts, roles, assigned campus, status, and authentication metadata',
+    retentionDays: 2555,
+    retentionPolicy: 'Retained during employment tenure plus 7 years audit trail.',
+    accessRoles: ['admin'],
+    readRoles: ['admin', 'manager'],
+    minimizationRules: 'Staff identity, role, campus scope, authentication metadata with salted hashes; passwords never stored in plaintext.'
+  },
+  Device: {
+    description: 'Managed terminal/scanner device identifier, assigned staff/campus, status, and last seen',
+    retentionDays: 730,
+    retentionPolicy: 'Retained while hardware is active; decommissioned/lost devices retained 2 years for security audit.',
+    accessRoles: ['admin'],
+    readRoles: ['admin', 'manager'],
+    minimizationRules: 'Hardware identifier, campus/gate assignment, lock status; remote revocation on compromise.'
+  },
+  AttendanceEvent: {
+    description: 'Arrival, departure, manual entry, and correction records with UTC timestamps, actor, and verification',
+    retentionDays: 365,
+    retentionPolicy: 'Retained for active academic year (default 365 days) before administrative archive/purge.',
+    accessRoles: ['admin', 'manager'],
+    readRoles: ['admin', 'manager', 'viewer', 'guardian'],
+    minimizationRules: 'Pupil identifier reference, event type, UTC timestamps, actor, device, campus, collector, verification method; original events preserved via non-destructive corrections.'
+  },
+  Notification: {
+    description: 'Guardian dispatch records, channel, provider reference, timestamps, and delivery status',
+    retentionDays: 90,
+    retentionPolicy: 'Retained for 90 days for delivery verification and SLA reporting, then automatically purged.',
+    accessRoles: ['admin', 'manager'],
+    readRoles: ['admin', 'manager', 'guardian'],
+    minimizationRules: 'Minimal entity references (eventId, pupilId, guardianName, recipient, channel, status); NEVER copy entire pupil record or addresses into notification rows.'
+  },
+  AuditEntry: {
+    description: 'Immutable security and administrative audit trail with actor, action, object, timestamp, reason, and before/after references',
+    retentionDays: 730,
+    retentionPolicy: 'Retained for 2 years (730 days) to comply with educational safety and data privacy compliance regulations.',
+    accessRoles: ['admin'],
+    readRoles: ['admin'],
+    minimizationRules: 'Actor, action, object reference, timestamp, reason, before/after diff references; NEVER copy entire pupil record into audit log entries.'
+  }
+};
+
 module.exports = {
+  School,
   User,
+  StaffUser,
   Pupil,
   PickupRequest,
   PickupContact,
@@ -374,5 +550,6 @@ module.exports = {
   NotificationTemplate,
   EscalationContact,
   SecurityIncident,
-  SecurityAlert
+  SecurityAlert,
+  DATA_CLASS_RULES
 };

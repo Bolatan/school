@@ -8,7 +8,10 @@ const { parse } = require('csv-parse/sync');
 const XLSX = require('xlsx');
 
 const {
+  School,
   User,
+  StaffUser,
+  DATA_CLASS_RULES,
   Pupil,
   PickupRequest,
   PickupContact,
@@ -1318,6 +1321,8 @@ app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) 
 
     const attendanceDeleted = await AttendanceEvent.deleteMany({ timestamp: { $lt: attendanceCutoff } });
     const auditDeleted = await AuditEntry.deleteMany({ createdAt: { $lt: auditCutoff } });
+    const notifCutoff = new Date(now - ((cfg && cfg.notificationRetentionDays) || 90) * 24 * 60 * 60 * 1000);
+    const notifDeleted = await Notification.deleteMany({ createdAt: { $lt: notifCutoff } });
 
     // Update lastPurgedAt in retention settings
     if (setting) {
@@ -1340,6 +1345,8 @@ app.post('/api/admin/retention/purge', requireAuth(['admin']), async (req, res) 
       purged: {
         attendanceRecords: attendanceDeleted.deletedCount,
         auditEntries: auditDeleted.deletedCount,
+        notifications: notifDeleted.deletedCount,
+
         attendanceCutoff: attendanceCutoff.toISOString(),
         auditCutoff: auditCutoff.toISOString()
       }
@@ -4412,6 +4419,7 @@ app.get('/api/compliance/processors', requireAuth(['admin', 'manager']), async (
       dataProcessors: recipients,
       dataMinimizationNotice: "Gatewise collects and processes only the minimum data necessary for safe pupil arrival and dismissal. Biometric data and precise GPS locations are strictly excluded.",
       dataRetentionPolicy: "Standard records retained in compliance with statutory pupil safety regulations; expired offline queues automatically purged after 24 hours.",
+      dataClassRules: DATA_CLASS_RULES,
       scopeExclusions: [
         "WhatsApp until provider, opt-in, template, and local rules are settled",
         "NFC or biometric identification",
@@ -4419,6 +4427,20 @@ app.get('/api/compliance/processors', requireAuth(['admin', 'manager']), async (
         "Transport/bus tracking, payments, grades, messaging feeds, and learning-management features",
         "Complex multi-tenant analytics and third-party integrations"
       ]
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// Endpoint to retrieve data class governance, retention policies, and role access scoping
+app.get('/api/compliance/data-classes', requireAuth(['admin', 'manager', 'viewer']), async (req, res) => {
+  try {
+    res.json({
+      ok: true,
+      dataClasses: DATA_CLASS_RULES,
+      dataMinimizationPrinciple: 'Avoid copying entire pupil records into logs or notification tables. Apply retention and access rules to each data class.'
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
